@@ -159,7 +159,8 @@ def main(variants_tsv, min_cost, out):
         kind, cost, homo, shown, _ = line.rstrip("\n").split("\t")
         if kind != "accent" or homo == "1" or int(cost) < min_cost:
             continue
-        forms = [(f.rsplit(" (", 1)[0], int(f.rsplit(" (", 1)[1][:-1])) for f in shown.split(" | ")]
+        # keyed after normalize_spelling, which writes ``æ`` as ``ae`` first
+        forms = [(f.rsplit(" (", 1)[0].replace("æ", "ae"), int(f.rsplit(" (", 1)[1][:-1])) for f in shown.split(" | ")]
         table.update(rewrites(forms))
     doc = "Built by 06_hotfixes/07_build_accent_spellings.py: lowercase minority spelling -> canonical form."
     Path(out).write_text(json.dumps({"_doc": doc, "rewrites": dict(sorted(table.items()))}, ensure_ascii=False, indent=0) + "\n",

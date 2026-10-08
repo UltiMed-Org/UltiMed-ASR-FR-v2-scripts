@@ -774,6 +774,8 @@ def normalize_compounds(text: str) -> str:
 # - ``oe`` for the ``œ`` ligature, everywhere (``oeil`` 10.7k against ``œil`` 1.5k,
 #   ``oedème`` 4.4k against 2.7k; ``cœur`` and ``œsophage`` were the majority but one
 #   rule for every word beats a per-word choice nobody can remember).
+# - ``ae`` for the ``æ`` ligature too (author's choice 2026-10-08: the model should never
+#   write ``æ``; 2.7k labels, ``nævus`` 1.4k, ``cæcum``, ``prævia``, ``melæna``).
 # - ``aiguë`` (28.4k) over ``aigüe`` (1.4k), same for ``subaiguë``, ``contiguë``,
 #   ``ambiguïté``... (the pre-1990 spelling, the corpus majority). ``Argüelles`` (a name)
 #   is left alone because ``güe`` must end the word.
@@ -786,6 +788,8 @@ def normalize_compounds(text: str) -> str:
 _SPELLING_RULES = (
     (re.compile("œ"), "oe"),
     (re.compile("Œ"), "Oe"),
+    (re.compile("æ"), "ae"),
+    (re.compile("Æ"), "Ae"),
     (re.compile(r"güe(s?)\b"), r"guë\1"),
     (re.compile(r"güité"), "guïté"),
     (re.compile(r"\b([Cc]omptes?)-(rendus?)\b"), r"\1 \2"),

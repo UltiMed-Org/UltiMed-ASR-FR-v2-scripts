@@ -253,6 +253,7 @@ def test_spelling() -> None:
         ("Mutation du gene JAK2, colon droit, semi-colon. Docteur Genes.", "Mutation du gène JAK2, côlon droit, semi-colon. Docteur Genes."),
         ("Scannographique, shampoing, 30 paquets années, 1 paquet-années.", "Scanographique, shampooing, 30 paquets-année, 1 paquet-année."),
         ("50 gray, 2,5 gray, 1,8 gray, 1 gray.", "50 grays, 2,5 grays, 1,8 gray, 1 gray."),
+        ("Nævus du cæcum, placenta prævia, Æ.", "Naevus du caecum, placenta praevia, Ae."),
     ])
     print("test_spelling: OK")
 
