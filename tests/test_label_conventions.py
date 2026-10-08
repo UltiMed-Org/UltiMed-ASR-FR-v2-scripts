@@ -18,7 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "utils"))
 from label_conventions import (  # noqa: E402
     DrugCaser, apply_label_conventions, default_drug_caser, expand_titles, normalize_clock,
     normalize_accents, normalize_compounds, normalize_dates, normalize_quantities, normalize_spelling, normalize_staging, normalize_sutures, restore_tts_accents,
-    parse_french_number,
+    parse_french_number, normalize_compound_spellings, normalize_official_names, normalize_non, normalize_ordinals,
+    lowercase_eponym_nouns, normalize_latin_names,
 )
 
 
@@ -226,6 +227,10 @@ def test_spelling() -> None:
         ("Bêta-bloquants, bêtabloquant, bêta bloqueur.", "Bétabloquants, bétabloquant, bétabloqueur."),
         ("Anévrysme, urèthre, sténose uréthrale, périuréthral.", "Anévrisme, urètre, sténose urétrale, périurétral."),
         ("A surveiller. A jeun. A l'examen, A renouveler.", "À surveiller. À jeun. À l'examen, A renouveler."),
+        ("Douleur aigue, pancréatite suraigues, un sénior, sterno-cléïdo, la tete, les genès.",
+         "Douleur aiguë, pancréatite suraiguës, un senior, sterno-cléido, la tête, les gènes."),
+        # téter: the bébé tète, kept.
+        ("Le bébé tète bien.", "Le bébé tète bien."),
         # The verb avoir, mid-sentence, ambiguous: unchanged.
         ("A présenté une fièvre. A bien toléré. A encore mal. Il A voir.",
          "A présenté une fièvre. A bien toléré. A encore mal. Il A voir."),
@@ -293,6 +298,77 @@ def test_staging() -> None:
     print("test_staging: OK")
 
 
+def test_compound_spellings() -> None:
+    table = {"gastroentérologie": "gastro-entérologie", "tep scanner": "TEP-scanner",
+             "transsphénoïdale": "trans-sphénoïdale", "sous costale": "sous-costale",
+             "écho doppler": "écho-doppler", "pro bnp": "proBNP", "adn-polymérase": "adn polymérase"}
+    check(lambda t: normalize_compound_spellings(t, table), [
+        ("Gastroentérologie. Un TEP scanner, un Tep scanner, voie transsphénoïdale.",
+         "Gastro-entérologie. Un TEP-scanner, un TEP-scanner, voie trans-sphénoïdale."),
+        ("Voie sous costale, l'écho doppler, d'écho doppler, l'ADN-polymérase.",
+         "Voie sous-costale, l'écho-doppler, d'écho-doppler, l'ADN polymérase."),
+        # Part of a longer hyphen chain or a name with digits: untouched.
+        ("un super-tep scanner, le pro bnp2", "un super-tep scanner, le pro bnp2"),
+        ("NT pro BNP, Pro BNP", "NT proBNP, ProBNP"),
+    ])
+    # The shipped table: idempotent through the whole pipeline.
+    for canon in ("gastro-entérologie", "trans-sphénoïdale", "sous-costale", "check-list", "post-partum"):
+        assert apply_label_conventions(canon) == canon, (canon, apply_label_conventions(canon))
+    assert apply_label_conventions("Une gastroentérologie, un postpartum, une checklist.") == \
+        "Une gastro-entérologie, un post-partum, une check-list."
+    print("test_compound_spellings: OK")
+
+
+def test_official_names() -> None:
+    check(normalize_official_names, [
+        ("NT pro BNP, NTproBNP, NT-ProBNP, LHRH, anti-SS-A, anti SSB", "NT-proBNP, NT-proBNP, NT-proBNP, LH-RH, anti-SSA, anti-SSB"),
+        ("HLA B27, PDL1, PD-L 1, PD1, PI3K, PIK3CA", "HLA-B27, PD-L1, PD-L1, PD-1, PI3K, PIK3CA"),
+    ])
+    print("test_official_names: OK")
+
+
+def test_non() -> None:
+    check(normalize_non, [
+        ("Un non fumeur, le non respect, des non-répondeurs, un taux de non réponse.",
+         "Un non-fumeur, le non-respect, des non-répondeurs, un taux de non-réponse."),
+        ("Patiente non-fumeuse, lymphome non-hodgkinien, non significatif, non seulement.",
+         "Patiente non fumeuse, lymphome non hodgkinien, non significatif, non seulement."),
+    ])
+    print("test_non: OK")
+
+
+def test_ordinals() -> None:
+    check(normalize_ordinals, [
+        ("Au 3e percentile, du 2e au 5e jour, la 1re côte, 1ère fois.",
+         "Au troisième percentile, du deuxième au cinquième jour, la première côte, première fois."),
+        ("1er trimestre. Le 1er mai, du 1er au 5 juin, 10e jour, 12ème semaine, 15e.",
+         "Premier trimestre. Le 1er mai, du 1er au 5 juin, dixième jour, 12e semaine, 15e."),
+        ("2,5e, C2e, 4ème et 8èmes", "2,5e, C2e, quatrième et huitièmes"),
+    ])
+    print("test_ordinals: OK")
+
+
+def test_eponym_nouns() -> None:
+    check(lowercase_eponym_nouns, [
+        ("Un écho-Doppler, un Holter ECG, l'effet Doppler. Doppler normal.",
+         "Un écho-doppler, un holter ECG, l'effet Doppler. Doppler normal."),
+    ])
+    print("test_eponym_nouns: OK")
+
+
+def test_latin_names() -> None:
+    check(normalize_latin_names, [
+        ("PCR herpes simplex, un herpes labial, virus Herpès simplex, Herpes zoster.",
+         "PCR Herpes simplex, un herpès labial, virus Herpes simplex, Herpes zoster."),
+        ("Streptococcus pyogènes, germes pyogenes, larves strongyloides, Strongyloïdes stercoralis.",
+         "Streptococcus pyogenes, germes pyogènes, larves strongyloïdes, Strongyloides stercoralis."),
+        ("Des anopheles femelles, Anophèles gambiae. Herpès récidivant.",
+         "Des anophèles femelles, Anopheles gambiae. Herpès récidivant."),
+        ("un herpes iris, un herpes plus étendu", "un herpès iris, un herpès plus étendu"),
+    ])
+    print("test_latin_names: OK")
+
+
 def test_all() -> None:
     raw = ("M. Dupont prend du DOLIPRANE à 14h30 depuis le quinze mars deux mille vingt, "
            "deux comprimés de cinq cents milligrammes au petit déjeuner.")
@@ -327,5 +403,11 @@ if __name__ == "__main__":
     test_staging()
     test_drug_caser()
     test_accents()
+    test_compound_spellings()
+    test_official_names()
+    test_non()
+    test_ordinals()
+    test_eponym_nouns()
+    test_latin_names()
     test_all()
     test_generator_parse()

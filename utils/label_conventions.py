@@ -59,10 +59,22 @@ rewrites the minority spellings to it:
   -> ``postopératoire``, ``extra hépatiques`` -> ``extrahépatiques``, ``abdomino-pelvien``
   -> ``abdominopelvien``, but ``gastro-entérologie`` / ``anti-inflammatoire`` stay;
   2026-10-08, was "glue a split prefix, hyphen before a vowel" since 2026-09-28).
+- **Compound spellings** (``normalize_compound_spellings``, 2026-10-08). One form per
+  compound the rule above cannot decide, from ``compound_spellings.json`` built by
+  ``06_hotfixes/08_build_compound_spellings.py``: ``gastroentérologie`` ->
+  ``gastro-entérologie``, ``transsphénoïdale`` -> ``trans-sphénoïdale``, ``sous costale``
+  -> ``sous-costale``, ``tep scanner`` -> ``TEP-scanner``. Then the official lab names
+  (``normalize_official_names``: ``NT-proBNP``, ``PD-L1``, ``HLA-B27``), ``non`` hyphenated
+  before a noun only (``normalize_non``: ``un non-fumeur``, ``patiente non fumeuse``),
+  ordinals in words up to ``dixième`` (``normalize_ordinals``: ``3e`` -> ``troisième``,
+  ``le 1er mai`` stays), ``doppler`` / ``holter`` lowercase (``lowercase_eponym_nouns``)
+  and Latin names Latin in a binomial only (``normalize_latin_names``: ``Herpes
+  simplex``, ``un herpès``).
 - **Spelling variants** (``normalize_spelling``). ``œ`` -> ``oe`` everywhere (``cœur`` ->
   ``coeur``), ``aigüe`` -> ``aiguë``, ``compte-rendu`` -> ``compte rendu``,
   ``bêta-bloquant`` / ``bêtabloquant`` -> ``bétabloquant``, ``anévrysme`` -> ``anévrisme``,
-  ``urèthre`` / ``uréthral`` -> ``urètre`` / ``urétral``, and a sentence-initial ``A``
+  ``urèthre`` / ``uréthral`` -> ``urètre`` / ``urétral``, ``aigue`` -> ``aiguë``,
+  ``sénior`` -> ``senior``, and a sentence-initial ``A``
   before an infinitive -> ``À`` (``A surveiller`` -> ``À surveiller``). Added 2026-09-28 from an
   inference sweep of val/test, where these pairs were among the most frequent diffs.
 - **Accent variants** (``normalize_accents``, 2026-10-08). One accent spelling per word
@@ -615,7 +627,7 @@ _DIGRAPHS = frozenset({"ai", "au", "ei", "eu", "oi", "ou", "oe"})
 _NEVER_GLUED = frozenset("sous sus sur contre non demi semi mi".split())
 _NOUN_PREFIXES = frozenset({"post", "pré", "per"})
 _GLUED_NOUNS = frozenset("""prééclampsie préexcitation précharge postcharge postcure prémédication
-    préimplantation prémutation présaturation""".split())
+    préimplantation prémutation présaturation posthypophyse préalbumine préalbuminémie""".split())
 _NOUN_END = re.compile(r"(?:ment|tion|sion|ie|age|ure|ence|ance|isme)s?$")
 _ADJ_END = re.compile(r"(?:ique|oire|al|aux|ale|ien|ienne|if|ive|é|ée|ant|ante|aire|eux|euse|el|elle"
                       r"|ile|in|ine|ide|u|ue|i|is)s?$")
@@ -718,6 +730,12 @@ _SPELLING_RULES = (
     (re.compile(r"([Aa])névrysm"), r"\1névrism"),
     (re.compile(r"([Uu])réthr"), r"\1rétr"),
     (re.compile(r"([Uu])rèthr"), r"\1rètr"),
+    # 2026-10-08, typos the v2 accent audit found (``tète`` is the verb téter, kept).
+    (re.compile(r"\b(\w*(?:[Aa]ig|[Cc]ontig|[Aa]mbig|[Ee]xig))ue(s?)\b"), r"\1uë\2"),
+    (re.compile(r"\b([Ss])énior(s?)\b"), r"\1enior\2"),
+    (re.compile(r"cléïdo"), "cléido"),
+    (re.compile(r"\b([Tt])ete(s?)\b"), r"\1ête\2"),
+    (re.compile(r"\b([Gg])enès\b"), r"\1ènes"),
 )
 
 
@@ -740,6 +758,180 @@ def normalize_spelling(text: str) -> str:
         text = pattern.sub(repl, text)
     text = _a_grave(text)
     return text
+
+
+# ---------------------------------------------------------------------------
+# Compound spellings, official names, ``non``, ordinals, eponyms, Latin
+# (author's choices 2026-10-08, from the v2 variant audit)
+# ---------------------------------------------------------------------------
+
+COMPOUND_SPELLINGS_PATH = Path(__file__).resolve().parent / "compound_spellings.json"
+
+
+@lru_cache(maxsize=1)
+def _compound_table() -> dict[str, str]:
+    return json.loads(COMPOUND_SPELLINGS_PATH.read_text(encoding="utf-8"))["rewrites"]
+
+
+def _transfer_case(form: str, canon: str) -> str:
+    """``canon`` with the letter case of ``form`` (same letters, other separators):
+    ``Gastroentérologie`` + ``gastro-entérologie`` -> ``Gastro-entérologie``. A canonical
+    with capitals of its own (``TEP-scanner``, ``proBNP``) is kept as is."""
+    if canon != canon.lower():
+        return _cap(canon) if form[0].isupper() else canon
+    letters = iter(c for c in form if c not in " -")
+    return "".join(next(letters) if c not in " -" else c for c in canon)
+
+
+def normalize_compound_spellings(text: str, table: dict[str, str] | None = None) -> str:
+    """One spelling per compound the labels wrote several ways, from ``compound_spellings.json``
+    (``06_hotfixes/08_build_compound_spellings.py``): ``gastroentérologie`` ->
+    ``gastro-entérologie``, ``transsphénoïdale`` -> ``trans-sphénoïdale``, ``sous costale``
+    -> ``sous-costale``, ``tep scanner`` -> ``TEP-scanner``, ``l'échodoppler`` ->
+    ``l'écho-doppler``. Only the forms the audit saw are rewritten, the longest first (up to
+    four words). Idempotent."""
+    table = _compound_table() if table is None else table
+    words = list(WORD_RE.finditer(text))
+    out, last, i = [], 0, 0
+    while i < len(words):
+        start = words[i].start()
+        if start and (text[start - 1] == "-" or text[start - 1].isdigit()):
+            i += 1
+            continue
+        for n in range(min(4, len(words) - i), 0, -1):
+            j = i + n - 1
+            if any(text[words[k].end():words[k + 1].start()] not in (" ", "-") for k in range(i, j)):
+                continue
+            end = words[j].end()
+            # Not a piece of a longer hyphen chain or of a name with digits (``PD-L1``).
+            if text[end:end + 1].isdigit() or (text[end:end + 1] == "-" and text[end + 1:end + 2].isalnum()):
+                continue
+            form = text[start:end]
+            canon = table.get(form.lower())
+            if canon is not None:
+                out.append(text[last:start] + _transfer_case(form, canon))
+                last, i = end, j
+                break
+        i += 1
+    return "".join(out) + text[last:]
+
+
+# Lab names with digits or capitals in the middle, the official forms (the variant
+# audit cannot key them: its words drop digits).
+_OFFICIAL_RULES = (
+    (re.compile(r"\b[Nn][Tt][- ]?[Pp]ro[- ]?(?:BNP|bnp)\b"), "NT-proBNP"),
+    (re.compile(r"\bLH[- ]?RH\b"), "LH-RH"),
+    (re.compile(r"\b([Aa]nti)[- ]?SS-?([AB])\b"), r"\1-SS\2"),
+    (re.compile(r"\bHLA[- ]?(B|DR|DQ)[- ]?(\d{1,2})\b"), r"HLA-\1\2"),
+    (re.compile(r"\bPD[- ]?L[- ]?([12])\b"), r"PD-L\1"),
+    (re.compile(r"\bPD[- ]?1\b"), "PD-1"),
+    (re.compile(r"\bPI[- ]?3[- ]?K\b"), "PI3K"),
+)
+
+
+def normalize_official_names(text: str) -> str:
+    """``NT pro BNP`` -> ``NT-proBNP``, ``LHRH`` -> ``LH-RH``, ``anti-SS-A`` -> ``anti-SSA``,
+    ``HLA B27`` -> ``HLA-B27``, ``PDL1`` -> ``PD-L1``, ``PD1`` -> ``PD-1``. Idempotent."""
+    for pattern, repl in _OFFICIAL_RULES:
+        text = pattern.sub(repl, text)
+    return text
+
+
+# ``non`` before a noun is hyphenated, before an adjective it is spaced (the dictionary
+# rule): ``un non-fumeur``, ``le non-respect``, ``un taux de non-réponse``, but ``une
+# patiente non fumeuse``, ``un lymphome non hodgkinien``. A noun is told by the word
+# before ``non``: a determiner, or ``de`` before a noun-looking word.
+_DETERMINERS = frozenset("""le la les un une des du ce cet cette ces son sa ses leur leurs mon ma mes
+    notre nos votre vos aux au""".split())
+_NOT_AFTER_NON = frozenset("""seulement plus pas loin sans si que pour de du des la le les et ou ni à au aux
+    en avec par sur dans une un ce cette ces il elle ils elles on est sont moins mais""".split())
+_NON_RE = re.compile(r"\b([Nn]on)[- ](?=([^\W\d_]{3,}))")
+_WORD_BEFORE_RE = re.compile(r"([^\W\d_]+)\s+$")
+
+
+def normalize_non(text: str) -> str:
+    """``un non fumeur`` -> ``un non-fumeur``, ``patiente non-fumeuse`` -> ``patiente non
+    fumeuse``. Idempotent."""
+    def repl(m: re.Match) -> str:
+        nxt = m.group(2)
+        if nxt.lower() in _NOT_AFTER_NON:
+            return m.group(0)
+        before = _WORD_BEFORE_RE.search(text[max(0, m.start() - 30):m.start()])
+        prev = before.group(1).lower() if before else ""
+        noun = prev in _DETERMINERS or (prev == "de" and _is_noun(nxt))
+        return m.group(1) + ("-" if noun else " ")
+    return _NON_RE.sub(repl, text)
+
+
+# Ordinals in words up to ``dixième``, digits with ``e`` from 11 up (``3e percentile`` ->
+# ``troisième percentile``, ``15ème`` -> ``15e``). A first-of-month date keeps ``1er``
+# (``le 1er mai``, ``du 1er au 5 mai``): ``normalize_dates`` writes it.
+_ORDINALS = {2: "deuxième", 3: "troisième", 4: "quatrième", 5: "cinquième", 6: "sixième",
+             7: "septième", 8: "huitième", 9: "neuvième", 10: "dixième"}
+_ORDINAL_RE = re.compile(r"(?<![\w,.])(\d+)(er|re|ère|e|è|ème|eme)(s?)\b")
+_DATE_AFTER_RE = re.compile(rf"\s+(?:(?:au|et|ou)\s+\d{{1,2}}\s+)?{_MONTHS}\b")
+
+
+def normalize_ordinals(text: str) -> str:
+    """``3e`` -> ``troisième``, ``1re`` -> ``première``, ``1er trimestre`` -> ``premier
+    trimestre``, ``12ème`` -> ``12e``; ``le 1er mai`` stays. Idempotent."""
+    def repl(m: re.Match) -> str:
+        n, suffix, plural = int(m.group(1)), m.group(2), m.group(3)
+        if n == 1:
+            if suffix not in ("er", "re", "ère") or _DATE_AFTER_RE.match(text, m.end()):
+                return m.group(0)
+            word = "premier" if suffix == "er" else "première"
+        elif n in _ORDINALS and suffix not in ("er", "re", "ère"):
+            word = _ORDINALS[n]
+        elif n > 10 and suffix in ("e", "è", "ème", "eme"):
+            return f"{n}e{plural}"
+        else:
+            return m.group(0)
+        word += plural
+        return _cap(word) if at_sentence_start(text, m.start()) else word
+    return _ORDINAL_RE.sub(repl, text)
+
+
+# ``doppler`` / ``holter`` are common nouns, lowercase (``Doppler`` 12.7k against 13.1k,
+# ``Holter`` 2.3k against 1.1k); the physicist keeps his capital in ``effet Doppler``,
+# and a sentence start keeps its capital.
+_EPONYM_NOUN_RE = re.compile(r"(?<!effet )\b(Doppler|Holter)s?\b")
+
+
+def lowercase_eponym_nouns(text: str) -> str:
+    """``un écho-Doppler`` -> ``un écho-doppler``, ``un Holter ECG`` -> ``un holter ECG``;
+    ``l'effet Doppler`` and ``Doppler artériel.`` at a sentence start stay. Idempotent."""
+    return _EPONYM_NOUN_RE.sub(lambda m: m.group(0) if at_sentence_start(text, m.start())
+                               else m.group(0).lower(), text)
+
+
+# Latin in a binomial or when capitalized (a genus), French otherwise: ``Herpes
+# simplex``, ``Streptococcus pyogenes``, ``Strongyloides stercoralis``, ``Anopheles``,
+# but ``un herpès``, ``des germes pyogènes``, ``des larves strongyloïdes``, ``des
+# anophèles``. The genus words take a capital in a binomial; ``pyogenes`` is an epithet.
+_LATIN_FORMS = {"herpes": ("Herpes", "herpès"), "pyogenes": ("pyogenes", "pyogènes"),
+                "strongyloides": ("Strongyloides", "strongyloïdes"),
+                "anopheles": ("Anopheles", "anophèles")}
+_LATIN_RE = re.compile(r"\b(?i:herp[eè]s|pyog[eè]nes|strongylo[iï]des|anoph[eè]les)\b")
+# The epithets the corpus writes after them; not a pattern, ``herpès iris`` and ``herpès
+# virus`` are French.
+_EPITHET_RE = re.compile(r"\s+(?:simplex|zoster|gestationn?is|genitalis|labialis|e?s?terc?h?oralis"
+                         r"|fulleborni|gambiae|funestus|arabiensis|maculipennis|barbirostris|viridae|virinae)\b")
+_GENUS_BEFORE_RE = re.compile(r"\b[A-Za-z]+(?:us|um)\s+$")
+
+
+def normalize_latin_names(text: str) -> str:
+    """``herpes simplex`` -> ``Herpes simplex``, ``un herpes`` -> ``un herpès``,
+    ``Streptococcus pyogènes`` -> ``Streptococcus pyogenes``. Idempotent."""
+    def repl(m: re.Match) -> str:
+        w = m.group(0)
+        latin, french = _LATIN_FORMS[fold_key(w).lower()]
+        start = at_sentence_start(text, m.start())
+        binomial = bool(_EPITHET_RE.match(text, m.end()) or _GENUS_BEFORE_RE.search(text[:m.start()]))
+        if binomial or (w[0].isupper() and not start):
+            return _cap(latin) if start else latin
+        return _cap(french) if start else french
+    return _LATIN_RE.sub(repl, text)
 
 
 # ---------------------------------------------------------------------------
@@ -864,5 +1056,7 @@ def apply_label_conventions(text: str, tts_source: bool = False) -> str:
     if not tts_source:
         text = normalize_sutures(text)
     # Accents last: the drug caser restores the ANSM accents an INN choice removes.
-    text = normalize_accents(default_drug_caser()(normalize_spelling(normalize_compounds(text))))
+    text = normalize_official_names(normalize_compound_spellings(normalize_compounds(text)))
+    text = normalize_latin_names(lowercase_eponym_nouns(normalize_ordinals(normalize_non(text))))
+    text = normalize_accents(default_drug_caser()(normalize_spelling(text)))
     return restore_tts_accents(text) if tts_source else text
