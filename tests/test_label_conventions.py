@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "utils"))
 from label_conventions import (  # noqa: E402
     DrugCaser, apply_label_conventions, default_drug_caser, expand_titles, normalize_clock,
-    normalize_accents, normalize_compounds, normalize_dates, normalize_quantities, normalize_spelling, normalize_staging, normalize_sutures,
+    normalize_accents, normalize_compounds, normalize_dates, normalize_quantities, normalize_spelling, normalize_staging, normalize_sutures, restore_tts_accents,
     parse_french_number,
 )
 
@@ -239,6 +239,11 @@ def test_accents() -> None:
         ("Périndopril 5 mg, muscle sterno-cléïdo-mastoïdien.", "Perindopril 5 mg, muscle sterno-cléido-mastoïdien."),
         # Elided: the table holds the bare word only.
         ("Dose d'périndopril, l'Périndopril.", "Dose d'perindopril, l'Perindopril."),
+    ])
+    # The TTS text keeps the accents a label loses, never the reverse.
+    tts = {"perindopril": "périndopril"}
+    check(lambda t: restore_tts_accents(t, tts), [
+        ("Perindopril puis l'perindopril, défect.", "Périndopril puis l'périndopril, défect."),
     ])
     # Part of a longer word or a hyphenated compound: untouched.
     assert normalize_accents("antidefect, defect-like", table) == "antidefect, defect-like"

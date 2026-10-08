@@ -794,15 +794,41 @@ def normalize_accents(text: str, table: dict[str, str] | None = None) -> str:
     return _ACCENT_WORD_RE.sub(repl, text)
 
 
+def _n_accents(word: str) -> int:
+    return sum(unicodedata.category(c) == "Mn" for c in unicodedata.normalize("NFD", word))
+
+
+@lru_cache(maxsize=1)
+def _tts_accent_table() -> dict[str, str]:
+    """``canonical -> accented spelling`` for the accent rewrites that REMOVE accents."""
+    out: dict[str, str] = {}
+    for form, canon in _accent_table().items():
+        if _n_accents(form) > _n_accents(canon) and _n_accents(form) > _n_accents(out.get(canon, canon)):
+            out[canon] = form
+    return out
+
+
+def restore_tts_accents(text: str, table: dict[str, str] | None = None) -> str:
+    """Put back, for the TTS only, the accents ``normalize_accents`` removes from a label.
+
+    The labels write drug INNs without accents (``perindopril``), but voxtral reads an
+    unaccented ``e`` as a mute e ("peu-rindopril"), so the TTS text keeps the French
+    spelling it pronounces right. The written label is not touched.
+    """
+    return normalize_accents(text, _tts_accent_table() if table is None else table)
+
+
 def apply_label_conventions(text: str, tts_source: bool = False) -> str:
     """Every rewrite, titles first so ``M.`` is gone before sentence starts are judged,
     and dates before quantities so a spelled year is read as a year, not as a count.
 
-    ``tts_source=True`` is for a text the TTS already read (05 on the v1 sources): it
-    skips ``normalize_sutures``, the one rewrite voxtral does not speak identically.
+    ``tts_source=True`` is for a text the TTS reads (05 on the v1 sources): it skips
+    ``normalize_sutures``, the one rewrite voxtral does not speak identically, and keeps
+    the accents of drug INNs (``restore_tts_accents``).
     """
     text = normalize_staging(normalize_quantities(normalize_clock(normalize_dates(expand_titles(text)))))
     if not tts_source:
         text = normalize_sutures(text)
     # Accents last: the drug caser restores the ANSM accents an INN choice removes.
-    return normalize_accents(default_drug_caser()(normalize_spelling(normalize_compounds(text))))
+    text = normalize_accents(default_drug_caser()(normalize_spelling(normalize_compounds(text))))
+    return restore_tts_accents(text) if tts_source else text

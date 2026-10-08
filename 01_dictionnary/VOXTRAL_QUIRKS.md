@@ -164,3 +164,7 @@ mutually inconsistent transforms:
 - **`IV` is context-dependent.** `stade IV` / `type II` (Roman -> number) vs
   `en IV` (intraveineuse). If voxtral gets the raw form wrong in either context,
   the fix stays context-aware, not a blanket `IV` substitution.
+
+## Unaccented labels, accented TTS text (2026-10-08)
+
+The UltiMed v2 labels write drug INNs without accents (`perindopril`, `bevacizumab`, author's choice: the international spelling), but voxtral, like any French reader, says an unaccented `e` as a mute e ("peu-rindopril"). So the TTS text puts the accents back: `utils/label_conventions.restore_tts_accents`, the reverse of every accent rewrite that removes an accent, runs in the engine's source pass and in `apply_label_conventions(..., tts_source=True)`. Not probed by listening; it keeps the spelling v1 was synthesized from. Added with Claude Code.

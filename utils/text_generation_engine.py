@@ -59,6 +59,7 @@ from _pipeline_shared import (  # noqa: E402
     _text_hash,
     parse_asr_training_target,
 )
+from label_conventions import restore_tts_accents  # noqa: E402
 from voxtral_normalize import (  # noqa: E402
     append_jsonl_row,
     normalize_and_flag,
@@ -494,7 +495,8 @@ def generate_variants_for_term(
             if adapter.source_transform is not None
             else target
         )
-        source, residuals = normalize_and_flag(spoken)
+        # The label writes INNs unaccented (perindopril); the TTS reads the French spelling.
+        source, residuals = normalize_and_flag(restore_tts_accents(spoken))
         if residuals:
             # A unit symbol survived: an uncovered unit the TARGET LLM failed to
             # spell out. Fail-open (ship the normalized text) but log it to the
