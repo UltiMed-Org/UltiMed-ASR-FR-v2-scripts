@@ -185,6 +185,9 @@ def test_compounds() -> None:
         ("gastro-entérologie, intra oculaire, intra-utérin, auto-immune, anti-inflammatoire, radio-opaque",
          "gastro-entérologie, intraoculaire, intra-utérin, auto-immune, anti-inflammatoire, radio-opaque"),
         ("thoraco abdomino pelvienne, post traumatique, pré-éclampsie, cortico-sous-corticale", "thoracoabdominopelvienne, post-traumatique, prééclampsie, cortico-sous-corticale"),
+        # post / pré / per before a noun keep a space (author's choice 2026-10-08), not "postopération".
+        ("J5 post opération, post-chimiothérapie, pré-greffe, Post-traitement, per procédure, post-cure, pré-remplie, pré morbide",
+         "J5 post opération, post chimiothérapie, pré greffe, Post traitement, per procédure, postcure, préremplie, prémorbide"),
     ])
     assert normalize_compounds("un petit déjeune") == "un petit déjeune"
     # Latin, excluded prefixes, nouns, names, uppercase or short second parts.

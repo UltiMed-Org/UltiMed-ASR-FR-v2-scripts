@@ -594,6 +594,14 @@ _PETIT_DEJEUNER_RE = re.compile(r"\b([Pp]etits?) (déjeuners?)\b")
 # (the ones the audit found split), never before a conjunction or a preposition
 # (``intra et extra-hépatiques`` keeps its ``intra``). A bare ``-o`` pattern would glue
 # nouns: ``une radio thoracique``, ``chimio adjuvante``, ``placebo contrôlé``.
+#
+# ``post`` / ``pré`` / ``per`` before a NOUN mean "after / before / during X" and are
+# written with a space, author's choice 2026-10-08: ``post-chimiothérapie`` /
+# ``post chimiothérapie`` -> ``post chimiothérapie``, ``pré-greffe`` -> ``pré greffe``,
+# ``post opération`` stays (gluing gave non-words like ``postopération``). Before an
+# adjective they still glue (``postopératoire``, ``prémorbide``). A noun is told from an
+# adjective by its ending (``_is_noun``); the established glued nouns in ``_GLUED_NOUNS``
+# (``prééclampsie``, ``postcure``) glue as before.
 _PREFIXES = frozenset("""anti auto bi co endo extra hémi hyper hypo infra inter intra macro méta micro
     mini mono multi néo oligo para per péri poly post pré primo pro pseudo ré rétro sub supra
     trans tri ultra uni allo""".split())
@@ -605,6 +613,12 @@ _SPACED_COMBINING = ("abdomino|anatomo|antéro|brachio|broncho|cérébro|clinico
 _LATIN = frozenset({"post-partum", "per-partum", "ante-partum", "post-mortem", "post-abortum"})
 _DIGRAPHS = frozenset({"ai", "au", "ei", "eu", "oi", "ou", "oe"})
 _NEVER_GLUED = frozenset("sous sus sur contre non demi semi mi".split())
+_NOUN_PREFIXES = frozenset({"post", "pré", "per"})
+_GLUED_NOUNS = frozenset("""prééclampsie préexcitation précharge postcharge postcure prémédication
+    préimplantation prémutation présaturation""".split())
+_NOUN_END = re.compile(r"(?:ment|tion|sion|ie|age|ure|ence|ance|isme)s?$")
+_ADJ_END = re.compile(r"(?:ique|oire|al|aux|ale|ien|ienne|if|ive|é|ée|ant|ante|aire|eux|euse|el|elle"
+                      r"|ile|in|ine|ide|u|ue|i|is)s?$")
 _HYPHENATED_RE = re.compile(r"(?<![\w-])[^\W\d_]+(?:-[^\W\d_]+)+(?![\w-])")
 _SPACED_RE = re.compile(rf"\b((?i:{_SPACED_PREFIXES}|{_SPACED_COMBINING})) "
                         r"(?!(?:et|ou|ni|sur|de|du|des|à|en)\b)(?=([a-zà-ÿ][^\W\d_]{3,}))")
@@ -627,6 +641,25 @@ def _is_combining(part: str) -> bool:
     return low in _PREFIXES or (low.endswith("o") and len(low) >= 3 and low not in _NOT_COMBINING)
 
 
+def _is_noun(word: str) -> bool:
+    """Guess from the ending: ``chimiothérapie``, ``traitement``, ``greffe`` are nouns,
+    ``opératoire``, ``morbide``, ``remplie`` are not (unknown endings count as nouns).
+
+    >>> [_is_noun(w) for w in ("chimiothérapie", "traitement", "greffe", "opératoire", "remplie")]
+    [True, True, True, False, False]
+    """
+    low = word.lower()
+    if low in ("remplie", "remplies"):
+        return False
+    return bool(_NOUN_END.search(low)) or not _ADJ_END.search(low)
+
+
+def _spaced_noun(prefix: str, word: str) -> bool:
+    """True when ``prefix word`` keeps a space: ``post`` / ``pré`` / ``per`` before a noun."""
+    return (prefix.lower() in _NOUN_PREFIXES and _is_noun(word)
+            and (prefix + word).lower() not in _GLUED_NOUNS)
+
+
 def _glue_hyphenated(m: re.Match) -> str:
     word = m.group(0)
     if word.lower() in _LATIN:
@@ -637,7 +670,7 @@ def _glue_hyphenated(m: re.Match) -> str:
         # The second part must be a lowercase word of 3+ letters: "pro-BNP", "apo-E",
         # "co-a", "Marco-Polo" stay.
         if _is_combining(prev) and len(part) >= 3 and part.islower() and part not in _NEVER_GLUED:
-            out = _join(out, part)
+            out = out + " " + part if _spaced_noun(prev, part) else _join(out, part)
         else:
             out += "-" + part
     return out
@@ -647,11 +680,12 @@ def normalize_compounds(text: str) -> str:
     """``petit déjeuner`` -> ``petit-déjeuner``; prefix and combining-form compounds glued:
     ``post-opératoire`` / ``post opératoire`` -> ``postopératoire``, ``extra hépatiques`` ->
     ``extrahépatiques``, ``gastro-entérologie`` and ``anti-inflammatoire`` keep their
-    hyphen. Idempotent."""
+    hyphen, ``post-chimiothérapie`` -> ``post chimiothérapie`` (a noun). Idempotent."""
     text = _PETIT_DEJEUNER_RE.sub(r"\1-\2", text)
     # Only the space is consumed (the second word is a lookahead), so a chain like
     # "thoraco abdomino pelvienne" glues every pair in one pass.
-    text = _SPACED_RE.sub(lambda m: m.group(1) + _sep(m.group(1), m.group(2)), text)
+    text = _SPACED_RE.sub(lambda m: m.group(1) + (" " if _spaced_noun(m.group(1), m.group(2))
+                                                   else _sep(m.group(1), m.group(2))), text)
     return _HYPHENATED_RE.sub(_glue_hyphenated, text)
 
 
