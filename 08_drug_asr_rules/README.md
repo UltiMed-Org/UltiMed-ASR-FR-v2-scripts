@@ -144,6 +144,20 @@ A rule's end bound lets it fire right before an apostrophe, which real fixes nee
 uv run 08_drug_asr_rules/05_build_manual_rules.py
 ```
 
+### Label conventions as rules (`06_build_convention_fixes.py`, 2026-10-08)
+
+The UltiMed v2 labels follow one spelling per word (`utils/label_conventions.py`: glued prefix compounds like `postopératoire`, `thoracoabdominopelvien`, unaccented drug INNs like `perindopril`, dictionary accents like `artefact`). A model trained on the v1 labels, or one that still slips, writes the other forms, so the author asked for every fixed term to also be a regex rule. `06_build_convention_fixes.py` takes the hyphen and accent families of the label audit (`06_hotfixes/05_label_variant_audit.py`), runs each form through `apply_label_conventions`, and writes `convention_fixes.tsv` (`post-opératoire` -> `postopératoire`, `bévacizumab` -> `bevacizumab`). A form only becomes a rule when the conventions change nothing but hyphens, spaces or accents. A family is all or nothing: if the conventions keep one form as its own word (`débordé` next to `déborde`), none of its forms gets a rule, because the pattern ignores accents and would hit the kept word too. With `--labels`, every label is converted and any rule that still changes one is dropped (the audit forms are lowercased, so a rule could otherwise turn `METAVIR` into `Metavir`). `05_build_manual_rules.py` reads `manual_fixes.tsv` then `convention_fixes.tsv`, so a hand fix wins on the same pattern. Notations that need context (`à un mois` -> `à 1 mois`, `phase II` -> `phase 2`) stay in the conventions only.
+
+```bash
+uv run 08_drug_asr_rules/06_build_convention_fixes.py path/to/variants.tsv \
+    --labels 99_hf_release/data/NeMO_files/full.jsonl --labels 99_hf_release/data/NeMO_files/PARROT/full.jsonl
+uv run 08_drug_asr_rules/05_build_manual_rules.py
+```
+
+Caveat: the drug and term rules run after these and their replacements come from the v1 labels, so they can write an old spelling back (`bévacizumab`). Rebuild them on v2 labels.
+
+Written with Claude Code.
+
 ## Medical-term rules (`term_fix_rules.jsonl`, 2026-10-04)
 
 A second, separate rule file for the dictionary terms (`syndrome de Brugada`, `ostéophyte`, `craniopharyngiome`...), built by the same 01 + 02 with `--lexicon 01_dictionnary/original_dictionnary.jsonl`. It is kept apart from `drug_fix_rules.jsonl` on purpose: apply it after the drug rules, or not at all. Built with Claude Code by `term-pilot-round.py <pilot dir> 99` in the ultra repo, from every clip of the dictionary (534,338), PARHAF (43,431) and PARROT (1,549) subsets transcribed by UltiMed (int8 encoder) and base parakeet-ultra (w4a8), with the same guards as the drug rules: the correct labels of all splits (PARROT included), the 1M French Wikipedia sentences, and `--names`.
