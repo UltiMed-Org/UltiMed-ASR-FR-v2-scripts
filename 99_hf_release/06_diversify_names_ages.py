@@ -13,7 +13,7 @@ piled on a few values (``45 ans`` 22.9k against 125 for ``46 ans``, ``34 ans`` 2
 ``Girard`` and that a patient is 45. This rewrites both texts of a row (``text`` and
 ``asr_training_source``) the same way:
 
-- a surname from ``OVERUSED`` after a title (``Madame``, ``docteur``, ``Patient``), a
+- a surname from ``OVERUSED`` or ``AVOIDED`` after a title (``Madame``, ``docteur``, ``Patient``), a
   first name (``Léa Bernard``) or ``petit`` / ``petite`` / ``jeune`` becomes a surname drawn
   from ``surname_pool.tsv`` (the 1,000 most frequent INSEE surnames of people born
   1931-2000, frequency-weighted, accents taken from the corpus or the INSEE first-name
@@ -67,6 +67,10 @@ POOL = _HERE / "surname_pool.tsv"
 FIRST_POOL = _HERE / "first_name_pool.tsv"
 CATEGORIES = ("dictionary", "drugs", "acronyms")
 OVERUSED = ("Girard", "Lefèvre", "Bernard", "Lambert", "Petit", "Dubois", "Moreau")
+# Written unlike they are said (``Lefebvre`` is ``lefèvre``): the TTS cannot be trusted
+# with them, so they are replaced too and never drawn (author's choice 2026-10-08).
+AVOIDED = ("Lefebvre",)
+REPLACED = OVERUSED + AVOIDED
 # Adult ages said 6k times or more in the v2 corpus (a flat adult age is about 3.4k).
 OVERUSED_AGES = {22: 6053, 28: 10287, 29: 7328, 34: 20299, 38: 6372, 42: 7773, 45: 22880,
                  52: 12660, 55: 11616, 58: 19203, 62: 6284, 68: 10807, 72: 12772}
@@ -85,7 +89,7 @@ _TITLES = ("Monsieur", "Madame", "Mademoiselle", "docteur", "Docteur", "professe
            "Patient", "patient", "Patiente", "patiente", "petit", "petite", "jeune")
 # not first names: a capitalized word before the surname must be a title or a first name
 _NOT_FIRST = {"Le", "La", "Les", "De", "Du", "Des", "Et", "En", "Au", "Aux", "Un", "Une", "Claude"}
-_NAME_RE = re.compile(rf"\b([A-ZÉ][\wéèêëïîôç]+|{'|'.join(_TITLES)}) ({'|'.join(OVERUSED)})\b(?!-)")
+_NAME_RE = re.compile(rf"\b([A-ZÉ][\wéèêëïîôç]+|{'|'.join(_TITLES)}) ({'|'.join(REPLACED)})\b(?!-)")
 _PERSON = (r"(?:[Pp]atiente?|[Hh]omme|[Ff]emme|âgée?|[Ss]ujet|adulte|primipare|primigeste|multipare"
            r"|sportive?|fils|fille|soeur|frère|mère|père|épouse|mari|retraitée?|diabétique"
            r"|hypertendue?|fumeur|fumeuse|obèse|asthmatique|agricultrice|agriculteur|étudiante?"
@@ -211,7 +215,7 @@ def build_pool(insee: Path, first_names: Path | None, manifests: list[Path]) -> 
     lower_folded = Counter()
     for w, c in lower.items():
         lower_folded[_fold(w)] += c
-    overused = {_fold(n) for n in OVERUSED}
+    overused = {_fold(n) for n in REPLACED}
     pool = []
     for upper, count in counts.most_common():
         key = upper.lower()
@@ -270,7 +274,7 @@ def build_first_pool(first_names: Path, manifests: list[Path]) -> list[tuple[str
         kept = 0
         for name, counts in ranked:
             total = sum(counts.values())
-            if (name in OVERUSED_FIRST or name in OVERUSED or counts[sex] < 0.9 * total
+            if (name in OVERUSED_FIRST or name in REPLACED or counts[sex] < 0.9 * total
                     or lower[name.lower()] >= 20 or not re.fullmatch(r"[A-ZÉ][a-zéèêëïîôçâ]+(?:-[A-Z][a-zéèêëïîôçâ]+)?", name)):
                 continue
             pool.append((name, sex, counts[sex]))
