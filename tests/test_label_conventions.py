@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "utils"))
 from label_conventions import (  # noqa: E402
     DrugCaser, apply_label_conventions, default_drug_caser, expand_titles, normalize_clock,
-    normalize_accents, normalize_compounds, normalize_dates, normalize_quantities, normalize_spelling, normalize_staging, normalize_sutures, restore_tts_accents,
+    normalize_accents, normalize_compounds, normalize_dates, normalize_quantities, normalize_spelling, normalize_staging, normalize_roman, normalize_sutures, restore_tts_accents,
     parse_french_number, normalize_compound_spellings, normalize_official_names, normalize_non, normalize_ordinals,
     lowercase_eponym_nouns, normalize_latin_names,
 )
@@ -300,6 +300,21 @@ def test_staging() -> None:
     print("test_staging: OK")
 
 
+def test_roman() -> None:
+    check(normalize_roman, [
+        ("Atteinte des nerfs III, IV et VI.", "Atteinte des nerfs 3, 4 et 6."),
+        ("Mutation du facteur V Leiden, facteur VIIIc.", "Mutation du facteur 5 Leiden, facteur 8c."),
+        ("Fracture Garden IV, Le Fort I, Mobitz I.", "Fracture Garden 4, Le Fort 1, Mobitz 1."),
+        ("De l'angiotensine II, APACHE II, GP IIb IIIa.", "De l'angiotensine 2, APACHE 2, GP 2b 3a."),
+        ("Stades I, II ou III.", "Stades 1, 2 ou 3."),
+    ])
+    # letters, intravenous, kings, activated factor, ECG leads
+    for kept in ("rayons X", "chromosome X", "pénicilline V", "troponine I", "voriconazole IV",
+                 "Rifadine IV pendant", "Henri IV", "Louis XIII", "facteur Xa", "anti-Xa", "D-II"):
+        assert normalize_roman(kept) == kept, kept
+    print("test_roman: OK")
+
+
 def test_compound_spellings() -> None:
     table = {"gastroentérologie": "gastro-entérologie", "tep scanner": "TEP-scanner",
              "transsphénoïdale": "trans-sphénoïdale", "sous costale": "sous-costale",
@@ -413,6 +428,7 @@ if __name__ == "__main__":
     test_sutures_and_decimals()
     test_spelling()
     test_staging()
+    test_roman()
     test_drug_caser()
     test_accents()
     test_compound_spellings()

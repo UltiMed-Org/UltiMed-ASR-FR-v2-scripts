@@ -51,8 +51,11 @@ rewrites the minority spellings to it:
 - **Staging numbers** (``normalize_staging``). After ``stade``, ``grade``, ``type``,
   ``classe``, ``palier``, ``niveau``, ``phase`` or ``NYHA``, a Roman or spelled number becomes digits
   (``stade IIIb`` -> ``stade 3b``, ``palier deux`` -> ``palier 2``), the author's choice
-  (2026-09-28) over a corpus that mixed all three. Roman numerals elsewhere
-  (``angiotensine II``) stay.
+  (2026-09-28) over a corpus that mixed all three.
+- **Roman numerals** (``normalize_roman``). Elsewhere too, digits (author's choice
+  2026-10-08): ``nerf III`` -> ``nerf 3``, ``angiotensine II`` -> ``angiotensine 2``,
+  ``Garden IV`` -> ``Garden 4``. Kings, intravenous ``IV`` and letters (``rayons X``,
+  ``pénicilline V``) stay.
 - **Compounds** (``normalize_compounds``). ``petit déjeuner`` -> ``petit-déjeuner``
   (213 against 35, and the dictionary spelling of the noun), and prefix and
   combining-form compounds are glued unless a digraph would misread (``post-opératoire``
@@ -541,8 +544,7 @@ def _replace_suture(m: re.Match) -> str:
 # 0.6k / 0.7k, palier 0.8k / 5.0k / 0.5k "palier deux"), the same sound written three
 # ways. The author chose digits for all of them (2026-09-28): "stade 3", "grade 2b",
 # "type 1 et 2". ``phase`` joined on 2026-10-08 ("phase II" 222 times heard as "phase 2"
-# in a third of the corpus, the author chose digits). Only these words: a Roman numeral elsewhere is a name ("angiotensine
-# II", "APACHE II", "métaphase II", "Henri IV") and stays. Voxtral read every form the
+# in a third of the corpus, the author chose digits). Roman numerals elsewhere are ``normalize_roman``'s. Voxtral read every form the
 # same, so the TTS source gets the rewrite too.
 _STAGING_WORD = r"\b(?:[Ss]tades?|[Gg]rades?|[Tt]ypes?|[Cc]lasses?|[Pp]aliers?|[Nn]iveaux?|[Pp]hases?|NYHA)"
 # A Roman numeral (uppercase only: "civil" is valid Roman letters) with an optional
@@ -567,6 +569,55 @@ def normalize_staging(text: str) -> str:
     """``stade IIIb`` -> ``stade 3b``, ``palier deux`` -> ``palier 2``, ``grade I à II``
     -> ``grade 1 à 2``, ``classe III NYHA`` -> ``classe 3 NYHA``. Idempotent."""
     return _STAGING_RE.sub(lambda m: m.group(1) + _STAGE_TOKEN_RE.sub(_stage_token, m.group(2)), text)
+
+
+# Roman numerals outside the staging words, digits too (author's choice 2026-10-08: the
+# 2,999 labels with ``nerf III``, ``segment IV``, ``facteur VIII``, ``Garden IV``,
+# ``angiotensine II`` were heard as digits). A multi-letter numeral is always a number
+# (``II`` to ``XII``, sub-stage letter kept: ``IIb`` -> ``2b``) but for ``IV``, which is
+# also intravenous (``voriconazole IV``, ``Rifadine IV pendant``), and kings (``Henri
+# IV``). ``IV`` and the one-letter ``I`` / ``V`` / ``X`` are numbers only after a numbered
+# structure (``nerf``, ``facteur``) or a named classification (``Lefort I``, ``Garden
+# IV``), or inside a chain that a number starts (``III et IV``); elsewhere they are
+# letters (``rayons X``, ``pénicilline V``, ``troponine I``, ``chromosome X``).
+_ROMAN_HEADS = (r"(?:[Nn]erfs?|[Ss]egments?|[Ff]acteurs?|[Cc]omplexes?|[Zz]ones?|[Ss]ecteurs?|[Hh]orizons?"
+                r"|[Cc]ouches?|[Pp]hototypes?|[Dd]egrés?|[Cc]ollagènes?|[Aa]ngiotensine|[Tt]opoisomérases?"
+                r"|[Aa]ntithrombine|Garden|Lefort|Fort|Clark|Forrest|Bosniak|Mobitz|Tokyo|Chaussé|Billroth"
+                r"|Bethesda|Fuhrman|Carnegie|Richardson|Lang|Simpson|Gold|Chiari|Siewert|Piver|Hinchey"
+                r"|Mallampati|Bismuth|Broders|Cauchoix|Tyradz|Salter|Schatzker|Neer|Hunt|Fisher|Hurley"
+                r"|Ficat|Kellgren|Outerbridge|Gustilo|BI-RADS|ACR)")
+_ROMAN_KINGS = (r"(?:Henri|Louis|Charles|Napoléon|François|Philippe|Pie|Benoît|Jean-Paul|Élisabeth"
+                r"|Elizabeth|Édouard|Guillaume)")
+_ROMAN_MULTI = ("XII", "XI", "IX", "VIII", "VII", "VI", "III", "II")
+_ROMAN_ANY = r"(?:XII|XI|IX|VIII|VII|VI|IV|V|III|II|I|X)[a-d]?"
+_ROMAN_SEP = r"(?:\s*(?:-|/|à|et|ou|,)\s*)"
+# ``nerfs III, IV et VI``, ``Lefort I``, ``III et IV``, ``Henri IV``
+_ROMAN_RE = re.compile(
+    rf"(\b{_ROMAN_HEADS}\s+|\b{_ROMAN_KINGS}\s+)?(?<![-\w])({_ROMAN_ANY}(?:{_ROMAN_SEP}{_ROMAN_ANY})*)\b(?![-'’]\w)")
+_ROMAN_TOKEN_RE = re.compile(r"\b([IVX]+)([a-d]?)\b")
+
+
+def _roman(m: re.Match) -> str:
+    head, chain = m.group(1) or "", m.group(2)
+    tokens = _ROMAN_TOKEN_RE.findall(chain)
+    if re.match(_ROMAN_KINGS, head) or not head and not any(t in _ROMAN_MULTI for t, _ in tokens):
+        return m.group(0)
+    # ``facteur Xa`` (activated factor, as in ``anti-Xa``) is a name, not ``10a``
+    return head + _ROMAN_TOKEN_RE.sub(
+        lambda t: t.group(0) if t.group(0) == "Xa" else f"{roman_to_int(t.group(1))}{t.group(2)}", chain)
+
+
+def normalize_roman(text: str) -> str:
+    """``nerf III`` -> ``nerf 3``, ``facteur V Leiden`` -> ``facteur 5 Leiden``, ``Garden
+    IV`` -> ``Garden 4``, ``angiotensine II`` -> ``angiotensine 2``; ``rayons X``,
+    ``pénicilline V``, ``voriconazole IV``, ``Henri IV`` untouched. Idempotent.
+
+    >>> normalize_roman("Atteinte des nerfs III, IV et VI, fracture Garden IV, Lefort I, III et IV.")
+    'Atteinte des nerfs 3, 4 et 6, fracture Garden 4, Lefort 1, 3 et 4.'
+    >>> normalize_roman("Rayons X, pénicilline V, troponine I, voriconazole IV, Henri IV, GP IIb IIIa.")
+    'Rayons X, pénicilline V, troponine I, voriconazole IV, Henri IV, GP 2b 3a.'
+    """
+    return _ROMAN_RE.sub(_roman, text)
 
 
 # ---------------------------------------------------------------------------
@@ -1072,7 +1123,7 @@ def apply_label_conventions(text: str, tts_source: bool = False) -> str:
     ``normalize_sutures``, the one rewrite voxtral does not speak identically, and keeps
     the accents of drug INNs (``restore_tts_accents``).
     """
-    text = normalize_staging(normalize_quantities(normalize_clock(normalize_dates(expand_titles(text)))))
+    text = normalize_roman(normalize_staging(normalize_quantities(normalize_clock(normalize_dates(expand_titles(text))))))
     if not tts_source:
         text = normalize_sutures(text)
     # Accents last: the drug caser restores the ANSM accents an INN choice removes.
