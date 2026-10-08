@@ -236,6 +236,11 @@ def test_spelling() -> None:
          "A présenté une fièvre. A bien toléré. A encore mal. Il A voir."),
     ])
     assert normalize_spelling("Docteur Argüelles") == "Docteur Argüelles"
+    check(normalize_spelling, [
+        ("Mutation du gene JAK2, colon droit, semi-colon. Docteur Genes.", "Mutation du gène JAK2, côlon droit, semi-colon. Docteur Genes."),
+        ("Scannographique, shampoing, 30 paquets années, 1 paquet-années.", "Scanographique, shampooing, 30 paquets-année, 1 paquet-année."),
+        ("50 gray, 2,5 gray, 1,8 gray, 1 gray.", "50 grays, 2,5 grays, 1,8 gray, 1 gray."),
+    ])
     print("test_spelling: OK")
 
 
@@ -348,6 +353,13 @@ def test_official_names() -> None:
     check(normalize_official_names, [
         ("NT pro BNP, NTproBNP, NT-ProBNP, LHRH, anti-SS-A, anti SSB", "NT-proBNP, NT-proBNP, NT-proBNP, LH-RH, anti-SSA, anti-SSB"),
         ("HLA B27, PDL1, PD-L 1, PD1, PI3K, PIK3CA", "HLA-B27, PD-L1, PD-L1, PD-1, PI3K, PIK3CA"),
+    ])
+    check(normalize_official_names, [
+        ("Hernie L4 L5 et L5 S1, L3 L4 L5.", "Hernie L4-L5 et L5-S1, L3-L4-L5."),
+        ("D dimères, d-dimères, TEP 18 FDG, 18F FDG, Ki67, Ki 67.", "D-dimères, D-dimères, TEP 18-FDG, 18F-FDG, Ki-67, Ki-67."),
+        ("ASA-2, TCD4, VIH 1, 46XY, GCSF, GLP1, CA-125, CA19-9, CA 15 3.",
+         "ASA 2, T CD4, VIH-1, 46 XY, G-CSF, GLP-1, CA 125, CA 19-9, CA 15-3."),
+        ("Séquences T1 T2, C3 C4 bas.", "Séquences T1 T2, C3 C4 bas."),
     ])
     print("test_official_names: OK")
 

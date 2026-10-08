@@ -787,6 +787,15 @@ _SPELLING_RULES = (
     (re.compile(r"cléïdo"), "cléido"),
     (re.compile(r"\b([Tt])ete(s?)\b"), r"\1ête\2"),
     (re.compile(r"\b([Gg])enès\b"), r"\1ènes"),
+    # 2026-10-08, the majority: ``gène`` (15.7k against 309 ``gene``), ``côlon`` (1.7k /
+    # 101), ``scanographique`` (651 / 146), ``shampooing`` (149 / 30), ``paquets-année``
+    # (740 / 498), ``grays`` after a number from 2 (756 / 679 ``gray``).
+    (re.compile(r"\bgene(s?)\b"), r"gène\1"),  # ``Docteur Genes`` is a name
+    (re.compile(r"(?<!-)\b([Cc])olon(s?)\b"), r"\1ôlon\2"),  # not ``semi-colon``
+    (re.compile(r"\b([Ss])cannographi"), r"\1canographi"),
+    (re.compile(r"\b([Ss])hampoing"), r"\1hampooing"),
+    (re.compile(r"\b(paquets?)[- ]années?\b"), r"\1-année"),
+    (re.compile(r"(?<![\d,])((?:[2-9]|\d{2,})(?:,\d+)? )gray\b"), r"\1grays"),
 )
 
 
@@ -890,6 +899,23 @@ _OFFICIAL_RULES = (
     (re.compile(r"\bPD[- ]?L[- ]?([12])\b"), r"PD-L\1"),
     (re.compile(r"\bPD[- ]?1\b"), "PD-1"),
     (re.compile(r"\bPI[- ]?3[- ]?K\b"), "PI3K"),
+    # 2026-10-08, the majority unless noted: ``L4-L5`` (682 against 165 ``L4 L5``, lumbar
+    # and sacral levels only, ``T1 T2`` are MRI sequences and ``C3 C4`` complement),
+    # ``D-dimères`` (329 / 26), ``18-FDG`` / ``18F-FDG`` (492 / 17), ``Ki-67`` (the
+    # official name, 160 against 324 ``Ki67``), ``ASA 2`` (2.2k / 127), ``T CD4`` (174 /
+    # 1), ``VIH-1`` (155 / 9), ``46 XX`` (180 / 2), ``G-CSF`` (124 / 17), ``GLP-1`` (89 /
+    # 6), ``CA 125`` / ``CA 19-9`` / ``CA 15-3`` (223 / 61).
+    (re.compile(r"\b(L\d) (?=[LS]\d\b)"), r"\1-"),
+    (re.compile(r"\b[Dd][- ]([Dd])imères\b"), r"D-\1imères"),
+    (re.compile(r"\b18 ?(F?)[- ]?FDG\b"), r"18\1-FDG"),
+    (re.compile(r"\bKi[- ]?67\b"), "Ki-67"),
+    (re.compile(r"\bASA-([1-6])\b"), r"ASA \1"),
+    (re.compile(r"\bT(CD[48])\b"), r"T \1"),
+    (re.compile(r"\bVIH ([12])\b"), r"VIH-\1"),
+    (re.compile(r"\b46(X[XY])\b"), r"46 \1"),
+    (re.compile(r"\bGCSF\b"), "G-CSF"),
+    (re.compile(r"\bGLP[- ]?1\b"), "GLP-1"),
+    (re.compile(r"\bCA[- ]?(125|19[- ]9|15[- ]3)\b"), lambda m: "CA " + re.sub("[- ]", "-", m.group(1))),
 )
 
 
