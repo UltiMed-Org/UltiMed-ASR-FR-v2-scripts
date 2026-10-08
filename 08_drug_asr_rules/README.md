@@ -158,6 +158,10 @@ Caveat: the drug and term rules run after these and their replacements come from
 
 Written with Claude Code.
 
+## French news guard on the term rules (2026-10-08)
+
+The term rules rewrote 94 of the 100k held-out French news sentences (2023). The committed `term_fix_rules.jsonl` is now cleaned by `04_drop_unk_variants.py --guard` with Leipzig's `fr-news-2024-1M.txt` (minus the 171 sentences it shares with the held-out 2023 file): a variant found in that news is dropped, 35,996 -> 35,876 rules. Effect, measured by the ultra repo's `evalrules.py` (`local/run_logs/term-newsguard-20261008/`): held-out news rewrites 94 -> 24, French Wikipedia 3 -> 1, still 0 of 602,813 labels, and the fixes on UltiMed's dictionary test lose about 0.5 % (UltiMed 10,621 -> 10,563 fixed words, WER 2.13 % unchanged; redux 9.25 -> 9.26 %). Done with Claude Code.
+
 ## Medical-term rules (`term_fix_rules.jsonl`, 2026-10-04)
 
 A second, separate rule file for the dictionary terms (`syndrome de Brugada`, `ostéophyte`, `craniopharyngiome`...), built by the same 01 + 02 with `--lexicon 01_dictionnary/original_dictionnary.jsonl`. It is kept apart from `drug_fix_rules.jsonl` on purpose: apply it after the drug rules, or not at all. Built with Claude Code by `term-pilot-round.py <pilot dir> 99` in the ultra repo, from every clip of the dictionary (534,338), PARHAF (43,431) and PARROT (1,549) subsets transcribed by UltiMed (int8 encoder) and base parakeet-ultra (w4a8), with the same guards as the drug rules: the correct labels of all splits (PARROT included), the 1M French Wikipedia sentences, and `--names`.
