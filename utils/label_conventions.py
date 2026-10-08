@@ -600,13 +600,17 @@ _DIGRAPHS = frozenset({"ai", "au", "ei", "eu", "oi", "ou", "oe"})
 _NEVER_GLUED = frozenset("sous sus sur contre non demi semi mi".split())
 _HYPHENATED_RE = re.compile(r"(?<![\w-])[^\W\d_]+(?:-[^\W\d_]+)+(?![\w-])")
 _SPACED_RE = re.compile(rf"\b((?i:{_SPACED_PREFIXES}|{_SPACED_COMBINING})) "
-                        r"(?!(?:et|ou|ni|sur|de|du|des|à|en)\b)([a-zà-ÿ][^\W\d_]{3,})")
+                        r"(?!(?:et|ou|ni|sur|de|du|des|à|en)\b)(?=([a-zà-ÿ][^\W\d_]{3,}))")
+
+
+def _sep(a: str, b: str) -> str:
+    """``-`` where gluing ``a`` and ``b`` would misread, else nothing."""
+    pair = (a[-1] + b[0]).lower()
+    return "-" if pair in _DIGRAPHS or (pair[0] == pair[1] and pair[0] != "é") else ""
 
 
 def _join(a: str, b: str) -> str:
-    """``a`` and ``b`` glued, or hyphenated where gluing would misread."""
-    pair = (a[-1] + b[0]).lower()
-    return f"{a}-{b}" if pair in _DIGRAPHS or (pair[0] == pair[1] and pair[0] != "é") else a + b
+    return a + _sep(a, b) + b
 
 
 def _is_combining(part: str) -> bool:
@@ -638,7 +642,9 @@ def normalize_compounds(text: str) -> str:
     ``extrahépatiques``, ``gastro-entérologie`` and ``anti-inflammatoire`` keep their
     hyphen. Idempotent."""
     text = _PETIT_DEJEUNER_RE.sub(r"\1-\2", text)
-    text = _SPACED_RE.sub(lambda m: _join(m.group(1), m.group(2)), text)
+    # Only the space is consumed (the second word is a lookahead), so a chain like
+    # "thoraco abdomino pelvienne" glues every pair in one pass.
+    text = _SPACED_RE.sub(lambda m: m.group(1) + _sep(m.group(1), m.group(2)), text)
     return _HYPHENATED_RE.sub(_glue_hyphenated, text)
 
 

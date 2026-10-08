@@ -184,7 +184,7 @@ def test_compounds() -> None:
         # A misread digraph or a doubled a / i / o / u keeps the hyphen.
         ("gastro-entérologie, intra oculaire, intra-utérin, auto-immune, anti-inflammatoire, radio-opaque",
          "gastro-entérologie, intraoculaire, intra-utérin, auto-immune, anti-inflammatoire, radio-opaque"),
-        ("post traumatique, pré-éclampsie, cortico-sous-corticale", "post-traumatique, prééclampsie, cortico-sous-corticale"),
+        ("thoraco abdomino pelvienne, post traumatique, pré-éclampsie, cortico-sous-corticale", "thoracoabdominopelvienne, post-traumatique, prééclampsie, cortico-sous-corticale"),
     ])
     assert normalize_compounds("un petit déjeune") == "un petit déjeune"
     # Latin, excluded prefixes, nouns, names, uppercase or short second parts.
