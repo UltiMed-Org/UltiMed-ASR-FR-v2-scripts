@@ -17,6 +17,10 @@ from them exactly as 03_merge_rules.py builds it; a rule left with no variant go
 have rejected: a last word French elides ("part d") that a label holds with its apostrophe
 ("fait part d'un"); the end bound lets such a rule fire right before the apostrophe.
 
+``--guard`` drops every variant that a given correct text holds, the ``real_text`` guard
+added after the build: the term rules got the 2024 Leipzig French news this way
+(2026-10-08), so the rules stop rewriting ordinary news French.
+
 This file was written by Claude Code.
 """
 import importlib.util
@@ -78,18 +82,28 @@ def drop_unk_variants(rules: list[dict], bad=has_unk) -> tuple[list[dict], int]:
     return out, dropped
 
 
-def elided_in_labels(rules: list[dict], labels) -> set[str]:
-    """The variants ending in an elidable letter that a label holds with its apostrophe, which
-    ``02_build_fix_rules.py`` rejects as ``real_text`` since 2026-10-07 but older files kept.
+def found_in_texts(rules: list[dict], texts, elided_only: bool = False) -> set[str]:
+    """The variants that occur in ``texts``, which ``02_build_fix_rules.py`` would reject as
+    ``real_text`` had those texts been among its ``--labels``.
 
-    >>> rules = [{"variants": ["part d", "pardet"]}, {"variant": "etoposie d"}]
-    >>> sorted(elided_in_labels(rules, ["il nous fait part d'un stress", "etoposie orale"]))
-    ['part d']
+    ``elided_only`` keeps only the variants ending in an elidable letter that a text holds
+    with its apostrophe ("part d" in "fait part d'un"), which 02 rejects since 2026-10-07
+    but older files kept.
+
+    >>> rules = [{"variants": ["part d", "pardet"]}, {"variant": "etoposie d"}, {"variant": "la vie"}]
+    >>> texts = ["il nous fait part d'un stress", "etoposie orale", "la vie est belle"]
+    >>> sorted(found_in_texts(rules, texts, elided_only=True)), sorted(found_in_texts(rules, texts))
+    (['part d'], ['la vie', 'part d'])
     """
     vs = {v for r in rules for v in (r.get("variants") or [r.get("variant")]) if v}
-    keys = {v: b._elided(b._key(v)) for v in vs}
-    hits = b.count_ngrams(labels, {k for v, k in keys.items() if k != b._key(v)})
-    return {v for v, k in keys.items() if hits[k]}
+
+    def keys_of(v: str) -> set:
+        k = b._key(v)
+        return {b._elided(k)} - {k} if elided_only else {k, b._elided(k)}
+
+    keys = {v: keys_of(v) for v in vs}
+    hits = b.count_ngrams(texts, set().union(*keys.values()) if keys else set())
+    return {v for v, ks in keys.items() if any(hits[k] for k in ks)}
 
 
 @click.command()
@@ -97,11 +111,18 @@ def elided_in_labels(rules: list[dict], labels) -> set[str]:
 @click.argument("dst", type=click.Path(path_type=Path))
 @click.option("--labels", "labels_paths", multiple=True, type=click.Path(exists=True, path_type=Path),
               help="also drop the variants ending in an elided letter these labels hold (manifest jsonl or .txt)")
-def main(src: Path, dst: Path, labels_paths: tuple[Path, ...]) -> None:
+@click.option("--guard", "guard_paths", multiple=True, type=click.Path(exists=True, path_type=Path),
+              help="also drop every variant these correct texts hold (manifest jsonl or .txt, one sentence per line)")
+def main(src: Path, dst: Path, labels_paths: tuple[Path, ...], guard_paths: tuple[Path, ...]) -> None:
     rules = b.load_rules(src)
-    real = elided_in_labels(rules, [t for p in labels_paths for t in b._read_texts(p, "text")]) if labels_paths else set()
+    read = lambda paths: [t for p in paths for t in b._read_texts(p, "text")]
+    real = found_in_texts(rules, read(labels_paths), elided_only=True) if labels_paths else set()
     if real:
         logger.info(f"{len(real)} variants with an elided last letter occur in a label: {sorted(real)[:20]}")
+    guarded = found_in_texts(rules, read(guard_paths)) if guard_paths else set()
+    if guarded:
+        logger.info(f"{len(guarded)} variants occur in a guard text: {sorted(guarded)[:20]}")
+    real |= guarded
     out, dropped = drop_unk_variants(rules, lambda v: has_unk(v) or v in real)
     with dst.open("w", encoding="utf-8") as f:
         f.writelines(json.dumps(r, ensure_ascii=False) + "\n" for r in out)
