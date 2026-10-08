@@ -167,7 +167,7 @@ def canonical(forms: list[tuple[str, int]]) -> tuple[str | None, str]:
                 else:
                     seps.pop(pos, None)
                 ruled = True
-            elif head == "écho":
+            elif head in ("écho", "echo"):
                 vowel_or_noun = tail[0] in "aeiouéèêy" or lc._is_noun(tail)
                 if vowel_or_noun:
                     seps[pos] = "-"
@@ -215,6 +215,11 @@ def main(variants_tsv, out):
     unstable = {c for c in table.values() if lc.normalize_compounds(c) != c}
     table = {f: c for f, c in table.items() if c not in unstable}
     click.echo(f"dropped {len(unstable)} canonicals normalize_compounds would change: {sorted(unstable)}")
+    # Overlapping families (``cochran-mantel-haenszel`` spaced, ``mantel-haenszel``
+    # hyphenated) would rewrite each other's canonical form on the next run.
+    clash = {c for c in table.values() if lc.normalize_compound_spellings(c, table) != c}
+    table = {f: c for f, c in table.items() if c not in clash}
+    click.echo(f"dropped {len(clash)} canonicals another family rewrites: {sorted(clash)}")
     doc = ("observed form -> canonical compound spelling, built by "
            "06_hotfixes/08_build_compound_spellings.py; applied by "
            "label_conventions.normalize_compound_spellings")

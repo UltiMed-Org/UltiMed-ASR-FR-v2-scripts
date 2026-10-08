@@ -317,6 +317,11 @@ def test_compound_spellings() -> None:
     # The shipped table: idempotent through the whole pipeline.
     for canon in ("gastro-entérologie", "trans-sphénoïdale", "sous-costale", "check-list", "post-partum"):
         assert apply_label_conventions(canon) == canon, (canon, apply_label_conventions(canon))
+    # Unaccented "Echo" is not a combining form either; overlapping families settle in one run.
+    for once in ("Echo-Doppler artériel.", "Le test de Cochran-Mantel-Haenszel montre"):
+        twice = apply_label_conventions(apply_label_conventions(once))
+        assert twice == apply_label_conventions(once), (once, apply_label_conventions(once), twice)
+    assert apply_label_conventions("Echo-Doppler artériel.") == "Echo-doppler artériel."
     assert apply_label_conventions("Une gastroentérologie, un postpartum, une checklist.") == \
         "Une gastro-entérologie, un post-partum, une check-list."
     print("test_compound_spellings: OK")

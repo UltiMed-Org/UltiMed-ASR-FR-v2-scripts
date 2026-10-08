@@ -617,7 +617,7 @@ _PETIT_DEJEUNER_RE = re.compile(r"\b([Pp]etits?) (déjeuners?)\b")
 _PREFIXES = frozenset("""anti auto bi co endo extra hémi hyper hypo infra inter intra macro méta micro
     mini mono multi néo oligo para per péri poly post pré primo pro pseudo ré rétro sub supra
     trans tri ultra uni allo""".split())
-_NOT_COMBINING = frozenset("""écho vidéo photo zéro numéro stylo euro duo trio solo ratio placebo
+_NOT_COMBINING = frozenset("""écho echo vidéo video photo zéro numéro stylo euro duo trio solo ratio placebo
     libido lumbago tempo logo mémo métro kilo""".split())
 _SPACED_PREFIXES = "anti|auto|extra|hyper|hypo|infra|inter|intra|multi|per|péri|post|pré|pseudo|rétro|supra|trans|ultra"
 _SPACED_COMBINING = ("abdomino|anatomo|antéro|brachio|broncho|cérébro|clinico|cutanéo|hépato|insulino"
@@ -1076,7 +1076,9 @@ def apply_label_conventions(text: str, tts_source: bool = False) -> str:
     if not tts_source:
         text = normalize_sutures(text)
     # Accents last: the drug caser restores the ANSM accents an INN choice removes.
-    text = normalize_official_names(normalize_compound_spellings(normalize_compounds(text)))
-    text = normalize_latin_names(lowercase_eponym_nouns(normalize_ordinals(normalize_non(text))))
+    # Eponyms lowercased before the compound table, which keys on lowercase forms but
+    # keeps their capitals (``Echo-Doppler`` is looked up as ``echo-doppler``).
+    text = normalize_compound_spellings(lowercase_eponym_nouns(normalize_compounds(text)))
+    text = normalize_latin_names(normalize_ordinals(normalize_non(normalize_official_names(text))))
     text = normalize_accents(default_drug_caser()(normalize_spelling(text)))
     return restore_tts_accents(text) if tts_source else text
