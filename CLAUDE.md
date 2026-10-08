@@ -254,6 +254,18 @@ from _pipeline_shared import call_llm, PricingTracker  # noqa: E402
   dataset v1.3. A second sweep (Parakeet over val/test/PARROT and half of train, diffs
   ranked where Whisper agrees with Parakeet against the label) added the counts, staging,
   prefix, `anévrisme` / `urètre` and `À` rules the same day.
+  On 2026-10-08 (v2 labels, before the audio is regenerated) the author added Roman
+  numerals to digits outside staging words too (`normalize_roman`: `nerf III` -> `nerf 3`,
+  `Garden IV` -> `Garden 4`; kings, intravenous `IV` and letters like `rayons X` stay),
+  thousands glued in the label (`normalize_thousands`: `18 000` -> `18000`, label only
+  like the sutures) and more lab names / spellings (`L4-L5`, `Ki-67`, `CA 125`, `gène`,
+  `côlon`, `grays`). Then `99_hf_release/06_diversify_names_ages.py` (dry run unless
+  `--apply`, idempotent, seeded per clip) replaces the seven surnames the text LLM
+  overused (`Girard`, `Lefèvre`... 91% of title + surname mentions) by draws from the
+  committed `99_hf_release/surname_pool.tsv` (top 1,000 INSEE surnames) and spreads the
+  overused adult ages (`45 ans` 22.9k) over nearby ages, in the independent-sentence
+  categories only (not PARHAF / PARROT documents). Tested by
+  `tests/test_diversify_names_ages.py`.
 - **`voxtral_normalize.py`** deterministically turns an `asr_training_target`
   (written label) into the `asr_training_source` (text fed to the local
   voxtral-tts engine): it applies only the small, proven set of fixes voxtral
