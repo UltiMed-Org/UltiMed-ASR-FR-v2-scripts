@@ -82,7 +82,9 @@ def is_drug(key: str) -> bool:
 
 DRUG_WORDS = _drug_words()
 OVERRIDES = {"defect": "défect", "artefact": "artefact", "artefacts": "artefacts", "olecrane": "olécrane",
-             "olecranien": "olécranien", "olecranienne": "olécranienne", "retro-olecranienne": "rétro-olécranienne"}
+             "olecranien": "olécranien", "olecranienne": "olécranienne", "retro-olecranienne": "rétro-olécranienne",
+             # an enzyme, not a drug (the drug lexicon holds "inhibiteur de protéase")
+             "protease": "protéase"}
 # Two words, not two spellings: never rewritten.
 KEEP = frozenset("""mole gene genes herpes pyogenes strongyloides anopheles area lutea cinereum reverse
     senior isolement interferent jeunes dependent coccidioides paracoccidioides""".split())

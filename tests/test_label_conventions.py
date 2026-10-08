@@ -258,7 +258,9 @@ def test_accents() -> None:
     # The committed table, after the drug caser that would put the ANSM accents back.
     for raw, want in [("PERINDOPRIL et énoxaparine, un artéfact, le canal de Wirsüng.",
                        "Perindopril et enoxaparine, un artefact, le canal de Wirsung."),
-                      ("paracétamol", "paracétamol")]:
+                      ("paracétamol", "paracétamol"),
+                      # An enzyme, not an INN: keeps its French accent.
+                      ("inhibiteur de protease", "inhibiteur de protéase")]:
         assert apply_label_conventions(raw) == want, (raw, apply_label_conventions(raw))
     print("test_accents: OK")
 
