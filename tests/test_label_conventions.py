@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "utils"))
 from label_conventions import (  # noqa: E402
     DrugCaser, apply_label_conventions, default_drug_caser, expand_titles, normalize_clock,
-    normalize_accents, normalize_compounds, normalize_dates, normalize_quantities, normalize_spelling, normalize_staging, normalize_roman, normalize_sutures, restore_tts_accents,
+    normalize_accents, normalize_compounds, normalize_dates, normalize_quantities, normalize_spelling, normalize_staging, normalize_roman, normalize_sutures, normalize_thousands, restore_tts_accents,
     parse_french_number, normalize_compound_spellings, normalize_official_names, normalize_non, normalize_ordinals,
     lowercase_eponym_nouns, normalize_latin_names,
 )
@@ -217,6 +217,19 @@ def test_sutures_and_decimals() -> None:
     # The TTS source keeps what voxtral said.
     assert apply_label_conventions("Vicryl trois zéro", tts_source=True) == "Vicryl trois zéro"
     print("test_sutures_and_decimals: OK")
+
+
+def test_thousands() -> None:
+    check(normalize_thousands, [
+        ("Plaquettes à 1 200 000 par millimètre cube, 1 sur 10 000.", "Plaquettes à 1200000 par millimètre cube, 1 sur 10000."),
+        ("Garçon de 3 450 grammes, 1 234,5 euros.", "Garçon de 3450 grammes, 1234,5 euros."),
+        # two numbers, a name with digits, a decimal part
+        ("Tension 12 18, vitamine D3 100 000 unités, coenzyme Q10 300, 0,5 000.",
+         "Tension 12 18, vitamine D3 100000 unités, coenzyme Q10 300, 0,5 000."),
+    ])
+    # the TTS source keeps the spaced form
+    assert apply_label_conventions("18 000 plaquettes.", tts_source=True) == "18 000 plaquettes."
+    print("test_thousands: OK")
 
 
 def test_spelling() -> None:
@@ -438,6 +451,7 @@ if __name__ == "__main__":
     test_quantities()
     test_compounds()
     test_sutures_and_decimals()
+    test_thousands()
     test_spelling()
     test_staging()
     test_roman()

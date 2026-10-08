@@ -528,6 +528,18 @@ def normalize_sutures(text: str) -> str:
     return _SUTURE_RE.sub(_replace_suture, text)
 
 
+# Thousands glued (author's choice 2026-10-08, the majority: 26k labels wrote ``3200``,
+# 4.6k ``3 200``), so ``18 000`` and ``18000`` are not two transcripts of one sound.
+# Groups after the first are exactly three digits, so ``12 18`` (two numbers) stays.
+_THOUSANDS_RE = re.compile(r"(?<![\w,.])(\d{1,3})((?: \d{3})+)(?![\d])")
+
+
+def normalize_thousands(text: str) -> str:
+    """``18 000`` -> ``18000``, ``1 sur 10 000`` -> ``1 sur 10000``. Label only: the TTS
+    source keeps the spaced form voxtral reads as one number. Idempotent."""
+    return _THOUSANDS_RE.sub(lambda m: m.group(1) + m.group(2).replace(" ", ""), text)
+
+
 def _replace_suture(m: re.Match) -> str:
     """``Vicryl trois zéro`` / ``Vicryl 3 zéros`` / ``Vicryl 3/0`` -> ``Vicryl 3-0``."""
     num = m.group(2)
@@ -1146,12 +1158,13 @@ def apply_label_conventions(text: str, tts_source: bool = False) -> str:
     and dates before quantities so a spelled year is read as a year, not as a count.
 
     ``tts_source=True`` is for a text the TTS reads (05 on the v1 sources): it skips
-    ``normalize_sutures``, the one rewrite voxtral does not speak identically, and keeps
+    ``normalize_sutures`` and ``normalize_thousands``, which voxtral may not speak
+    identically, and keeps
     the accents of drug INNs (``restore_tts_accents``).
     """
     text = normalize_roman(normalize_staging(normalize_quantities(normalize_clock(normalize_dates(expand_titles(text))))))
     if not tts_source:
-        text = normalize_sutures(text)
+        text = normalize_thousands(normalize_sutures(text))
     # Accents last: the drug caser restores the ANSM accents an INN choice removes.
     # Eponyms lowercased before the compound table, which keys on lowercase forms but
     # keeps their capitals (``Echo-Doppler`` is looked up as ``echo-doppler``).
