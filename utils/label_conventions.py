@@ -35,9 +35,10 @@ rewrites the minority spellings to it:
   against 1.9k; ``zéro virgule vingt-cinq microgrammes`` -> ``0,25 microgrammes``;
   ``pendant dix-huit mois`` -> ``pendant 18 mois``), and so do ``fois`` / ``séances``
   counts, a range head and a score (``deux fois`` -> ``2 fois``, ``un à deux jours`` ->
-  ``1 à 2 jours``, ``deux sur dix`` -> ``2 sur 10``, 2026-09-28). Other counts of things
-  stay spelled, as the corpus spells them (``deux comprimés``), and so does a single
-  ``un``/``une`` (``un an``, ``une heure``). Added 2026-09-28 because the hand-made
+  ``1 à 2 jours``, ``deux sur dix`` -> ``2 sur 10``, 2026-09-28), and a single unit or
+  duration (``à un mois`` -> ``à 1 mois``, ``un gramme`` -> ``1 gramme``, 2026-10-08).
+  Other counts of things stay spelled, as the corpus spells them (``deux comprimés``),
+  and so does a single ``une fois`` / ``une séance``. Added 2026-09-28 because the hand-made
   ``drug_sentence`` sets spelled every dose while UltiMed writes digits: the model
   wrote ``4 milligrammes`` on the synthetic voice and 63% of that set's WER was
   number formatting, not recognition. The radiology units (``grays``, ``hertz``,
@@ -48,20 +49,28 @@ rewrites the minority spellings to it:
   Skipped for a TTS source (``tts_source=True``) because voxtral does not read ``3-0``
   reliably as what the source said.
 - **Staging numbers** (``normalize_staging``). After ``stade``, ``grade``, ``type``,
-  ``classe``, ``palier``, ``niveau`` or ``NYHA``, a Roman or spelled number becomes digits
+  ``classe``, ``palier``, ``niveau``, ``phase`` or ``NYHA``, a Roman or spelled number becomes digits
   (``stade IIIb`` -> ``stade 3b``, ``palier deux`` -> ``palier 2``), the author's choice
   (2026-09-28) over a corpus that mixed all three. Roman numerals elsewhere
   (``angiotensine II``) stay.
 - **Compounds** (``normalize_compounds``). ``petit déjeuner`` -> ``petit-déjeuner``
-  (213 against 35, and the dictionary spelling of the noun), and a split prefix is glued
-  (``extra hépatiques`` -> ``extra-hépatiques``, ``multi lithiasique`` ->
-  ``multilithiasique``).
+  (213 against 35, and the dictionary spelling of the noun), and prefix and
+  combining-form compounds are glued unless a digraph would misread (``post-opératoire``
+  -> ``postopératoire``, ``extra hépatiques`` -> ``extrahépatiques``, ``abdomino-pelvien``
+  -> ``abdominopelvien``, but ``gastro-entérologie`` / ``anti-inflammatoire`` stay;
+  2026-10-08, was "glue a split prefix, hyphen before a vowel" since 2026-09-28).
 - **Spelling variants** (``normalize_spelling``). ``œ`` -> ``oe`` everywhere (``cœur`` ->
   ``coeur``), ``aigüe`` -> ``aiguë``, ``compte-rendu`` -> ``compte rendu``,
   ``bêta-bloquant`` / ``bêtabloquant`` -> ``bétabloquant``, ``anévrysme`` -> ``anévrisme``,
   ``urèthre`` / ``uréthral`` -> ``urètre`` / ``urétral``, and a sentence-initial ``A``
   before an infinitive -> ``À`` (``A surveiller`` -> ``À surveiller``). Added 2026-09-28 from an
   inference sweep of val/test, where these pairs were among the most frequent diffs.
+- **Accent variants** (``normalize_accents``, 2026-10-08). One accent spelling per word
+  from ``accent_spellings.json``, built from the audit by
+  ``06_hotfixes/07_build_accent_spellings.py``: ``defect`` -> ``défect``, ``artéfact`` ->
+  ``artefact``, ``l'olécrâne`` -> ``l'olécrane``, ``wirsüng`` -> ``wirsung``, and drug
+  INNs without accents (``périndopril`` -> ``perindopril``, ``énoxaparine`` ->
+  ``enoxaparine``). Runs after the drug caser, which would put the ANSM accents back.
 - **Drug names** (``DrugCaser``). One spelling per drug word, from the lexicon
   ``drug_casing.json`` built by ``02_drugs/02_build_drug_casing.py`` (see its
   docstring for how the canonical form is chosen): ``PRIMPERAN`` / ``Primperan`` ->
@@ -322,19 +331,24 @@ def normalize_clock(text: str) -> str:
 # "2 fois par jour"), although words were the majority. Other counts of things are NOT
 # here, the corpus spells them (``comprimés`` 263 digits / 406 words, ``bouffées``,
 # ``gélules``, ``prises``, ``doses``): "deux comprimés de 4 milligrammes". The singular
-# forms only follow a decimal (``zéro virgule cinq milligramme``), since ``un``/``une``
-# is never converted (``une fois par jour``: 4.8k against 64 ``1 fois``).
+# forms follow a decimal (``zéro virgule cinq milligramme``) or a single ``un``/``une``,
+# which becomes ``1`` before a unit or a duration (``à un mois`` -> ``à 1 mois``, author's
+# choice 2026-10-08: the corpus mixed both in the same phrases, 16.6k ``un mois`` against
+# 4.6k ``1 mois``, and the fine-tuned model wrote whichever it liked, about 2.6k flips in
+# a third of the corpus) but stays spelled before ``fois`` / ``séances`` (``une fois par
+# jour``: 4.8k against 64 ``1 fois``, and ``une fois que`` is a conjunction).
 _QTY_UNITS = (r"(?:(?:milli|micro|nano|kilo)?grammes?|kilos?|(?:milli|micro|centi)?litres?"
               r"|(?:milli|centi|kilo)?mètres?|(?:milli|micro)moles?|unités?|degrés?"
               r"|heures?|minutes?|secondes?|jours?|semaines?|mois|ans?|fois|séances?"
               # Radiology units: 588 labels write "N grays", 11 spelled them; hertz
               # 356 / 3, teslas 114 / 3.
-              r"|(?:milli|centi)?grays?|(?:kilo|méga)?hertz|teslas?)")
+              r"|(?:milli|centi)?grays?|(?:kilo|méga)?hertz|teslas?|dioptries?)")
 # Every word a French number up to 999,999 is spelled with ("et" only inside one).
 _NUMBER_VALUES = {w: i for i, w in enumerate(_UNITS)} | {w: n for n, w in _TENS.items()}
 _NUMBER_VALUES |= {"une": 1, "vingts": 20}
 _QTY_WORD = rf"(?:{'|'.join(sorted(_NUMBER_VALUES, key=len, reverse=True))}|cents?|mille|mil|et)"
-_QTY_SEQ = rf"(?i:(?<![\w-]){_QTY_WORD}(?:[\s-]+{_QTY_WORD})*)"
+# Not after an elision: "d'un mois" stays, "d'1 mois" is not written.
+_QTY_SEQ = rf"(?i:(?<![\w'’-]){_QTY_WORD}(?:[\s-]+{_QTY_WORD})*)"
 # A ratio's second number ("cinq jours sur sept") follows the first, else the label
 # mixes forms ("5 jours sur sept") the corpus never uses (362 all-words, 280 all-digits).
 # Not right after "pour": "0,10 gramme pour cent une fois par jour" is a percentage
@@ -350,6 +364,11 @@ _DIGIT_VIRGULE_RE = re.compile(r"(?<![\w,])(\d+) virgule (\d+)\b")
 _RANGE_HEAD_RE = re.compile(rf"({_QTY_SEQ})(\s+(?:à|ou)\s+\d+(?:,\d+)?\s+{_QTY_UNITS})\b")
 # A score out of ten, twenty or a hundred (pain scale, "deux sur dix"): 6k labels write
 # "2 sur 10", 146 spell it.
+# Where a single one stays spelled, unlike a single unit of measure or duration ("1 mois",
+# author's choice 2026-10-08): the counts (``une fois par jour``, ``une séance``) and the
+# words that are rarely a measure after ``un``/``une`` (``un degré de gravité``, ``une
+# unité de soins``, ``en seconde intention``).
+_COUNT_UNIT_RE = re.compile(r"\s+(?:fois|séances?|degrés?|unités?|secondes?)$")
 _SCORE_BASE = {"dix": 10, "vingt": 20, "cent": 100}
 _SCORE_RE = re.compile(rf"({_QTY_SEQ})(\s+sur\s+)(dix|vingt|cent)\b")
 # Suture gauges: "Vicryl trois zéro" (~250), "Vicryl 3 zéro" (~255), "Vicryl 3-0" (~300,
@@ -441,19 +460,20 @@ def _replace_quantity(m: re.Match) -> str:
         if decimals is None:
             return m.group(0)
         return f"{head}{value},{decimals}{m.group(4)}{ratio}"
-    if value == 1:
-        # "un milligramme", "une heure", "un an": the corpus spells a single one.
+    if value == 1 and _COUNT_UNIT_RE.match(m.group(4)):
+        # "une fois par jour", "une unité de soins": see _COUNT_UNIT_RE.
         return m.group(0)
     return f"{head}{value}{m.group(4)}{ratio}"
 
 
 def normalize_quantities(text: str) -> str:
     """``quatre milligrammes`` -> ``4 milligrammes``, ``zéro virgule vingt-cinq microgrammes``
-    -> ``0,25 microgrammes``, ``toutes les huit heures`` -> ``toutes les 8 heures``.
+    -> ``0,25 microgrammes``, ``toutes les huit heures`` -> ``toutes les 8 heures``,
+    ``dans un mois`` -> ``dans 1 mois``.
 
     Only before a unit of measure, a duration, ``fois`` or ``séances`` (``_QTY_UNITS``);
-    other counts (``deux comprimés``) and a single ``un``/``une`` stay spelled, except as
-    the head of a range (``un à deux jours`` -> ``1 à 2 jours``). A score becomes digits
+    other counts (``deux comprimés``) and a single ``une fois`` / ``une séance`` stay
+    spelled, except as the head of a range (``un à deux fois`` -> ``1 à 2 fois``). A score becomes digits
     too (``deux sur dix`` -> ``2 sur 10``). Minutes after
     a spelled hour (``huit heures trente``) are left alone: telling them from a count
     that follows (``deux heures deux fois par jour``) needs more than a regex. Idempotent.
@@ -501,10 +521,11 @@ def _replace_suture(m: re.Match) -> str:
 # words (stade 5.4k Roman / 0.4k digits, grade 2.9k / 2.4k, type 6.2k / 3.4k, classe
 # 0.6k / 0.7k, palier 0.8k / 5.0k / 0.5k "palier deux"), the same sound written three
 # ways. The author chose digits for all of them (2026-09-28): "stade 3", "grade 2b",
-# "type 1 et 2". Only these words: a Roman numeral elsewhere is a name ("angiotensine
+# "type 1 et 2". ``phase`` joined on 2026-10-08 ("phase II" 222 times heard as "phase 2"
+# in a third of the corpus, the author chose digits). Only these words: a Roman numeral elsewhere is a name ("angiotensine
 # II", "APACHE II", "métaphase II", "Henri IV") and stays. Voxtral read every form the
 # same, so the TTS source gets the rewrite too.
-_STAGING_WORD = r"\b(?:[Ss]tades?|[Gg]rades?|[Tt]ypes?|[Cc]lasses?|[Pp]aliers?|[Nn]iveaux?|NYHA)"
+_STAGING_WORD = r"\b(?:[Ss]tades?|[Gg]rades?|[Tt]ypes?|[Cc]lasses?|[Pp]aliers?|[Nn]iveaux?|[Pp]hases?|NYHA)"
 # A Roman numeral (uppercase only: "civil" is valid Roman letters) with an optional
 # sub-stage letter ("IIIb", "IVB"), a spelled number, or digits. "un" not before "peu"
 # ("un type un peu particulier").
@@ -540,26 +561,85 @@ def normalize_staging(text: str) -> str:
 _PETIT_DEJEUNER_RE = re.compile(r"\b([Pp]etits?) (déjeuners?)\b")
 
 
-# Prefixes that are never a word on their own, written split before an adjective in
-# ~560 labels ("extra hépatiques", "multi lithiasique", "péri ombilicale") against 13.6k
-# hyphenated ("intra-utérin") and many glued ("intracrânienne"). The normaliser deletes
-# hyphens, so hyphenated and glued are the same token and only the split form costs a
-# word. Glued, or hyphenated when the word starts with a vowel ("intra-abdominal", not
-# "intraabdominal"), the author's choice (2026-09-28). Not before a conjunction or a
-# preposition: "intra et extra-hépatiques" keeps its "intra".
-_PREFIX_RE = re.compile(r"\b((?i:multi|extra|intra|supra|infra|péri)) "
+# Prefix and combining-form compounds are glued (the 1990 spelling reform, what most
+# medical dictionaries now print), author's choice 2026-10-08: ``post-opératoire`` /
+# ``post opératoire`` -> ``postopératoire``, ``abdomino-pelvien`` -> ``abdominopelvien``,
+# ``oeso-gastro-duodénale`` -> ``oesogastroduodénale``. The corpus mixed all three forms
+# (``post-opératoire`` 12.1k, ``postopératoire`` 7.8k, ``post opératoire`` 174), the
+# fine-tuned model wrote the glued one, and the WER normaliser keeps a hyphen (one token)
+# and a space (two) apart. 05_label_variant_audit.py counted ~550 such families.
+#
+# The hyphen stays where gluing would misread: two vowels that form a French digraph
+# (``gastro-entérologie``, ``intra-utérin``, ``auto-immun``) or a doubled letter
+# (``anti-inflammatoire``, ``intra-abdominal``, ``post-traumatique``, ``trans-sphénoïdal``),
+# but ``réévaluation`` / ``prééclampsie`` / ``préexistant`` glue, as in the dictionary.
+# A part that is itself a word kept hyphenated stops the chain: ``cortico-sous-corticale``. Latin locutions keep
+# their form (``post-partum``, ``per os``).
+#
+# Hyphenated: the first part is one of ``_PREFIXES`` or any lowercase combining form in
+# ``-o`` (``cervico-``, ``fémoro-``, ``staturo-``: hundreds, so a pattern rather than a
+# list), minus the nouns in ``_NOT_COMBINING``. Not glued: ``sous-`` / ``sus-`` /
+# ``demi-`` / ``semi-`` / ``non-`` / ``contre-`` (prepositions and words the reform keeps
+# hyphenated), ``écho-`` (``écho-doppler`` 1.8k against 116, left to the author), Greek
+# letters (``bêta-lactamine``), names (a capitalized second part: ``Marco-Polo``).
+#
+# Split by a space: only a bound prefix, or a combining form from ``_SPACED_COMBINING``
+# (the ones the audit found split), never before a conjunction or a preposition
+# (``intra et extra-hépatiques`` keeps its ``intra``). A bare ``-o`` pattern would glue
+# nouns: ``une radio thoracique``, ``chimio adjuvante``, ``placebo contrôlé``.
+_PREFIXES = frozenset("""anti auto bi co endo extra hémi hyper hypo infra inter intra macro méta micro
+    mini mono multi néo oligo para per péri poly post pré primo pro pseudo ré rétro sub supra
+    trans tri ultra uni allo""".split())
+_NOT_COMBINING = frozenset("""écho vidéo photo zéro numéro stylo euro duo trio solo ratio placebo
+    libido lumbago tempo logo mémo métro kilo""".split())
+_SPACED_PREFIXES = "anti|auto|extra|hyper|hypo|infra|inter|intra|multi|per|péri|post|pré|pseudo|rétro|supra|trans|ultra"
+_SPACED_COMBINING = ("abdomino|anatomo|antéro|brachio|broncho|cérébro|clinico|cutanéo|hépato|insulino"
+                     "|latéro|lombo|médiastino|naso|oedémato|postéro|pyélo|sensitivo|supéro|temporo|thoraco|ulcéro")
+_LATIN = frozenset({"post-partum", "per-partum", "ante-partum", "post-mortem", "post-abortum"})
+_DIGRAPHS = frozenset({"ai", "au", "ei", "eu", "oi", "ou", "oe"})
+_NEVER_GLUED = frozenset("sous sus sur contre non demi semi mi".split())
+_HYPHENATED_RE = re.compile(r"(?<![\w-])[^\W\d_]+(?:-[^\W\d_]+)+(?![\w-])")
+_SPACED_RE = re.compile(rf"\b((?i:{_SPACED_PREFIXES}|{_SPACED_COMBINING})) "
                         r"(?!(?:et|ou|ni|sur|de|du|des|à|en)\b)([a-zà-ÿ][^\W\d_]{3,})")
 
 
-def _glue_prefix(m: re.Match) -> str:
-    sep = "-" if m.group(2)[0] in "aeiouyàâéèêëîïôöûüh" else ""
-    return f"{m.group(1)}{sep}{m.group(2)}"
+def _join(a: str, b: str) -> str:
+    """``a`` and ``b`` glued, or hyphenated where gluing would misread."""
+    pair = (a[-1] + b[0]).lower()
+    return f"{a}-{b}" if pair in _DIGRAPHS or (pair[0] == pair[1] and pair[0] != "é") else a + b
+
+
+def _is_combining(part: str) -> bool:
+    low = part.lower()
+    if part != low and part != low.capitalize():
+        return False
+    return low in _PREFIXES or (low.endswith("o") and len(low) >= 3 and low not in _NOT_COMBINING)
+
+
+def _glue_hyphenated(m: re.Match) -> str:
+    word = m.group(0)
+    if word.lower() in _LATIN:
+        return word
+    parts = word.split("-")
+    out = parts[0]
+    for prev, part in zip(parts, parts[1:]):
+        # The second part must be a lowercase word of 3+ letters: "pro-BNP", "apo-E",
+        # "co-a", "Marco-Polo" stay.
+        if _is_combining(prev) and len(part) >= 3 and part.islower() and part not in _NEVER_GLUED:
+            out = _join(out, part)
+        else:
+            out += "-" + part
+    return out
 
 
 def normalize_compounds(text: str) -> str:
-    """``petit déjeuner`` -> ``petit-déjeuner``, ``extra hépatiques`` -> ``extra-hépatiques``,
-    ``multi lithiasique`` -> ``multilithiasique``. Idempotent."""
-    return _PREFIX_RE.sub(_glue_prefix, _PETIT_DEJEUNER_RE.sub(r"\1-\2", text))
+    """``petit déjeuner`` -> ``petit-déjeuner``; prefix and combining-form compounds glued:
+    ``post-opératoire`` / ``post opératoire`` -> ``postopératoire``, ``extra hépatiques`` ->
+    ``extrahépatiques``, ``gastro-entérologie`` and ``anti-inflammatoire`` keep their
+    hyphen. Idempotent."""
+    text = _PETIT_DEJEUNER_RE.sub(r"\1-\2", text)
+    text = _SPACED_RE.sub(lambda m: _join(m.group(1), m.group(2)), text)
+    return _HYPHENATED_RE.sub(_glue_hyphenated, text)
 
 
 # ---------------------------------------------------------------------------
@@ -665,6 +745,37 @@ def default_drug_caser() -> DrugCaser:
     return DrugCaser.from_json()
 
 
+# ---------------------------------------------------------------------------
+# Accent variants
+# ---------------------------------------------------------------------------
+
+ACCENT_SPELLINGS_PATH = Path(__file__).resolve().parent / "accent_spellings.json"
+# A word with its elision and inner hyphens (``l'olécrâne``, ``sterno-cléïdo-mastoïdien``).
+_ACCENT_WORD_RE = re.compile(r"(?<![\w'’-])(?:[^\W\d_]+['’])?[^\W\d_]+(?:-[^\W\d_]+)*")
+
+
+@lru_cache(maxsize=1)
+def _accent_table() -> dict[str, str]:
+    return json.loads(ACCENT_SPELLINGS_PATH.read_text(encoding="utf-8"))["rewrites"]
+
+
+def normalize_accents(text: str, table: dict[str, str] | None = None) -> str:
+    """One accent spelling per word, from ``accent_spellings.json``
+    (``06_hotfixes/07_build_accent_spellings.py``, author's choices 2026-10-08):
+    ``defect`` -> ``défect``, ``artéfact`` -> ``artefact``, ``l'olécrâne`` -> ``l'olécrane``,
+    ``wirsüng`` -> ``wirsung``, drug INNs without accents (``périndopril`` ->
+    ``perindopril``). A capital first letter is kept. Idempotent."""
+    table = _accent_table() if table is None else table
+
+    def repl(m: re.Match) -> str:
+        w = m.group(0)
+        canon = table.get(w.lower())
+        if canon is None:
+            return w
+        return _cap(canon) if w[0].isupper() else canon
+    return _ACCENT_WORD_RE.sub(repl, text)
+
+
 def apply_label_conventions(text: str, tts_source: bool = False) -> str:
     """Every rewrite, titles first so ``M.`` is gone before sentence starts are judged,
     and dates before quantities so a spelled year is read as a year, not as a count.
@@ -675,4 +786,5 @@ def apply_label_conventions(text: str, tts_source: bool = False) -> str:
     text = normalize_staging(normalize_quantities(normalize_clock(normalize_dates(expand_titles(text)))))
     if not tts_source:
         text = normalize_sutures(text)
-    return default_drug_caser()(normalize_spelling(normalize_compounds(text)))
+    # Accents last: the drug caser restores the ANSM accents an INN choice removes.
+    return normalize_accents(default_drug_caser()(normalize_spelling(normalize_compounds(text))))

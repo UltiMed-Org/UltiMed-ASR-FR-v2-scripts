@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "utils"))
 from label_conventions import (  # noqa: E402
     DrugCaser, apply_label_conventions, default_drug_caser, expand_titles, normalize_clock,
-    normalize_compounds, normalize_dates, normalize_quantities, normalize_spelling, normalize_staging, normalize_sutures,
+    normalize_accents, normalize_compounds, normalize_dates, normalize_quantities, normalize_spelling, normalize_staging, normalize_sutures,
     parse_french_number,
 )
 
@@ -149,11 +149,18 @@ def test_quantities() -> None:
         ("douleur à deux sur dix, EVA zéro sur dix", "douleur à 2 sur 10, EVA 0 sur 10"),
         # A percentage before a count is not one number.
         ("0,10 gramme pour cent une fois par jour", "0,10 gramme pour cent une fois par jour"),
+        # A single unit or duration: digits (author's choice 2026-10-08).
+        ("Contrôle à un mois, puis dans une semaine. Un gramme de paracétamol, un an après.",
+         "Contrôle à 1 mois, puis dans 1 semaine. 1 gramme de paracétamol, 1 an après."),
+        ("correction de deux dioptries", "correction de 2 dioptries"),
     ])
     for untouched in [
         "deux comprimés",
         "une fois par jour",
-        "un milligramme, une heure, un an",
+        # Counts, and words rarely a measure after "un"/"une".
+        "une séance, une unité de soins, en seconde intention, un degré de gravité",
+        # An elided "un" stays a word.
+        "au bout d'un mois, l'effet d'une semaine",
         "pendant deux trois jours",
         "Une dose de 4 milligrammes.",
     ]:
@@ -166,11 +173,26 @@ def test_compounds() -> None:
         ("À prendre au petit déjeuner.", "À prendre au petit-déjeuner."),
         ("Les petits déjeuners. Petit déjeuner léger.", "Les petits-déjeuners. Petit-déjeuner léger."),
         ("Voies biliaires extra hépatiques, rein multi lithiasique, Intra abdominal.",
-         "Voies biliaires extra-hépatiques, rein multilithiasique, Intra-abdominal."),
+         "Voies biliaires extrahépatiques, rein multilithiasique, Intra-abdominal."),
         ("Lésions intra et extra-hépatiques, supra ou infra centimétriques.",
-         "Lésions intra et extra-hépatiques, supra ou infracentimétriques."),
+         "Lésions intra et extrahépatiques, supra ou infracentimétriques."),
+        # Glued (author's choice 2026-10-08), every part of a chain, case kept.
+        ("J2 post-opératoire. Post opératoire, pré-opératoire, oeso-gastro-duodénale.",
+         "J2 postopératoire. Postopératoire, préopératoire, oesogastroduodénale."),
+        ("Douleur abdomino-pelvienne, déficit sensitivo moteur, l'abdomino-pelvien, ré-évaluation.",
+         "Douleur abdominopelvienne, déficit sensitivomoteur, l'abdominopelvien, réévaluation."),
+        # A misread digraph or a doubled a / i / o / u keeps the hyphen.
+        ("gastro-entérologie, intra oculaire, intra-utérin, auto-immune, anti-inflammatoire, radio-opaque",
+         "gastro-entérologie, intraoculaire, intra-utérin, auto-immune, anti-inflammatoire, radio-opaque"),
+        ("post traumatique, pré-éclampsie, cortico-sous-corticale", "post-traumatique, prééclampsie, cortico-sous-corticale"),
     ])
     assert normalize_compounds("un petit déjeune") == "un petit déjeune"
+    # Latin, excluded prefixes, nouns, names, uppercase or short second parts.
+    for kept in ("post-partum, per os, sous-cutané, sus-pubien, semi-circulaire, contre-indication",
+                 "l'écho-doppler, bêta-lactamines, vidéo-assistée",
+                 "une radio thoracique, chimio adjuvante, une gastro sévère",
+                 "Marco-Polo, Jean-Pierre, pro-BNP, anti-Xa, apo-E, L4-L5, check-list, c'est-à-dire, peut-être"):
+        assert normalize_compounds(kept) == kept, (kept, normalize_compounds(kept))
     print("test_compounds: OK")
 
 
@@ -209,6 +231,23 @@ def test_spelling() -> None:
     print("test_spelling: OK")
 
 
+def test_accents() -> None:
+    table = {"defect": "défect", "l'olécrâne": "l'olécrane", "périndopril": "perindopril",
+             "sterno-cléïdo-mastoïdien": "sterno-cléido-mastoïdien"}
+    check(lambda t: normalize_accents(t, table), [
+        ("Sans defect, sommet de l'olécrâne. Defect.", "Sans défect, sommet de l'olécrane. Défect."),
+        ("Périndopril 5 mg, muscle sterno-cléïdo-mastoïdien.", "Perindopril 5 mg, muscle sterno-cléido-mastoïdien."),
+    ])
+    # Part of a longer word or a hyphenated compound: untouched.
+    assert normalize_accents("antidefect, defect-like", table) == "antidefect, defect-like"
+    # The committed table, after the drug caser that would put the ANSM accents back.
+    for raw, want in [("PERINDOPRIL et énoxaparine, un artéfact, le canal de Wirsüng.",
+                       "Perindopril et enoxaparine, un artefact, le canal de Wirsung."),
+                      ("paracétamol", "paracétamol")]:
+        assert apply_label_conventions(raw) == want, (raw, apply_label_conventions(raw))
+    print("test_accents: OK")
+
+
 def test_drug_caser() -> None:
     caser = DrugCaser(
         caps={"PRIMPERAN": "Primpéran", "PARACETAMOL": "paracétamol", "UVEDOSE": "Uvedose",
@@ -236,6 +275,7 @@ def test_staging() -> None:
         ("Cancer de stade IIIb, grade I à II, type I et II.", "Cancer de stade 3b, grade 1 à 2, type 1 et 2."),
         ("Antalgique de palier deux, classe III NYHA, NYHA II.", "Antalgique de palier 2, classe 3 NYHA, NYHA 2."),
         ("Diabète de type 2, stades IVB.", "Diabète de type 2, stades 4B."),
+        ("Essai de phase III, phases I et II.", "Essai de phase 3, phases 1 et 2."),
     ])
     # Roman numerals that are names, letters that happen to be Roman, "un peu".
     for kept in ("angiotensine II", "APACHE II", "métaphase II", "type C", "type XX", "un type un peu particulier"):
@@ -276,5 +316,6 @@ if __name__ == "__main__":
     test_spelling()
     test_staging()
     test_drug_caser()
+    test_accents()
     test_all()
     test_generator_parse()
