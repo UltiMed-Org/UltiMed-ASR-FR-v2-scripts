@@ -41,6 +41,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import sys
 from pathlib import Path
 
 import click
@@ -49,18 +50,14 @@ ROOT = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location("variant_audit", ROOT / "06_hotfixes" / "05_label_variant_audit.py")
 _va = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_va)
+sys.path.insert(0, str(ROOT / "utils"))
+from label_conventions import INN_STEM  # noqa: E402
 
 # Drug substances (accent-free, lowercase), written without accents: the substances of
 # the drug stage (``drugs_freq_dosages.jsonl`` rows of type ``substance``), the substances
 # of the drug lexicon (canonical form lowercase; a capitalized one is a brand, whose
 # accents stay: ``Flécaïne``), and any word with an INN stem (``-mab``, ``-tinib``,
 # ``-pril``, ``-sartan``: the dictionary stage holds many drugs the drug stage does not).
-INN_STEM = re.compile(r"(?:mab|nib|pril|sartan|olol|alol|prazole|parine|taxel|platine|lukast|flurane|plase|"
-                      r"xetine|apine|azépam|azepam|cilline|mycine|cycline|statine|vir|setron|tidine|"
-                      r"floxacine|conazole|semide|dronate|glinide|gliptine|gliflozine|rubicine|"
-                      r"poétine|poetine|lizumab|ximab|zumab|mumab)s?$")
-
-
 def _drug_words() -> frozenset[str]:
     words = {"pemetrexed", "abeparvovec", "bulevirtide", "flumazenil", "imipenem", "metreleptine", "naropeine",
              "mexiletine", "mianserine", "mofetil", "mycophenolate", "droperidol", "pimecrolimus", "cefixime",
@@ -88,11 +85,21 @@ OVERRIDES = {"defect": "défect", "artefact": "artefact", "artefacts": "artefact
              "olecranien": "olécranien", "olecranienne": "olécranienne", "retro-olecranienne": "rétro-olécranienne"}
 # Two words, not two spellings: never rewritten.
 KEEP = frozenset("""mole gene genes herpes pyogenes strongyloides anopheles area lutea cinereum reverse
-    senior isolement interferent""".split())
+    senior isolement interferent jeunes dependent coccidioides paracoccidioides""".split())
 # Families whose majority, and wordfreq, are wrong (a typo or a lost umlaut won the count).
 FIXED = {"hexokinase": "hexokinase", "chondroitinase": "chondroïtinase", "subarachnoidien": "subarachnoïdien",
          "helix": "hélix", "seton": "séton", "eicosatetraenoique": "eicosatétraénoïque", "sterno-cleido-mastoidiens": "sterno-cléido-mastoïdiens", "frankenhauser": "frankenhäuser", "immunonephelemetrie": "immunonéphélémétrie",
-         "gerstmann-straussler-scheinker": "gerstmann-sträussler-scheinker", "giraldes": "giraldès"}
+         "gerstmann-straussler-scheinker": "gerstmann-sträussler-scheinker", "giraldes": "giraldès",
+         # Added with --min-cost 3 (2026-10-08): eponyms and brands as their owners write them,
+         # French words whose majority lost or gained an accent, and INNs (unaccented).
+         "bitot": "bitot", "nuck": "nuck", "kossa": "kossa", "quantiferon": "quantiferon", "ethilon": "ethilon",
+         "hemoloc": "hemoloc", "hemolock": "hemolock", "hemolok": "hemolok", "bevitine": "bévitine",
+         "flecaine": "flécaïne", "nephelemetrie": "néphélémétrie", "colpocephalie": "colpocéphalie",
+         "myeloproliferative": "myéloproliférative", "extraconique": "extraconique",
+         "secretome": "sécrétome", "fadenoperation": "fadenopération",
+         "cefotaxime": "cefotaxime", "piperacilline-tazobactam": "piperacilline-tazobactam",
+         "eflornithine": "eflornithine", "lynestrenol": "lynestrenol", "vericiguat": "vericiguat",
+         "irinotecan": "irinotecan", "sebelipase": "sebelipase"}
 
 
 def canonical(forms: list[tuple[str, int]]) -> str | None:
@@ -142,7 +149,7 @@ def rewrites(forms: list[tuple[str, int]]) -> dict[str, str]:
 
 @click.command()
 @click.argument("variants_tsv", type=click.Path(exists=True))
-@click.option("--min-cost", default=10, show_default=True, help="Skip families whose minority forms total fewer occurrences.")
+@click.option("--min-cost", default=3, show_default=True, help="Skip families whose minority forms total fewer occurrences.")
 @click.option("--out", type=click.Path(), default=str(ROOT / "utils" / "accent_spellings.json"), show_default=True)
 def main(variants_tsv, min_cost, out):
     table = {}

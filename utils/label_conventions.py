@@ -108,6 +108,13 @@ from voxtral_normalize import roman_to_int  # noqa: E402
 WORD_RE = re.compile(r"[^\W\d_]+")
 
 
+# Ending of a drug INN (lowercase): ``-mab``, ``-tinib``, ``-pril``, ``-sartan``, ``-taxel``...
+INN_STEM = re.compile(r"(?:mab|nib|pril|sartan|olol|alol|prazole|parine|taxel|platine|lukast|flurane|plase|"
+                      r"xetine|apine|azépam|azepam|cilline|mycine|cycline|statine|vir|setron|tidine|"
+                      r"floxacine|conazole|semide|dronate|glinide|gliptine|gliflozine|rubicine|"
+                      r"poétine|poetine|lizumab|ximab|zumab|mumab)s?$")
+
+
 def fold_key(word: str) -> str:
     """Accent- and case-insensitive key: ``Primpéran`` -> ``PRIMPERAN``."""
     return "".join(c for c in unicodedata.normalize("NFD", word)
