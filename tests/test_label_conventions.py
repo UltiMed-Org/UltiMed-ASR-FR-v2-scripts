@@ -237,6 +237,8 @@ def test_accents() -> None:
     check(lambda t: normalize_accents(t, table), [
         ("Sans defect, sommet de l'olécrâne. Defect.", "Sans défect, sommet de l'olécrane. Défect."),
         ("Périndopril 5 mg, muscle sterno-cléïdo-mastoïdien.", "Perindopril 5 mg, muscle sterno-cléido-mastoïdien."),
+        # Elided: the table holds the bare word only.
+        ("Dose d'périndopril, l'Périndopril.", "Dose d'perindopril, l'Perindopril."),
     ])
     # Part of a longer word or a hyphenated compound: untouched.
     assert normalize_accents("antidefect, defect-like", table) == "antidefect, defect-like"

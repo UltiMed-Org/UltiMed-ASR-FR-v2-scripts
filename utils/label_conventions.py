@@ -776,9 +776,14 @@ def normalize_accents(text: str, table: dict[str, str] | None = None) -> str:
     def repl(m: re.Match) -> str:
         w = m.group(0)
         canon = table.get(w.lower())
-        if canon is None:
+        if canon is not None:
+            return _cap(canon) if w[0].isupper() else canon
+        # Elided word missing as a whole (``l'énoxaparine``): look up the bare word.
+        elision = re.match(r"[^\W\d_]+['’]", w)
+        if elision is None or (canon := table.get(w[elision.end():].lower())) is None:
             return w
-        return _cap(canon) if w[0].isupper() else canon
+        word = w[elision.end():]
+        return elision.group(0) + (_cap(canon) if word[0].isupper() else canon)
     return _ACCENT_WORD_RE.sub(repl, text)
 
 
