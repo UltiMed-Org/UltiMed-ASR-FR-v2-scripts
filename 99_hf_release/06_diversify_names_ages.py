@@ -61,6 +61,7 @@ sys.path.insert(0, str(_HERE.parent / "utils"))
 from nemo_manifest import MANIFEST_GLOBS, read_jsonl, write_jsonl  # noqa: E402
 
 POOL = _HERE / "surname_pool.tsv"
+FIRST_POOL = _HERE / "first_name_pool.tsv"
 CATEGORIES = ("dictionary", "drugs", "acronyms")
 OVERUSED = ("Girard", "Lefèvre", "Bernard", "Lambert", "Petit", "Dubois", "Moreau")
 # Adult ages said 6k times or more in the v2 corpus (a flat adult age is about 3.4k).
@@ -69,6 +70,13 @@ OVERUSED_AGES = {22: 6053, 28: 10287, 29: 7328, 34: 20299, 38: 6372, 42: 7773, 4
 AGE_KEEP = 3440
 AGE_SPREAD = 7
 POOL_SIZE = 1000
+# First names said 280 times or more as a first name (before a surname or ``, 3 ans``),
+# with their INSEE sex (``1`` male, ``2`` female) so ``la petite Léa`` stays feminine.
+# ``Martin``, ``Simon``, ``Pierre`` are surnames too, ``Claude`` is ``Claude Bernard``,
+# ``Adam`` is in ``pomme d'Adam``: left alone.
+OVERUSED_FIRST = {"Léa": "2", "Lucas": "1", "Nathan": "1", "Emma": "2", "Arthur": "1", "Chloé": "2",
+                  "Léo": "1", "Tom": "1", "Gabriel": "1", "Louise": "2", "Inès": "2"}
+FIRST_POOL_SIZE = 300  # per sex
 
 _TITLES = ("Monsieur", "Madame", "Mademoiselle", "docteur", "Docteur", "professeur", "Professeur",
            "Patient", "patient", "Patiente", "patiente", "petit", "petite", "jeune")
@@ -79,6 +87,9 @@ _PERSON = (r"(?:[Pp]atiente?|[Hh]omme|[Ff]emme|âgée?|[Ss]ujet|adulte|primipare
            r"|sportive?|fils|fille|soeur|frère|mère|père|épouse|mari|retraitée?|diabétique"
            r"|hypertendue?|fumeur|fumeuse|obèse|asthmatique|agricultrice|agriculteur|étudiante?"
            r"|enseignante?|salariée?|ouvrière?|ouvrier|infirmière?|infirmier|coureur|coureuse)")
+# ``Lucas`` after a title is a surname (``Monsieur Lucas``), ``d'Adam`` an apple
+_FIRST_RE = re.compile(rf"(?<![\w'’-])({'|'.join(OVERUSED_FIRST)})\b(?![-'’])")
+_TITLE_END_RE = re.compile(rf"\b(?:{'|'.join(_TITLES[:7])}) $")
 _AGE_RE = re.compile(rf"(\b{_PERSON} de |\b[A-ZÉ][\wéèêëïîôç]+, )(\d{{2}}) ans\b")
 
 
@@ -87,18 +98,26 @@ def _draw(seed: str) -> float:
     return int.from_bytes(hashlib.sha256(seed.encode()).digest()[:8], "big") / 2 ** 64
 
 
-def load_pool(path: Path = POOL) -> tuple[list[str], list[float]]:
-    """``(names, cumulative weights)`` of ``surname_pool.tsv``."""
+def load_pool(path: Path = POOL, sex: str | None = None) -> tuple[list[str], list[float]]:
+    """``(names, cumulative weights)`` of ``surname_pool.tsv``, or of the ``sex`` rows of
+    ``first_name_pool.tsv``."""
     names, cum, total = [], [], 0.0
     for line in path.read_text(encoding="utf-8").splitlines():
-        name, weight = line.split("\t")
+        name, *row_sex, weight = line.split("\t")
+        if sex is not None and row_sex != [sex]:
+            continue
         total += float(weight)
         names.append(name)
         cum.append(total)
     return names, [c / total for c in cum]
 
 
-def new_surname(seed: str, pool: tuple[list[str], list[float]]) -> str:
+def load_first_pools(path: Path = FIRST_POOL) -> dict[str, tuple[list[str], list[float]]]:
+    return {sex: load_pool(path, sex) for sex in ("1", "2")}
+
+
+def pick(seed: str, pool: tuple[list[str], list[float]]) -> str:
+    """A name of ``pool``, frequency-weighted, that only depends on ``seed``."""
     names, cum = pool
     x = _draw(seed)
     lo, hi = 0, len(cum) - 1
@@ -120,17 +139,22 @@ def new_age(seed: str, age: int) -> int:
     return near[int(_draw(seed + "|move") * len(near))]
 
 
-def rewrite(text: str, clip: str, pool: tuple[list[str], list[float]]) -> str:
-    """``Madame Girard, 45 ans`` -> ``Madame Rousseau, 47 ans``, same output for the same
-    clip, idempotent."""
+def rewrite(text: str, clip: str, pool: tuple[list[str], list[float]],
+            first_pools: dict[str, tuple[list[str], list[float]]] | None = None) -> str:
+    """``Madame Girard, 45 ans`` -> ``Madame Rousseau, 47 ans``, ``la petite Léa
+    Bernard`` -> ``la petite Manon Dupouy``, same output for the same clip, idempotent."""
+    if first_pools:  # first, so ``Léa Bernard`` is still seen as first name + surname
+        text = _FIRST_RE.sub(lambda m: m.group(0) if _TITLE_END_RE.search(m.string, 0, m.start())
+                             else pick(f"{clip}|{m.group(1)}", first_pools[OVERUSED_FIRST[m.group(1)]]), text)
+
     def name(m: re.Match) -> str:
         if m.group(1)[0].isupper() and m.group(1) not in _TITLES and m.group(1) in _NOT_FIRST:
             return m.group(0)
         seed = f"{clip}|{m.group(2)}"
-        surname = new_surname(seed, pool)
+        surname = pick(seed, pool)
         while surname == m.group(1):  # ``Lucas Lucas``
             seed += "+"
-            surname = new_surname(seed, pool)
+            surname = pick(seed, pool)
         return f"{m.group(1)} {surname}"
 
     text = _NAME_RE.sub(name, text)
@@ -208,6 +232,51 @@ def build_pool(insee: Path, first_names: Path | None, manifests: list[Path]) -> 
     return pool
 
 
+def build_first_pool(first_names: Path, manifests: list[Path]) -> list[tuple[str, str, int]]:
+    """The ``FIRST_POOL_SIZE`` most given first names per sex (INSEE births 2000-2021: the
+    overused names are children's, ``la petite Léa, 3 ans``), as ``(name, sex, count)``.
+    INSEE counts ``JEROME`` and ``JÉRÔME`` apart: they are merged, under the accented
+    spelling when it holds 5% of the births or more. Left out: the overused ones, names given to the other sex in
+    more than 10% of births (``Camille``, ``Dominique``: the sex must survive the swap),
+    names the corpus writes in lowercase 20 times or more (``Rose``, ``Pierre``), and
+    names with characters other than letters, accents and one hyphen."""
+    by_sex: dict[str, Counter] = {}
+    with first_names.open(encoding="utf-8") as f:
+        for r in csv.DictReader(f, delimiter=";"):
+            if r["preusuel"].startswith("_") or not r["annais"].isdigit() or int(r["annais"]) < 2000:
+                continue
+            name = "-".join(p.capitalize() for p in r["preusuel"].split("-"))
+            by_sex.setdefault(name, Counter())[r["sexe"]] += int(r["nombre"])
+    merged: dict[str, Counter] = {}
+    spellings: dict[str, Counter] = {}
+    for name, counts in by_sex.items():
+        merged.setdefault(_fold(name), Counter()).update(counts)
+        spellings.setdefault(_fold(name), Counter())[name] += sum(counts.values())
+    by_sex = {}
+    for key, counts in merged.items():
+        total = sum(counts.values())
+        accented = [n for n, c in spellings[key].most_common() if _fold(n) != n.lower() and c >= 0.05 * total]
+        by_sex[accented[0] if accented else spellings[key].most_common(1)[0][0]] = counts
+    lower = Counter()
+    for path in manifests:
+        for row in read_jsonl(path):
+            lower.update(re.findall(r"(?<=\w )[a-zéèêëïîôç]+\b", row["text"]))
+    pool = []
+    for sex in ("1", "2"):
+        ranked = sorted(by_sex.items(), key=lambda kv: -kv[1][sex])
+        kept = 0
+        for name, counts in ranked:
+            total = sum(counts.values())
+            if (name in OVERUSED_FIRST or name in OVERUSED or counts[sex] < 0.9 * total
+                    or lower[name.lower()] >= 20 or not re.fullmatch(r"[A-ZÉ][a-zéèêëïîôçâ]+(?:-[A-Z][a-zéèêëïîôçâ]+)?", name)):
+                continue
+            pool.append((name, sex, counts[sex]))
+            kept += 1
+            if kept == FIRST_POOL_SIZE:
+                break
+    return pool
+
+
 def _targets(manifests: tuple[Path, ...], root_path: Path) -> list[Path]:
     targets = [Path(m) for m in manifests]
     if not targets:
@@ -238,8 +307,12 @@ def main(manifests: tuple[Path, ...], root: str, apply: bool, examples: int, ins
         pool = build_pool(insee, first_names, main_manifests or targets)
         POOL.write_text("".join(f"{n}\t{c}\n" for n, c in pool), encoding="utf-8")
         logger.info(f"{len(pool)} surnames -> {POOL}, e.g. {[n for n, _ in pool[:12]]}")
+        if first_names:
+            firsts = build_first_pool(first_names, main_manifests or targets)
+            FIRST_POOL.write_text("".join(f"{n}\t{x}\t{c}\n" for n, x, c in firsts), encoding="utf-8")
+            logger.info(f"{len(firsts)} first names -> {FIRST_POOL}, e.g. {[n for n, _, _ in firsts[:12]]}")
         return
-    pool = load_pool()
+    pool, first_pools = load_pool(), load_first_pools()
     shown = 0
     for path in targets:
         rows = read_jsonl(path)
@@ -250,9 +323,9 @@ def main(manifests: tuple[Path, ...], root: str, apply: bool, examples: int, ins
                 new_rows.append(r)
                 continue
             clip = Path(r["audio_filepath"]).name
-            new = dict(r, text=rewrite(r["text"], clip, pool))
+            new = dict(r, text=rewrite(r["text"], clip, pool, first_pools))
             if r.get("asr_training_source") is not None:
-                new["asr_training_source"] = rewrite(r["asr_training_source"], clip, pool)
+                new["asr_training_source"] = rewrite(r["asr_training_source"], clip, pool, first_pools)
             if new != r:
                 changed += 1
                 if shown < examples:

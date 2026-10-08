@@ -29,6 +29,14 @@ def test_rewrite() -> None:
         age = mod.new_age(f"c{i}|45", 45)
         assert age == 45 or (age not in mod.OVERUSED_AGES and abs(age - 45) <= mod.AGE_SPREAD), age
     assert not set(mod.OVERUSED) & set(mod.load_pool()[0])
+    # first names: same sex, a surname after a title stays, a second run changes nothing
+    firsts = mod.load_first_pools()
+    text = "La petite Léa Bernard, 3 ans, et son frère Lucas. Monsieur Lucas, pomme d'Adam."
+    out = mod.rewrite(text, "000014_0002_x.flac", pool, firsts)
+    assert "Léa" not in out and "frère Lucas" not in out and "Monsieur Lucas" in out, out
+    girl = out.split("petite ")[1].split(" ")[0]
+    assert girl in firsts["2"][0], girl
+    assert mod.rewrite(out, "000014_0002_x.flac", pool, firsts) == out
     print("test_rewrite: OK")
 
 
