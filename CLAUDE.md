@@ -457,6 +457,8 @@ the transcript against the label (CER), regenerate the bad clips, keep the best 
   (`skipped`), and writes `99_hf_release/asr_flagged_clips.jsonl`, which 04 drops. Tuned
   on val/test 2026-09-28 (25 of 116,876 clips); spelled codes, glued compounds and
   mid-sentence misreads are deliberately not flagged. Tested by `tests/test_flag_asr_defects.py`.
+- `05_label_variant_audit.py`: lists the words the labels spell several ways (`hyphen` families: `post-opératoire` / `postopératoire` / `post opératoire`; `accent` families: `défect` / `defect`), ranked by minority count, with real word pairs (`mais on` / `maison`, `visualise` / `visualisé`) marked `homograph`. Text only, no audio; made 2026-10-08 to pick label conventions before the multi-voice v2. Tested by `tests/test_label_variant_audit.py`.
+- `06_asr_residuals.py`: aligns each label with a greedy transcription by an UltiMed-finetuned Parakeet (no boost, no regex) and ranks the differing stretches as `ortho` (same letters once accents, hyphens, apostrophes and spaces are folded: a label convention conflict, the model writes the majority form), `case` or `other`, with per-split counts and WER. Imports `strip_accents` from 05. Tested by `tests/test_label_variant_audit.py` (one file runs the doctests of 05, 06 and 07).
 - `02_statistics.py`: report over a scored file (CER by category, duration ceiling
   audit). `03_collect_suspicious.py`: copy every clip the gates flagged into one local
   folder with an index, so they can be listened to rather than trusted to a number.
