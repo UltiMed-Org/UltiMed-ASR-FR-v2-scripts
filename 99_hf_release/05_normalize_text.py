@@ -74,15 +74,12 @@ from loguru import logger
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent / "utils"))
-from nemo_manifest import read_jsonl, write_jsonl  # noqa: E402
+from nemo_manifest import MANIFEST_GLOBS, read_jsonl, write_jsonl  # noqa: E402
 from label_conventions import apply_label_conventions  # noqa: E402
 from parakeet_tokenizer import ParakeetTokenizer  # noqa: E402
 from percent_normalize import (  # noqa: E402
     LEFTOVER_RE, percent_sign_to_one_word, percent_to_one_word, percent_to_symbol,
 )
-
-# Same manifest set 03 and 04 process.
-MANIFEST_GLOBS = ("data/NeMO_files/*.jsonl", "data/NeMO_files/*/*.jsonl")
 
 def normalize_row(row: dict, tok: ParakeetTokenizer) -> dict:
     """Return a copy of ``row`` with ``text`` and ``asr_training_source`` normalized.

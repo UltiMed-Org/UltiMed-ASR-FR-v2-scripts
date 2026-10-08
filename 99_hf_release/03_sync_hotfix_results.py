@@ -54,7 +54,7 @@ from loguru import logger
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent / "utils"))
-from nemo_manifest import read_jsonl, resolve_audio, write_jsonl  # noqa: E402
+from nemo_manifest import MANIFEST_GLOBS, read_jsonl, resolve_audio, write_jsonl  # noqa: E402
 
 # The STT side of the corpus, named as it actually is rather than as the OpenAI-compatible
 # alias the client sends (`whisper-1`). Confirmed against the serving endpoint itself,
@@ -71,8 +71,6 @@ HOTFIX_SOURCES = (
     ("../06_hotfixes/improved/full.stt.jsonl", "data/NeMO_files"),
     ("../06_hotfixes/improved_parrot/full.stt.jsonl", "data/NeMO_files/PARROT"),
 )
-# Every manifest the release path reads or rebuilds from, top level and per dataset.
-MANIFEST_GLOBS = ("data/NeMO_files/*.jsonl", "data/NeMO_files/*/*.jsonl")
 
 QC_FIELDS = ("cer", "cer_tail", "stt_transcript", "n_stt_check", "stt_model",
              "cfg_alpha", "regenerated", "qc_status")

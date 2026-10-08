@@ -50,6 +50,9 @@ SPLITS: tuple[str, ...] = ("train", "val", "test")
 # A NeMo training row reads only these three; the rest are provenance the parent
 # combiner re-uses to re-split without re-reading the source datasets.
 NEMO_CORE = ("audio_filepath", "duration", "text")
+# Every manifest the release stage (99_hf_release/03 to 06) reads or rewrites, top level
+# and per dataset, relative to the stage root.
+MANIFEST_GLOBS = ("data/NeMO_files/*.jsonl", "data/NeMO_files/*/*.jsonl")
 
 
 # --------------------------------------------------------------------------- #

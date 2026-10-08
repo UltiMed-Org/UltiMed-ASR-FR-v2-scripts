@@ -90,11 +90,7 @@ from loguru import logger
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent / "utils"))
-from nemo_manifest import clip_key, read_jsonl, resolve_audio, write_jsonl  # noqa: E402
-
-# Same manifest set 03_sync_hotfix_results.py refreshes, so every manifest that got a
-# `qc_status` is also one this filters.
-MANIFEST_GLOBS = ("data/NeMO_files/*.jsonl", "data/NeMO_files/*/*.jsonl")
+from nemo_manifest import MANIFEST_GLOBS, clip_key, read_jsonl, resolve_audio, write_jsonl  # noqa: E402
 
 # The release-wide split the parquet and the trainer read. PARROT is eval-only and
 # lives outside it, but it must not repeat a training text either.
