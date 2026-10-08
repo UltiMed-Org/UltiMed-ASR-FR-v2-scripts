@@ -779,8 +779,21 @@ def _transfer_case(form: str, canon: str) -> str:
     with capitals of its own (``TEP-scanner``, ``proBNP``) is kept as is."""
     if canon != canon.lower():
         return _cap(canon) if form[0].isupper() else canon
-    letters = iter(c for c in form if c not in " -")
-    return "".join(next(letters) if c not in " -" else c for c in canon)
+    # (letter, follows a separator) pairs; a capital that only started a part the
+    # canonical glues is dropped: ``Moya-Moya`` -> ``Moyamoya``, not ``MoyaMoya``.
+    letters = [(c, i > 0 and form[i - 1] in " -") for i, c in enumerate(form) if c not in " -"]
+    out = []
+    for c in canon:
+        if c in " -":
+            out.append(c)
+            continue
+        k = len(out) - out.count(" ") - out.count("-")
+        letter, after_sep = letters[k]
+        nxt = letters[k + 1][0] if k + 1 < len(letters) else ""
+        if after_sep and out and out[-1] not in " -" and letter.isupper() and not nxt.isupper():
+            letter = letter.lower()
+        out.append(letter)
+    return "".join(out)
 
 
 def normalize_compound_spellings(text: str, table: dict[str, str] | None = None) -> str:
@@ -845,6 +858,11 @@ _DETERMINERS = frozenset("""le la les un une des du ce cet cette ces son sa ses 
     notre nos votre vos aux au""".split())
 _NOT_AFTER_NON = frozenset("""seulement plus pas loin sans si que pour de du des la le les et ou ni à au aux
     en avec par sur dans une un ce cette ces il elle ils elles on est sont moins mais""".split())
+# Nouns whatever precedes them: the fixed compounds (``une mutation non-sens``) and the
+# noun endings (``non-conformité``, ``en non-appui`` aside). ``-ment`` is left out, it
+# would catch adverbs (``non totalement``).
+_NON_NOUNS = frozenset("sens lieu dit dits soi être droit appui".split())
+_NON_NOUN_END = re.compile(r"(?:tion|sion|ité|age|ure|ence|ance|isme)s?$")
 _NON_RE = re.compile(r"\b([Nn]on)[- ](?=([^\W\d_]{3,}))")
 _WORD_BEFORE_RE = re.compile(r"([^\W\d_]+)\s+$")
 
@@ -858,7 +876,9 @@ def normalize_non(text: str) -> str:
             return m.group(0)
         before = _WORD_BEFORE_RE.search(text[max(0, m.start() - 30):m.start()])
         prev = before.group(1).lower() if before else ""
-        noun = prev in _DETERMINERS or (prev == "de" and _is_noun(nxt))
+        low = nxt.lower()
+        noun = (prev in _DETERMINERS or low in _NON_NOUNS or bool(_NON_NOUN_END.search(low))
+                or (prev == "de" and _is_noun(nxt)))
         return m.group(1) + ("-" if noun else " ")
     return _NON_RE.sub(repl, text)
 

@@ -301,7 +301,8 @@ def test_staging() -> None:
 def test_compound_spellings() -> None:
     table = {"gastroentérologie": "gastro-entérologie", "tep scanner": "TEP-scanner",
              "transsphénoïdale": "trans-sphénoïdale", "sous costale": "sous-costale",
-             "écho doppler": "écho-doppler", "pro bnp": "proBNP", "adn-polymérase": "adn polymérase"}
+             "écho doppler": "écho-doppler", "pro bnp": "proBNP", "adn-polymérase": "adn polymérase",
+             "moya-moya": "moyamoya", "anti-rhésus": "antirhésus", "angioirm": "angio-irm"}
     check(lambda t: normalize_compound_spellings(t, table), [
         ("Gastroentérologie. Un TEP scanner, un Tep scanner, voie transsphénoïdale.",
          "Gastro-entérologie. Un TEP-scanner, un TEP-scanner, voie trans-sphénoïdale."),
@@ -310,6 +311,8 @@ def test_compound_spellings() -> None:
         # Part of a longer hyphen chain or a name with digits: untouched.
         ("un super-tep scanner, le pro bnp2", "un super-tep scanner, le pro bnp2"),
         ("NT pro BNP, Pro BNP", "NT proBNP, ProBNP"),
+        # A capital that only started a glued part is dropped, an acronym's is kept.
+        ("Moya-Moya, anti-Rhésus, AngioIRM", "Moyamoya, antirhésus, Angio-IRM"),
     ])
     # The shipped table: idempotent through the whole pipeline.
     for canon in ("gastro-entérologie", "trans-sphénoïdale", "sous-costale", "check-list", "post-partum"):
@@ -333,6 +336,8 @@ def test_non() -> None:
          "Un non-fumeur, le non-respect, des non-répondeurs, un taux de non-réponse."),
         ("Patiente non-fumeuse, lymphome non-hodgkinien, non significatif, non seulement.",
          "Patiente non fumeuse, lymphome non hodgkinien, non significatif, non seulement."),
+        ("Mutation non sens, en non appui, critère non progression, non totalement résolu.",
+         "Mutation non-sens, en non-appui, critère non-progression, non totalement résolu."),
     ])
     print("test_non: OK")
 

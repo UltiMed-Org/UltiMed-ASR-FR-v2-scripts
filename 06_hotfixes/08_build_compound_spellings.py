@@ -26,10 +26,11 @@ Canonical form, author's choices (2026-10-08), in order:
    - a doubled letter keeps a hyphen (``trans-sphénoïdale``, ``hyper-réflectifs``);
    - ``sous`` / ``sus`` before an adjective take a hyphen (``sous-costale``,
      ``sus-pubienne``); before a noun the family is left alone (``sous traitement``);
-   - ``sur`` is glued (``surinfection``, ``surexposition``, ``sursoit``);
+   - ``sur`` is glued (``sur-stimulation`` -> ``surstimulation``), but a spaced ``sur X``
+     is never rewritten: it is mostly the preposition (``sur infection urinaire``);
    - ``post`` / ``pré`` / ``per`` follow ``normalize_compounds``: a space before a noun
      (``pré admission``), glued before an adjective (``préhospitalier``);
-   - ``alpha`` / ``bêta`` take a hyphen (``bêta-lactamines``, ``alpha-bloquant``);
+   - ``alpha`` / ``bêta`` take a hyphen (``bêta-lactamines``, ``alpha-bloquant``, ``TGF-bêta``);
    - ``écho`` takes a hyphen before a vowel or a noun (``écho-endoscopie``,
      ``écho-doppler``) and is glued before an adjective (``échoguidée``).
 3. Otherwise the most frequent form (``thromboembolique``, ``neuro-imagerie``,
@@ -87,9 +88,11 @@ OVERRIDES = {
     "moyamoya": "moyamoya", "stromaréaction": "stroma-réaction", "surexposition": "surexposition",
     "surinfection": "surinfection", "nitroimidazolé": "nitro-imidazolé",
     "mésoappendiculaire": "mésoappendiculaire", "alphacalcidol": "alphacalcidol",
+    "solumédrol": "Solu-Médrol", "simplexvirus": "Simplexvirus",
 }
 NOISE = frozenset("""bassinet latente lata duret sangle labile encéphalique vitréen lapeyronie lefort
-    tau tnm ptnm pde pdeb sla cil bbb gd etv pta ret pik diffuk zymad zoneneutre nashtest""".split())
+    tau tnm ptnm pde pdeb sla cil bbb gd etv pta ret pik diffuk zymad zoneneutre nashtest
+    benali malcuit brownvialettovan""".split())
 FUNCTION = frozenset("""le la les l ne en et de du des un une au aux ce cet se sa son ses il elle on y à ou
     où que qui mais pas par pour tout dans lui leur nous vous je tu ni si""".split())
 ELISION = re.compile(r"^[^\W\d_]+['’]")
@@ -153,7 +156,7 @@ def canonical(forms: list[tuple[str, int]]) -> tuple[str | None, str]:
                 if lc._is_noun(tail):
                     return None, "skip"
                 seps[pos], ruled = "-", True
-            elif head in GREEK:
+            elif head in GREEK or tail in GREEK:
                 seps[pos], ruled = "-", True
             elif head == "sur":
                 seps.pop(pos, None)
@@ -200,7 +203,8 @@ def main(variants_tsv, out):
         if canon is None:
             continue
         for f, _ in forms:
-            if f != canon:
+            # ``sur`` spaced is mostly the preposition: ``choc septique sur infection urinaire``.
+            if f != canon and not f.startswith("sur "):
                 table[f] = canon
         if reason == "majority" and len(forms) > 1 and forms[1][1] >= 20 and 2 * forms[1][1] >= forms[0][1]:
             close.append(forms)
