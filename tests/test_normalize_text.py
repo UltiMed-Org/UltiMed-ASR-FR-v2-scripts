@@ -60,7 +60,32 @@ def test_cp1252_mojibake() -> None:
     print("test_cp1252_mojibake: OK")
 
 
+def test_main_dedup_parallel() -> None:
+    """main normalizes each distinct (text, source) once, on several processes, and
+    writes every manifest exactly as row-by-row normalize_row would."""
+    import json
+    import tempfile
+    mod = load_sync_module(script=SCRIPT)
+    sys.modules[mod.__name__] = mod  # the worker processes look the function up by module
+    tok = mod.ParakeetTokenizer(nfkc=False)
+    rows = [{"audio_filepath": f"{i}.flac", "text": t, "asr_training_source": t}
+            for i, t in enumerate(["J5 post opération, post-chimiothérapie.", "M. Petit, 10 pour cent.",
+                                   "Rien à changer."])]
+    rows.append({"audio_filepath": "n.flac", "text": "Suites post opératoires."})  # no source
+    with tempfile.TemporaryDirectory() as d:
+        a, b = Path(d) / "full.jsonl", Path(d) / "train.jsonl"
+        for path, part in ((a, rows), (b, rows[1:3])):
+            path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in part), encoding="utf-8")
+        mod.main((a, b), d, True, 2, 3)
+        for path, part in ((a, rows), (b, rows[1:3])):
+            got = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+            assert got == [mod.normalize_row(r, tok) for r in part], got
+    assert got[0]["text"] == "Monsieur Petit, 10 %.", got
+    print("test_main_dedup_parallel: OK")
+
+
 if __name__ == "__main__":
     test_normalize_row()
     test_label_conventions_both_texts()
     test_cp1252_mojibake()
+    test_main_dedup_parallel()

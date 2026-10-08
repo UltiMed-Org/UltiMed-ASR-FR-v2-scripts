@@ -56,14 +56,17 @@ The hand-made NeMo-repo sets (``perso/drug_sentence_dataset/*.json``, the privat
 ``perso/oli_spoken_dataset`` manifests) are normalized by passing them explicitly:
 ``uv run 05_normalize_text.py --apply <manifest> ...``.
 
-Every manifest is rewritten independently, like 04, and the run is idempotent.
+Each distinct (text, source) pair is normalized once over all manifests, on ``--jobs``
+processes, and every manifest is rewritten independently, like 04, and the run is idempotent.
 
 This file was written by Claude Code.
 """
 from __future__ import annotations
 
+import os
 import sys
 from collections import Counter
+from multiprocessing import Pool
 from pathlib import Path
 
 import click
@@ -96,12 +99,43 @@ def normalize_row(row: dict, tok: ParakeetTokenizer) -> dict:
     return out
 
 
+_TOK: ParakeetTokenizer | None = None
+
+
+def _pair_key(row: dict) -> tuple[str, str | None]:
+    """``normalize_row`` reads only these two fields, so equal keys give equal results."""
+    return row["text"], row.get("asr_training_source")
+
+
+def _normalize_key(key: tuple[str, str | None]) -> tuple[tuple, tuple[str, str | None]]:
+    global _TOK
+    if _TOK is None:
+        _TOK = ParakeetTokenizer(nfkc=False)
+    row = {"text": key[0]} if key[1] is None else {"text": key[0], "asr_training_source": key[1]}
+    return key, _pair_key(normalize_row(row, _TOK))
+
+
+def normalize_keys(keys: set, jobs: int) -> dict:
+    """``{(text, source): (new text, new source)}``, each distinct pair normalized once.
+
+    The release manifests repeat every row three times (``full``, the split files, the
+    per-subset files), and the conventions cost about 2 ms a text, so this plus ``jobs``
+    processes takes the whole corpus from hours to about 4 minutes.
+    """
+    if jobs <= 1:
+        return dict(map(_normalize_key, keys))
+    with Pool(jobs) as pool:
+        return dict(pool.imap_unordered(_normalize_key, list(keys), chunksize=500))
+
+
 @click.command()
 @click.argument("manifests", nargs=-1, type=click.Path(path_type=Path))
 @click.option("--root", default=str(_HERE), show_default="99_hf_release/",
               help="Release stage root, holding the `data` symlink.")
 @click.option("--apply", is_flag=True, help="Write. Without it this is a dry run.")
-def main(manifests: tuple[Path, ...], root: str, apply: bool) -> None:
+@click.option("--jobs", default=os.cpu_count() or 1, show_default="all cores")
+@click.option("--examples", default=10, show_default=True, help="Changed labels to print.")
+def main(manifests: tuple[Path, ...], root: str, apply: bool, jobs: int, examples: int) -> None:
     """Normalize percent spellings, whitespace and uncovered characters in the manifests."""
     root_path = Path(root).resolve()
     targets = [Path(m) for m in manifests]
@@ -112,12 +146,22 @@ def main(manifests: tuple[Path, ...], root: str, apply: bool) -> None:
         raise SystemExit(f"no manifest found under {root_path} (is the `data` symlink mounted?)")
 
     tok = ParakeetTokenizer(nfkc=False)
+    targets = [p for p in targets if p.is_file() and not p.name.startswith(".")]
+    keys = {_pair_key(r) for path in targets for r in read_jsonl(path)}
+    logger.info(f"{len(targets)} manifests, {len(keys)} distinct (text, source) pairs, {jobs} jobs")
+    done = normalize_keys(keys, jobs)
+    for (text, _), (new_text, _) in [kv for kv in done.items() if kv[0][0] != kv[1][0]][:examples]:
+        logger.info(f"  - {text[:160]}\n    + {new_text[:160]}")
     for path in targets:
-        if not path.is_file() or path.name.startswith("."):
-            continue
-        label = path.relative_to(root_path) if path.is_relative_to(root_path) else path
         rows = read_jsonl(path)
-        new_rows = [normalize_row(r, tok) for r in rows]
+        label = path.relative_to(root_path) if path.is_relative_to(root_path) else path
+        new_rows = []
+        for r in rows:
+            text, source = done[_pair_key(r)]
+            new = dict(r, text=text)
+            if source is not None:
+                new["asr_training_source"] = source
+            new_rows.append(new)
         changed = Counter()
         leftovers, still_bad = [], Counter()
         for old, new in zip(rows, new_rows):
