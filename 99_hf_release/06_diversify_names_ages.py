@@ -19,6 +19,9 @@ piled on a few values (``45 ans`` 22.9k against 125 for ``46 ans``, ``34 ans`` 2
   1931-2000, frequency-weighted, accents taken from the corpus or the INSEE first-name
   list, French words and the overused names left out). ``Claude Bernard`` (the
   physiologist, ``Claude Bernard-Horner``) stays.
+- a first name from ``OVERUSED_FIRST`` (``Léa`` 2.5k, ``Lucas`` 2.3k, mostly children)
+  becomes a same-sex first name from ``first_name_pool.tsv`` (the 300 most given per sex,
+  INSEE births 2000-2021), except after a title (``Monsieur Lucas`` is a surname).
 - an adult age in ``OVERUSED_AGES`` after a person (``patiente de 45 ans``, ``Girard, 45
   ans``, ``âgé de 45 ans``) keeps its value with probability ``AGE_KEEP / count``, so
   about 3.4k labels (the flat share of an adult age) keep it, and otherwise moves by up

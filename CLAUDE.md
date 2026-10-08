@@ -263,7 +263,9 @@ from _pipeline_shared import call_llm, PricingTracker  # noqa: E402
   `--apply`, idempotent, seeded per clip) replaces the seven surnames the text LLM
   overused (`Girard`, `Lefèvre`... 91% of title + surname mentions) by draws from the
   committed `99_hf_release/surname_pool.tsv` (top 1,000 INSEE surnames) and spreads the
-  overused adult ages (`45 ans` 22.9k) over nearby ages, in the independent-sentence
+  overused adult ages (`45 ans` 22.9k) over nearby ages, and the overused first names
+  (`Léa`, `Lucas`...) by same-sex draws from `99_hf_release/first_name_pool.tsv` (INSEE
+  births 2000-2021), in the independent-sentence
   categories only (not PARHAF / PARROT documents). Tested by
   `tests/test_diversify_names_ages.py`.
 - **`voxtral_normalize.py`** deterministically turns an `asr_training_target`
