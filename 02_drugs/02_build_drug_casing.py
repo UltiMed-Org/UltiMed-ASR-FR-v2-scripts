@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["click", "loguru"]
+# dependencies = ["click", "loguru", "wordfreq"]
 # ///
 """Build ``utils/drug_casing.json``, the lexicon that gives each drug word ONE written form.
 
@@ -43,6 +43,15 @@ dictionary term (``AINS``), and 4-letter words with fewer than two vowels
 (``DMSA``, ``LHRH``, ``JEXT``: nothing sayable as one word). Longer
 vowel-poor words are recased anyway (``TALTZ``, ``VPRIV``, ``VFEND`` are brands).
 
+Words outside the drug terms get an ALLCAPS entry too (added 2026-10-08, author's
+request): the PARHAF rewrites shout hospital drugs the drug stage never lists
+(``injection BEVACIZUMAB``, ``AVASTIN``, ``TAXOL``, ``FERINJECT``) and eponyms
+(``FAZEKAS``, ``APGAR``). Such a key is recased to its usual spelling when the corpus
+writes it in normal case (mid-sentence) more often than ALLCAPS, and it is either an
+INN (``label_conventions.INN_STEM``) or no common French word (wordfreq zipf below
+``RARE_ZIPF``), so ``GOLD``, ``CHARGE``, ``SANS`` keep their capitals. The same
+protections apply.
+
 The JSON holds two maps:
 
 - ``caps``: key -> canonical, applied to every ALLCAPS spelling of the key.
@@ -77,7 +86,7 @@ from loguru import logger
 
 _REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO / "utils"))
-from label_conventions import WORD_RE, at_sentence_start, fold_key  # noqa: E402
+from label_conventions import INN_STEM, WORD_RE, at_sentence_start, fold_key  # noqa: E402
 
 STAGES = ("01_dictionnary", "02_drugs", "03_PARHAF", "04_PARROT", "07_acronyms")
 ROMAN_RE = re.compile(r"^M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})$")
@@ -87,6 +96,8 @@ VOWELS = set("AEIOUY")
 # (sucre 139 against sucré 153; the missing accents top out near 0.2, e.g.
 # irbesartan 29 against irbésartan 132).
 MINIMAL_PAIR_SHARE = 0.3
+# Below this wordfreq zipf, a word outside the drug terms is no common French word.
+RARE_ZIPF = 2.0
 
 
 def title(word: str) -> str:
@@ -105,6 +116,27 @@ def protect_reason(key: str, acronyms: set[str]) -> str | None:
     if len(key) == 4 and sum(c in VOWELS for c in key) < 2:
         return "4 letters, vowels<2"
     return None
+
+
+def corpus_caps(forms: dict, caps_count: Counter, keys: set[str], acronyms: set[str]) -> dict[str, str]:
+    """ALLCAPS keys outside the drug terms that the corpus mostly writes in normal case.
+
+    >>> forms = {"BEVACIZUMAB": Counter({"bévacizumab": 9}), "GOLD": Counter({"Gold": 9}),
+    ...          "AVASTIN": Counter({"Avastin": 5}), "METAVIR": Counter({"Metavir": 2})}
+    >>> corpus_caps(forms, Counter(BEVACIZUMAB=2, GOLD=3, AVASTIN=4, METAVIR=40), set(), set())
+    {'AVASTIN': 'Avastin', 'BEVACIZUMAB': 'bévacizumab'}
+    """
+    from wordfreq import zipf_frequency
+
+    out = {}
+    for k in sorted(caps_count):
+        seen = forms.get(k)
+        if k in keys or not seen or sum(seen.values()) <= caps_count[k] or protect_reason(k, acronyms):
+            continue
+        canonical = seen.most_common(1)[0][0]
+        if INN_STEM.search(canonical.lower()) or zipf_frequency(canonical, "fr") < RARE_ZIPF:
+            out[k] = canonical
+    return out
 
 
 @click.command()
@@ -154,8 +186,6 @@ def main(out: str) -> None:
             for m in WORD_RE.finditer(text):
                 w = m.group(0)
                 k = fold_key(w)
-                if k not in keys:
-                    continue
                 if w.isupper() and len(w) > 1:
                     caps_count[k] += 1
                 elif not at_sentence_start(text, m.start()):
@@ -202,6 +232,10 @@ def main(out: str) -> None:
         for w in seen:
             if len(w) >= 4 and w.lower() != canonical and w[-1] == canonical[-1]:
                 variants[w.lower()] = canonical
+
+    extra = corpus_caps(forms, caps_count, keys, acronyms)
+    caps.update(extra)
+    logger.info(f"{len(extra)} ALLCAPS keys outside the drug terms recased: {sorted(extra.items())[:40]}")
 
     payload = {
         "_doc": "Built by 02_drugs/02_build_drug_casing.py, applied by utils/label_conventions.DrugCaser. "
