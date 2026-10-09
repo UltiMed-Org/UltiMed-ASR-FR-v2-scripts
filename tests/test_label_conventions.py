@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "utils"))
 from label_conventions import (  # noqa: E402
     DrugCaser, apply_label_conventions, default_drug_caser, expand_titles, normalize_clock,
-    normalize_accents, normalize_compounds, normalize_dates, normalize_quantities, normalize_spelling, normalize_staging, normalize_roman, normalize_sutures, normalize_thousands, restore_tts_accents,
+    normalize_accents, normalize_compounds, normalize_dates, normalize_quantities, normalize_spelling, normalize_staging, normalize_roman, normalize_sutures, normalize_thousands, restore_tts_accents, strip_generic_labs,
     parse_french_number, normalize_compound_spellings, normalize_official_names, normalize_non, normalize_ordinals,
     lowercase_eponym_nouns, normalize_latin_names,
 )
@@ -217,6 +217,16 @@ def test_sutures_and_decimals() -> None:
     # The TTS source keeps what voxtral said.
     assert apply_label_conventions("Vicryl trois zéro", tts_source=True) == "Vicryl trois zéro"
     print("test_sutures_and_decimals: OK")
+
+
+def test_generic_labs() -> None:
+    check(strip_generic_labs, [
+        ("Sous cholecalciferol Viatris 2,5 milligrammes et perindopril Arrow Génériques 4.", "Sous cholecalciferol 2,5 milligrammes et perindopril 4."),
+        ("Ténofovir Mylan : charge virale indétectable.", "Ténofovir : charge virale indétectable."),
+        # people named like a lab, and products named after one
+        ("Monsieur Teva, l'enfant Mylan Martin, le jeune Mylan, pour Mylan Millet.",) * 2,
+        ("Phosphore Sandoz 500, Aspirine Upsa, Accord pour la chirurgie.",) * 2,
+    ])
 
 
 def test_thousands() -> None:
@@ -463,6 +473,7 @@ if __name__ == "__main__":
     test_accents()
     test_compound_spellings()
     test_official_names()
+    test_generic_labs()
     test_non()
     test_ordinals()
     test_eponym_nouns()

@@ -73,6 +73,10 @@ rewrites the minority spellings to it:
   ``le 1er mai`` stays), ``doppler`` / ``holter`` lowercase (``lowercase_eponym_nouns``)
   and Latin names Latin in a binomial only (``normalize_latin_names``: ``Herpes
   simplex``, ``un herpès``).
+- **Generic labs** (``strip_generic_labs``, 2026-10-09). The lab after a generic drug is
+  dropped (``cholecalciferol Viatris 2,5`` -> ``cholecalciferol 2,5``). Unlike the other
+  rewrites this one is not spoken identically: the v1 audio is regenerated from the
+  rewritten TTS source.
 - **Spelling variants** (``normalize_spelling``). ``œ`` -> ``oe`` everywhere (``cœur`` ->
   ``coeur``), ``aigüe`` -> ``aiguë``, ``compte-rendu`` -> ``compte rendu``,
   ``bêta-bloquant`` / ``bêtabloquant`` -> ``bétabloquant``, ``anévrysme`` -> ``anévrisme``,
@@ -935,6 +939,24 @@ _OFFICIAL_RULES = (
 )
 
 
+# Generic labs written after a drug (``cholecalciferol Viatris 2,5``, ``perindopril Arrow
+# Génériques``): dropped (user decision 2026-10-09), so the sentence names the drug only.
+# Unambiguous lab names only (not ``Accord``, ``EG``, ``Sun``), not after a title
+# or a word that introduces a person (``Monsieur Teva``, ``l'enfant Mylan Martin``,
+# ``pour Mylan``), and not the products named after their lab (``Phosphore Sandoz``,
+# ``Aspirine Upsa``).
+_LAB_RE = re.compile(
+    r"(?<!Monsieur)(?<!Madame)(?<!docteur)(?<!Docteur)(?<!enfant)(?<!patient)(?<!patiente)(?<!petit)(?<!jeune)"
+    r"(?<!petite)(?<!pour)(?<!de)(?<!et)(?<!Phosphate)(?<!Phosphore)(?<=[^\W\d_]) "
+    r"(?:Arrow|Biogaran|Cristers|Evolugen|Mylan|Sandoz|Substipharm|Teva|Viatris|Zentiva|Zydus|"
+    r"Almus|Ratiopharm|Qualimed|Krka|Ranbaxy)(?: (?:G[ée]n[ée]riques|France|Santé|Pharma))?\b(?! [A-ZÀ-Ý][a-zà-ÿ])")
+
+
+def strip_generic_labs(text: str) -> str:
+    """``cholecalciferol Viatris 2,5`` -> ``cholecalciferol 2,5``. Idempotent."""
+    return _LAB_RE.sub("", text)
+
+
 def normalize_official_names(text: str) -> str:
     """``NT pro BNP`` -> ``NT-proBNP``, ``LHRH`` -> ``LH-RH``, ``anti-SS-A`` -> ``anti-SSA``,
     ``HLA B27`` -> ``HLA-B27``, ``PDL1`` -> ``PD-L1``, ``PD1`` -> ``PD-1``. Idempotent."""
@@ -1190,6 +1212,6 @@ def apply_label_conventions(text: str, tts_source: bool = False) -> str:
     # Eponyms lowercased before the compound table, which keys on lowercase forms but
     # keeps their capitals (``Echo-Doppler`` is looked up as ``echo-doppler``).
     text = normalize_compound_spellings(lowercase_eponym_nouns(normalize_compounds(text)))
-    text = normalize_latin_names(normalize_ordinals(normalize_non(normalize_official_names(text))))
+    text = normalize_latin_names(normalize_ordinals(normalize_non(normalize_official_names(strip_generic_labs(text)))))
     text = normalize_accents(default_drug_caser()(normalize_spelling(text)))
     return respell_for_tts(restore_tts_accents(text)) if tts_source else text
