@@ -1181,16 +1181,32 @@ def restore_tts_accents(text: str, table: dict[str, str] | None = None) -> str:
 
 # TTS-only respellings for words voxtral (voice fr_female) misreads, each one checked by
 # ear (2026-10-09): ``naevus`` was read "naévouze", ``praevia`` "praévia", ``99m`` "99
-# mètres". The label keeps the written form.
+# mètres", ``foetus`` "feutusse", ``caecum`` "ka-é-cum", ``macroadénome`` "macrodénome",
+# ``chordome`` "corps-d'homme", ``foramens`` "fora-ment", ``eutrophe`` "utrophe". Latin
+# ``oe`` / ``ae`` read ``é`` (``œ`` did not help), ``-ome`` gets the closed ``ô``. The
+# label keeps the written form.
 _TTS_RESPELLINGS = (
     (re.compile(r"\b([Nn])aev"), r"\1év"),
     (re.compile(r"\b([Pp])raevia\b"), r"\1révia"),
+    (re.compile(r"\b([Tt])aeni"), r"\1éni"),
+    (re.compile(r"([Cc])aec"), r"\1éc"),
+    (re.compile(r"\b([Aa])eruginosa\b"), r"\1éruginosa"),
+    (re.compile(r"([Ff])oet"), r"\1ét"),
+    (re.compile(r"([Cc])oeli"), r"\1éli"),
+    # not the o of a prefix: ``phytoestrogènes`` is phyto + estrogènes
+    (re.compile(r"(?<![oO])oestr"), "éstr"),
+    (re.compile(r"\bOestr"), "Éstr"),
+    (re.compile(r"(?<=[Ll]ymph)oed"), "éd"),
+    (re.compile(r"\b([Mm]acro|[Ff]ibro)adénome"), r"\1-adénome"),
+    (re.compile(r"\b([Cc]hord|[Cc]olob|[Ss]cot)ome"), r"\1ôme"),
+    (re.compile(r"\b([Ff])oramens\b"), r"\1oramènes"),
+    (re.compile(r"\b([Ee])utrophe"), r"\1utrofe"),
     (re.compile(r"\b99m\b"), "99-M"),
 )
 
 
 def respell_for_tts(text: str) -> str:
-    """``naevus`` -> ``névus``, ``placenta praevia`` -> ``placenta prévia``, ``99m`` -> ``99-M``."""
+    """``naevus`` -> ``névus``, ``foetale`` -> ``fétale``, ``caecum`` -> ``cécum``, ``99m`` -> ``99-M``. Idempotent."""
     for pattern, repl in _TTS_RESPELLINGS:
         text = pattern.sub(repl, text)
     return text

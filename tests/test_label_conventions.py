@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "utils"))
 from label_conventions import (  # noqa: E402
     DrugCaser, apply_label_conventions, default_drug_caser, expand_titles, normalize_clock,
-    normalize_accents, normalize_compounds, normalize_dates, normalize_quantities, normalize_spelling, normalize_staging, normalize_roman, normalize_sutures, normalize_thousands, restore_tts_accents, strip_generic_labs,
+    normalize_accents, normalize_compounds, normalize_dates, normalize_quantities, normalize_spelling, normalize_staging, normalize_roman, normalize_sutures, normalize_thousands, respell_for_tts, restore_tts_accents, strip_generic_labs,
     parse_french_number, normalize_compound_spellings, normalize_official_names, normalize_non, normalize_ordinals,
     lowercase_eponym_nouns, normalize_latin_names,
 )
@@ -242,6 +242,14 @@ def test_thousands() -> None:
     tts = "Naevus et naevomatose, placenta praevia, technétium-99m."
     assert apply_label_conventions(tts, tts_source=True) == "Névus et névomatose, placenta prévia, technétium-99-M."
     assert apply_label_conventions(tts) == tts
+    check(respell_for_tts, [
+        ("Souffrance foetale, Oestradiol et oestrogènes, maladie coeliaque, lymphoedème.", "Souffrance fétale, Éstradiol et éstrogènes, maladie céliaque, lymphédème."),
+        ("Caecum, iléocaecale, Taenia, aeruginosa.", "Cécum, iléocécale, Ténia, aéruginosa."),
+        ("Macroadénome, fibroadénomes, chordome, colobomes, scotome, foramens, eutrophe.", "Macro-adénome, fibro-adénomes, chordôme, colobômes, scotôme, foramènes, eutrofe."),
+        # what the ear kept as-is
+        ("Oedème, oesophage, oeil, hypoesthésie, foramen, microadénome, athérome.",) * 2,
+        ("Phytoestrogènes, xénoestrogènes, hypoestrogénie.",) * 2,
+    ])
     print("test_thousands: OK")
 
 
