@@ -1157,14 +1157,31 @@ def restore_tts_accents(text: str, table: dict[str, str] | None = None) -> str:
     return normalize_accents(text, _tts_accent_table() if table is None else table)
 
 
+# TTS-only respellings for words voxtral (voice fr_female) misreads, each one checked by
+# ear (2026-10-09): ``naevus`` was read "naévouze", ``praevia`` "praévia", ``99m`` "99
+# mètres". The label keeps the written form.
+_TTS_RESPELLINGS = (
+    (re.compile(r"\b([Nn])aev"), r"\1év"),
+    (re.compile(r"\b([Pp])raevia\b"), r"\1révia"),
+    (re.compile(r"\b99m\b"), "99-M"),
+)
+
+
+def respell_for_tts(text: str) -> str:
+    """``naevus`` -> ``névus``, ``placenta praevia`` -> ``placenta prévia``, ``99m`` -> ``99-M``."""
+    for pattern, repl in _TTS_RESPELLINGS:
+        text = pattern.sub(repl, text)
+    return text
+
+
 def apply_label_conventions(text: str, tts_source: bool = False) -> str:
     """Every rewrite, titles first so ``M.`` is gone before sentence starts are judged,
     and dates before quantities so a spelled year is read as a year, not as a count.
 
     ``tts_source=True`` is for a text the TTS reads (05 on the v1 sources): it skips
     ``normalize_sutures`` and ``normalize_thousands``, which voxtral may not speak
-    identically, and keeps
-    the accents of drug INNs (``restore_tts_accents``).
+    identically, keeps the accents of drug INNs (``restore_tts_accents``) and respells
+    the words voxtral misreads (``respell_for_tts``).
     """
     text = normalize_roman(normalize_staging(normalize_quantities(normalize_clock(normalize_dates(expand_titles(text))))))
     if not tts_source:
@@ -1175,4 +1192,4 @@ def apply_label_conventions(text: str, tts_source: bool = False) -> str:
     text = normalize_compound_spellings(lowercase_eponym_nouns(normalize_compounds(text)))
     text = normalize_latin_names(normalize_ordinals(normalize_non(normalize_official_names(text))))
     text = normalize_accents(default_drug_caser()(normalize_spelling(text)))
-    return restore_tts_accents(text) if tts_source else text
+    return respell_for_tts(restore_tts_accents(text)) if tts_source else text

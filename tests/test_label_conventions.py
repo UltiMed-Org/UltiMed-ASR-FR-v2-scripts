@@ -229,6 +229,9 @@ def test_thousands() -> None:
     ])
     # the TTS source keeps the spaced form
     assert apply_label_conventions("18 000 plaquettes.", tts_source=True) == "18 000 plaquettes."
+    tts = "Naevus et naevomatose, placenta praevia, technétium-99m."
+    assert apply_label_conventions(tts, tts_source=True) == "Névus et névomatose, placenta prévia, technétium-99-M."
+    assert apply_label_conventions(tts) == tts
     print("test_thousands: OK")
 
 
