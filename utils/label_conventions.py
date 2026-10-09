@@ -1194,7 +1194,7 @@ _TTS_RESPELLINGS = (
     (re.compile(r"([Ff])oet"), r"\1ét"),
     (re.compile(r"([Cc])oeli"), r"\1éli"),
     # not the o of a prefix: ``phytoestrogènes`` is phyto + estrogènes
-    (re.compile(r"(?<![oO])oestr"), "éstr"),
+    (re.compile(r"(?<![Pp]hyt)(?<![Xx]én)(?<![Hh]yp)(?<![Mm]yc)oestr"), "éstr"),
     (re.compile(r"\bOestr"), "Éstr"),
     (re.compile(r"(?<=[Ll]ymph)oed"), "éd"),
     (re.compile(r"\b([Mm]acro|[Ff]ibro)adénome"), r"\1-adénome"),
