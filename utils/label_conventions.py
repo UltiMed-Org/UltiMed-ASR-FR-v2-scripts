@@ -1182,7 +1182,8 @@ def restore_tts_accents(text: str, table: dict[str, str] | None = None) -> str:
 # TTS-only respellings for words voxtral (voice fr_female) misreads, each one checked by
 # ear (2026-10-09): ``naevus`` was read "naévouze", ``praevia`` "praévia", ``99m`` "99
 # mètres", ``foetus`` "feutusse", ``caecum`` "ka-é-cum", ``macroadénome`` "macrodénome",
-# ``chordome`` "corps-d'homme", ``foramens`` "fora-ment", ``eutrophe`` "utrophe". Latin
+# ``chordome`` "corps-d'homme", ``foramens`` "fora-ment", ``eutrophe`` "utrophe",
+# ``aphtes`` "aptes", ``canthus`` "kintus", ``bullage`` "boulage". Latin
 # ``oe`` / ``ae`` read ``é`` (``œ`` did not help), ``-ome`` gets the closed ``ô``. The
 # label keeps the written form.
 _TTS_RESPELLINGS = (
@@ -1201,6 +1202,11 @@ _TTS_RESPELLINGS = (
     (re.compile(r"\b([Cc]hord|[Cc]olob|[Ss]cot)ome"), r"\1ôme"),
     (re.compile(r"\b([Ff])oramens\b"), r"\1oramènes"),
     (re.compile(r"\b([Ee])utrophe"), r"\1utrofe"),
+    (re.compile(r"\b([Aa])phte(s?)\b"), r"\1fte\2"),
+    (re.compile(r"\b([Cc])anthus\b"), r"\1antus"),
+    (re.compile(r"\b([Bb])ullage\b"), r"\1ulage"),
+    (re.compile(r"\bNaegele\b"), "Négélé"),
+    (re.compile(r"\b([Pp])rédescemétique"), r"\1rédéscémétique"),
     (re.compile(r"\b99m\b"), "99-M"),
 )
 

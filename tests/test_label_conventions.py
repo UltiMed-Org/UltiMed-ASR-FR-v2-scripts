@@ -249,6 +249,8 @@ def test_thousands() -> None:
         # what the ear kept as-is
         ("Oedème, oesophage, oeil, hypoesthésie, foramen, microadénome, athérome.",) * 2,
         ("Phytoestrogènes, xénoestrogènes, hypoestrogénie.",) * 2,
+        ("Aphtes, un aphte, canthus, bullage, règle de Naegele, prédescemétique.", "Aftes, un afte, cantus, bulage, règle de Négélé, prédéscémétique."),
+        ("Aphtose, épicanthus, Naegeli, membrane de Descemet, Henle, Dix-Hallpike.",) * 2,
     ])
     print("test_thousands: OK")
 
