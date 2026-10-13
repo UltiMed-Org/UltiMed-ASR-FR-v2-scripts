@@ -42,6 +42,11 @@ Nothing listens on `:8003` until that is done, and stage 05 aborts on an unreach
 
 One run per stage, each resumable (existing files are skipped, so a crash costs nothing):
 
+The two loops below are also `05_generate_audio/generate_v2.sh`, which is what to run
+in practice (`./generate_v2.sh`, or `./generate_v2.sh 07_acronyms` for one stage; it
+checks the server is up first and logs to `tts_generate_v2.log` so v1's throughput log
+stays intact). Spelled out here because the flags are the decisions:
+
 ```bash
 cd 05_generate_audio
 
