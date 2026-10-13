@@ -160,7 +160,7 @@ A 3000+ hours corpus of **dictation-style French medical sentences** spoken by a
 | On-disk size | **TODO (v2)**; v1.3 shipped 254.61 GB (main corpus) + 851 MB (PARROT subset) |
 | Splits | train / val / test, target 80 / 10 / 10, balanced by **audio duration** |
 | Sources | public French medical dictionaries (Wiktionary + others), French drug names, PARHAF, common medical acronyms (Wikipedia-sourced, hand-filtered) (main corpus, CC BY 4.0); PARROT radiology (separate CC BY-NC-SA 4.0, test-only subset) |
-| Voices | **ten French voices**, 5 female and 5 male (2 shipped [Voxtral][voxtral] voices + 8 hybrids I built), one per clip, picked by hash -- see [the ten voices](#the-ten-voices-and-what-synthetic-audio-still-costs) |
+| Voices | **ten French voices**, 5 female and 5 male (2 shipped [Voxtral][voxtral] voices + 8 hybrids I built), picked by hash, per clip on the term sources and per document on PARHAF / PARROT -- see [the ten voices](#the-ten-voices-and-what-synthetic-audio-still-costs) |
 
 Numbers regenerate from the source NeMo manifests (the working master the Parquet is built from) with:
 
