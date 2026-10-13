@@ -48,8 +48,9 @@ rewrites each `<name>/{train,val,test}.jsonl` to that dataset's rows of the top-
 split, so the per-source and release-wide splits never disagree
 (`--sync-per-source-only` redoes just that on existing manifests). `03_sync_hotfix_results.py` then carries stage
 06's results into every manifest: it refreshes the `duration` of clips whose audio was
-regenerated (a rebuild would NOT, since `probe_durations` caches by file name with no
-mtime) and attaches the QC columns the release ships (`cer`, `cer_tail`,
+regenerated (a rebuild re-probes them too since `probe_durations` validates its
+per-name cache against each clip's size and mtime, but only 03 carries over the CER,
+the transcript and the `qc_status`) and attaches the QC columns the release ships (`cer`, `cer_tail`,
 `stt_transcript`, `stt_model`, `n_stt_check`, `cfg_alpha`, `regenerated`, `qc_status`).
 It joins on the resolved absolute audio path, so manifests that store it relative to
 different directories all match, and it is idempotent. Run it after any improvement run
@@ -86,7 +87,11 @@ stage's `generated_audios` symlink point at the v2 audio root (`audio_datasets/v
 the SSD, starting empty); the v1 audio and the v1 manifests (`NeMO_files/`, holding the
 v2 texts) stay in the parent `audio_datasets/`. `07_write_back_texts.py` copied those
 v2 texts into every `generated_dataset.jsonl` (stage 05's input), so v2 audio is
-synthesized from them.
+synthesized from them. **`docs/V2_REGENERATION_RUNBOOK.md` is the ordered procedure
+for that run**: the preflight, the stage 05 / 06 / 99 commands with the values they
+need, the four places a v1 QC judgement can be inherited by a v2 clip because the two
+share a file name (durations, the ASR-flagged list, the QC columns, the size cache),
+and the one thing still to implement, pinning v2's splits to v1's.
 
 The **release format is Parquet, not tar**: `scripts/build_parquet.py` packages the
 whole corpus into sharded Parquet with the FLAC bytes embedded (one subset per

@@ -114,6 +114,8 @@ Two stage docs are worth reading on their own: [`06_hotfixes/README_alternating_
 
 [`docs/BUILD_LOG.md`](docs/BUILD_LOG.md) is the running log kept while building: the actual commands, the actual score distributions, the actual costs, and the reasoning behind the decisions that did not work out the first time.
 
+[`docs/V2_REGENERATION_RUNBOOK.md`](docs/V2_REGENERATION_RUNBOOK.md) is the ordered procedure for the v2 run (the whole corpus re-synthesized with ten voices), including the stale-QC rules that matter because v2 reuses v1's file names.
+
 [`CLAUDE.md`](CLAUDE.md) is the architecture guide. It was written for coding agents and it is the densest description of how the pieces fit together. **If you are pointing an agent at this repository, that is the file to give it first.**
 
 ## Architecture: one engine, five sources
