@@ -162,5 +162,47 @@ with tempfile.TemporaryDirectory() as tmp:
           va.read_provenance(audio, Path(tmp) / "07_acronyms" / "generated_dataset.jsonl")
           is None)
 
+# --------------------------------------------- 6. "row" mode keys on the index that varies
+# v2 runs "row" on the term stages and "group" on the document stages, but the two must
+# not be the same thing by accident: PARHAF and PARROT rows carry variant_index == 0 on
+# EVERY row with the real position in chunk_index, so a row-mode key built from
+# variant_index collapses to the group key and the mode silently does nothing. These
+# checks fail if the field preference in assignment_key is flipped back.
+doc_rows = [{"source_id": "PARHAF_0001", "term_index": 7, "variant_index": 0,
+             "chunk_index": i} for i in range(6)]
+doc_group_keys = [va.assignment_key(r, field="source_id", mode="group") for r in doc_rows]
+doc_row_keys = [va.assignment_key(r, field="source_id", mode="row") for r in doc_rows]
+
+check("a document's chunks share one group-mode key", len(set(doc_group_keys)) == 1,
+      str(doc_group_keys))
+check("row mode gives a document's chunks distinct keys", len(set(doc_row_keys)) == 6,
+      str(doc_row_keys))
+check("row mode keys a chunk on chunk_index, not variant_index",
+      doc_row_keys[3] == "PARHAF_0001:3", doc_row_keys[3])
+check("row mode is not group mode on a document",
+      doc_row_keys[0] != doc_group_keys[0], f"{doc_row_keys[0]} == {doc_group_keys[0]}")
+# The point of row mode on a document stage would be to spread chunks over speakers; the
+# reason v2 does NOT use it there is editorial (one reader per report), not technical.
+check("row mode actually spreads a document over several voices",
+      len({va.voice_for_row(r, field="source_id", mode="row") for r in doc_rows}) > 1,
+      str([va.voice_for_row(r, field="source_id", mode="row") for r in doc_rows]))
+
+# The term stages have no chunk_index at all, so the fix must leave them exactly as they
+# were: dictionary / drugs / acronyms are 92.5 pct of the clips and are what v2 runs in
+# row mode, so a shift here would relabel them.
+term_rows = [{"term_index": 1234, "variant_index": i} for i in range(8)]
+term_row_keys = [va.assignment_key(r, field="source_id", mode="row") for r in term_rows]
+check("a term's variants key on variant_index", term_row_keys == [f"1234:{i}" for i in range(8)],
+      str(term_row_keys))
+check("row mode spreads a term's variants over several voices",
+      len({va.voice_for_row(r, field="source_id", mode="row") for r in term_rows}) > 1,
+      str([va.voice_for_row(r, field="source_id", mode="row") for r in term_rows]))
+# A row with neither index (possible on a hand-made row) must still produce a key rather
+# than raise, since the group alone already identifies it.
+check("a row with no index field still keys",
+      va.assignment_key({"term_index": 9}, field="source_id", mode="row") == "9:0",
+      va.assignment_key({"term_index": 9}, field="source_id", mode="row"))
+
+
 print(f"\n{len(failures)} failed" if failures else "\nall checks passed")
 sys.exit(1 if failures else 0)

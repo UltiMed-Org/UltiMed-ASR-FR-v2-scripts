@@ -61,9 +61,16 @@ VOICES_FR_V2 = (
     "h_frm_chf",    # cheerful_female
 )
 
-# How to turn a row into the thing that gets hashed. "group" is the default and the
-# only mode used for v2; "row" exists for the experiment where one term's variants are
-# deliberately spread over several speakers.
+# How to turn a row into the thing that gets hashed. "group" keys on the group alone,
+# "row" gives every clip its own draw. v2 uses BOTH, one per stage, because the group
+# means two different things depending on the stage: for 01_dictionnary, 02_drugs and
+# 07_acronyms a group is one TERM and its written variants, which are independent
+# sentences, so "row" is used there to hear a given drug name in several accents and to
+# keep a bad voice/term pairing from costing all ~8 clips of that term; for 03_PARHAF
+# and 04_PARROT a group is one DOCUMENT and the clips are consecutive chunks of it, so
+# "group" is used there and a report keeps one reader from start to end. Both modes are
+# hashes, so edit and resume stability is identical either way (see module docstring);
+# the mode a run used is recorded per audio folder in its voice_assignment.json.
 MODES = ("group", "row")
 
 
@@ -101,7 +108,8 @@ def assignment_key(row: dict, *, field: str, mode: str = "group") -> str:
         The group field, from `group_field`.
     mode
         `"group"` keys on the group alone, so all of a group's clips share a voice.
-        `"row"` appends the variant index, giving each clip its own draw.
+        `"row"` appends the clip's index within its group, giving each clip its own
+        draw.
 
     Returns
     -------
@@ -116,7 +124,17 @@ def assignment_key(row: dict, *, field: str, mode: str = "group") -> str:
         raise KeyError(f"row has neither {field!r} nor 'term_index': {sorted(row)}")
     if mode == "group":
         return str(group)
-    return f"{group}:{row.get('variant_index', row.get('chunk_index', 0))}"
+    # `chunk_index` FIRST, and the order is the whole correctness of "row" mode on the
+    # document stages: 03_PARHAF and 04_PARROT rows carry BOTH fields, with
+    # `variant_index` hard 0 on every row and the real position in `chunk_index`.
+    # Reading `variant_index` first therefore collapsed every chunk of a document to
+    # the key "<source_id>:0", which is exactly the group-mode key: "row" mode was a
+    # silent no-op there, with no error and a plausible-looking assignment. The term
+    # stages (dictionary, drugs, acronyms) have no `chunk_index` at all, so they are
+    # unaffected by the order. This mirrors `item_index` in
+    # 99_hf_release/01_build_nemo_manifest.py, which already preferred `chunk_index`.
+    index = row.get("chunk_index", row.get("variant_index", 0))
+    return f"{group}:{index}"
 
 
 def voice_for_key(key: str, voices: tuple[str, ...] | list[str] = VOICES_FR_V2) -> str:
