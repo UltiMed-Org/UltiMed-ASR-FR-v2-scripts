@@ -67,12 +67,22 @@ import time
 import unicodedata
 import urllib.error
 import urllib.request
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import soundfile as sf
 from loguru import logger
 from tqdm import tqdm
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "utils"))
+from voice_assignment import (  # noqa: E402
+    MODES,
+    VOICES_FR_V2,
+    group_field,
+    load_voices,
+    voice_for_row,
+)
 
 DEFAULT_URL = "http://127.0.0.1:8003"
 DEFAULT_LOG_FILE = Path(__file__).resolve().parent / "tts_generate.log"
@@ -160,14 +170,20 @@ def post_json(url: str, body: dict, timeout: float) -> tuple[int, bytes, float]:
         return e.code, e.read(), time.perf_counter() - t0
 
 
-def build_body(text: str, args: argparse.Namespace) -> dict:
+def build_body(text: str, args: argparse.Namespace, voice: str | None = None) -> dict:
     """Request body for /v1/audio/speech; unset knobs are omitted so the
-    server falls back to its startup defaults."""
+    server falls back to its startup defaults.
+
+    `voice` overrides `args.voice` for this one row. v2 reads the corpus with ten
+    voices, assigned per group by utils/voice_assignment, and the voice is a
+    per-request field on every backend we use, so one run covers all ten with no
+    restart: see run_batch.
+    """
     body: dict = {"input": text, "response_format": args.format}
     optional = {
         "model": args.model,
         "instructions": args.instruction,
-        "voice": args.voice,
+        "voice": voice or args.voice,
         "seed": args.seed,
         "speed": args.speed,
         "temperature": args.temperature,
@@ -214,7 +230,7 @@ def payload_duration(payload: bytes) -> float | None:
 
 
 def synthesize(base_url: str, text: str, out: Path,
-               args: argparse.Namespace) -> tuple[float, float | None]:
+               args: argparse.Namespace, voice: str | None = None) -> tuple[float, float | None]:
     """Synthesize `text` into `out`; return (backend elapsed seconds,
     clip duration seconds or None when unparseable).
 
@@ -229,7 +245,8 @@ def synthesize(base_url: str, text: str, out: Path,
     resume retries it; the real fix is shorter input text, since the same text will
     truncate again.
     """
-    code, payload, elapsed = post_json(f"{base_url}/v1/audio/speech", build_body(text, args), args.timeout)
+    code, payload, elapsed = post_json(f"{base_url}/v1/audio/speech",
+                                       build_body(text, args, voice), args.timeout)
     if code != 200:
         raise RuntimeError(f"server returned {code} after {elapsed:.2f}s: "
                            f"{payload[:500].decode('utf-8', 'replace')}")
@@ -292,9 +309,65 @@ def run_single(base_url: str, args: argparse.Namespace) -> int:
     return 0
 
 
+def resolve_roster(args: argparse.Namespace) -> tuple[tuple[str, ...] | None, str]:
+    """Return (roster, mode) for this run: the voices to spread rows over, or None.
+
+    Parameters
+    ----------
+    args
+        Parsed CLI args; reads `--voice`, `--voices-file` and `--voice-mode`.
+
+    Returns
+    -------
+    tuple of (tuple of str or None, str)
+        `(None, "single")` means every row uses `args.voice` (or, if that is unset
+        too, whatever voice the server booted with), which is exactly v1 behaviour.
+        Otherwise the roster and the assignment mode.
+
+    `--voice` wins over the roster rather than erroring, so the v1 invocations and
+    the one-off re-synthesis of a single clip keep working unchanged.
+    """
+    if args.voice_mode == "single" or args.voice:
+        return None, "single"
+    voices = load_voices(args.voices_file) if args.voices_file else VOICES_FR_V2
+    return voices, args.voice_mode
+
+
+def write_voice_provenance(out_dir: Path, jsonl_path: Path, voices: tuple[str, ...] | None,
+                           mode: str, field: str | None, counts: Counter) -> None:
+    """Record which roster this audio was generated with, next to the audio.
+
+    Stage 99 re-derives each clip's voice from the same hash rather than reading a
+    per-clip record (602k rows would be a pointless file), which is only sound while
+    the roster and the mode are the ones used here. This file is what lets it check
+    that instead of assuming it: a roster edited between synthesis and release would
+    otherwise relabel every clip silently. Keyed by input file, so several stages can
+    share one output directory.
+    """
+    path = out_dir / "voice_assignment.json"
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        doc = {}
+    doc[jsonl_path.name] = {
+        "input": str(jsonl_path),
+        "voices": list(voices) if voices else None,
+        "mode": mode,
+        "group_field": field,
+        "rows_per_voice": dict(sorted(counts.items())),
+    }
+    path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+
+
 def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Ten voices by default (v2), one voice when --voice or --voice-mode single says so
+    # (v1). The voice is a per-request field, so a single run covers the whole roster
+    # with no restart and no second pass.
+    voices, voice_mode = resolve_roster(args)
+    field: str | None = None
+    per_voice: Counter = Counter()
 
     # Existing clips are matched by their index/term stem, not their full
     # filename, so a clip already synthesized as .wav counts as done even when
@@ -303,7 +376,7 @@ def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
     # ".flac.tmp" has stem "....flac" and so never masks a real stem.
     existing_stems = {p.stem for p in out_dir.iterdir() if p.is_file()}
 
-    todo: list[tuple[Path, str]] = []
+    todo: list[tuple[Path, str, str | None]] = []
     planned: set[str] = set()
     skipped_existing = bad_rows = 0
     with jsonl_path.open() as f:
@@ -324,13 +397,30 @@ def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
                 bad_rows += 1
                 continue
             planned.add(stem)
+            # The group field is decided ONCE, from the first valid row, so one row
+            # missing source_id cannot regroup the rest of the file onto term_index.
+            if voices and field is None:
+                field = group_field(row)
+            voice = voice_for_row(row, field=field, mode=voice_mode,
+                                  voices=voices) if voices else None
+            if voice:
+                # Counted for every planned row, not just the ones generated now, so
+                # the provenance describes the corpus and not the tail of a resume.
+                per_voice[voice] += 1
             if stem in existing_stems and not args.overwrite:
                 skipped_existing += 1
                 continue
-            todo.append((out_dir / f"{stem}.{args.format}", row["asr_training_source"]))
+            todo.append((out_dir / f"{stem}.{args.format}", row["asr_training_source"], voice))
 
     logger.info("{}: {} rows planned, {} already done (skipped), {} to generate",
                 jsonl_path, len(planned), skipped_existing, len(todo))
+    if voices:
+        spread = ", ".join(f"{v}={per_voice.get(v, 0)}" for v in voices)
+        logger.info("voices: {} of them, by {} ({} mode): {}",
+                    len(voices), field, voice_mode, spread)
+        write_voice_provenance(out_dir, jsonl_path, voices, voice_mode, field, per_voice)
+    else:
+        logger.info("voices: single ({})", args.voice or "server default")
 
     failed = generated = 0
     total_audio = 0.0
@@ -342,8 +432,8 @@ def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
     # --concurrency 1. as_completed yields in finish order, so log lines interleave,
     # but each row still lands in its own file.
     pool = ThreadPoolExecutor(max_workers=max(1, args.concurrency))
-    futures = {pool.submit(synthesize, base_url, text, out, args): out
-               for out, text in todo}
+    futures = {pool.submit(synthesize, base_url, text, out, args, voice): out
+               for out, text, voice in todo}
     try:
         for fut in tqdm(as_completed(futures), total=len(futures), unit="clip", desc="TTS"):
             out = futures[fut]
@@ -402,11 +492,26 @@ def main() -> int:
                    help="Voice-direction prose (qwen3-tts VoiceDesign only; TADA and "
                         "Voxtral ignore it). Not sent unless given.")
     p.add_argument("--voice", default=None,
-                   help="Voice selector, passed through verbatim (unset keeps the "
-                        "server's current voice). TADA: a tada-ref-*.gguf path or "
-                        "registry name. Voxtral: a built-in embedding name, e.g. "
-                        "fr_male, fr_female, neutral_female (see VOXTRAL_VOICES in "
-                        "this file).")
+                   help="ONE voice for the whole run, passed through verbatim (this is "
+                        "v1 behaviour, and it overrides the roster below). TADA: a "
+                        "tada-ref-*.gguf path or registry name. Voxtral: a built-in "
+                        "embedding name, e.g. fr_male, fr_female, neutral_female (see "
+                        "VOXTRAL_VOICES in this file).")
+    p.add_argument("--voice-mode", default="group", choices=(*MODES, "single"),
+                   help="How batch mode picks a voice per row (default: group). "
+                        "'group' spreads the roster over groups, so all clips of a "
+                        "term (or of a source document) share one voice: this is v2's "
+                        "mode. 'row' gives every clip its own draw, spreading a term's "
+                        "variants over speakers. 'single' is v1: one voice for "
+                        "everything, from --voice or the server's default.")
+    p.add_argument("--voices-file", default=None, metavar="FILE",
+                   help="Roster to spread rows over, one voice name per line, '#' "
+                        "comments ignored (default: the ten names in "
+                        "utils/voice_assignment.py, i.e. the v2 roster). Accepts the "
+                        "CrispASR repo's voices_fr_production.txt as is. The FILE ORDER "
+                        "is part of the mapping, so re-ordering it re-assigns every "
+                        "voice; changing the roster after generating invalidates the "
+                        "voice column of the clips already written.")
     p.add_argument("--model", default=None,
                    help="OpenAI `model` field (default: not sent). CrispASR does not "
                         "need it; vLLM validates it, so against voxtral-tts pass "
