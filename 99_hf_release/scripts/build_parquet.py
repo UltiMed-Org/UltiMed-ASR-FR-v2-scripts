@@ -21,6 +21,11 @@ separate manifest to pair (the text lives in the same row as the audio). A small
 companion script (scripts/parquet_to_nemo.py) turns these Parquets back into the
 loose-flac / tarred layout NeMo trains on. Written with Claude Code.
 
+Provenance includes a flat `voice` column (v2): which of the ten French voices read
+the clip, so the Data Viewer can filter on it and a model finetuned on this corpus
+can be scored per voice. It is an empty string on v1-era manifests, which were
+single-voice and carry no such field.
+
 Source of truth
     Reads the committed NeMo manifests on the `data` SSD symlink:
         data/NeMO_files/{train,val,test}.jsonl   (categories: dictionary, drugs, parhaf, acronyms)
@@ -147,6 +152,14 @@ def write_shard(out: Path, manifest: Path, chunk: list[dict]) -> None:
 
     audio, text, source, duration, category = [], [], [], [], []
     group_id, group_mode, item_index, filename = [], [], [], []
+    # Which of the ten v2 voices read the clip (01_build_nemo_manifest re-derives it
+    # from the roster recorded beside the audio). Always a column, even for v1-era
+    # single-voice manifests that carry no `voice` field: Parquet columns cannot be
+    # per-row optional, and an empty string reads as "not recorded" rather than
+    # claiming a speaker. Flat, like the QC columns, so the HF Data Viewer can filter
+    # on it, which is the whole point of shipping it (per-voice WER of a model
+    # finetuned on this).
+    voice = []
     # Quality control, from 03_sync_hotfix_results.py. Flat columns rather than a nested
     # struct so the HF Data Viewer can sort and filter on them directly.
     qc: dict[str, list] = {k: [] for k in QC_COLUMNS}
@@ -164,6 +177,7 @@ def write_shard(out: Path, manifest: Path, chunk: list[dict]) -> None:
         group_mode.append(str(r.get("group_mode", "")))
         item_index.append(int(r.get("item_index", 0)))
         filename.append(member)
+        voice.append(str(r.get("voice", "")))
         for key in QC_COLUMNS:
             qc[key].append(r.get(key))
 
@@ -177,19 +191,20 @@ def write_shard(out: Path, manifest: Path, chunk: list[dict]) -> None:
         "group_mode": Value("string"),
         "item_index": Value("int32"),
         "filename": Value("string"),
+        "voice": Value("string"),
         **{name: Value(dtype) for name, dtype in QC_COLUMNS.items()},
     })
     ds = Dataset.from_dict(
         {"audio": audio, "text": text, "asr_training_source": source,
          "duration": duration, "category": category,
          "group_id": group_id, "group_mode": group_mode, "item_index": item_index,
-         "filename": filename, **qc},
+         "filename": filename, "voice": voice, **qc},
         features=feats,
     )
     out.parent.mkdir(parents=True, exist_ok=True)
     ds.to_parquet(str(out))
     del ds, audio, text, source, duration, category, group_id, group_mode, item_index
-    del filename, qc
+    del filename, voice, qc
     gc.collect()
 
 

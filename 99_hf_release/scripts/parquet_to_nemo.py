@@ -79,7 +79,12 @@ SHUFFLE_SEED = 42
 # Non-audio columns carried from the Parquet into the reconstructed manifest
 # (asr_training_source is the deterministic TTS input alongside text; the rest is
 # provenance). NeMo ignores all of them during training.
-PROV_COLS = ["asr_training_source", "category", "group_id", "group_mode", "item_index"]
+# `voice` is which of the ten v2 voices read the clip, and it has to come back out
+# here or a manifest rebuilt from the Parquet would silently lose the column that
+# makes per-voice evaluation possible. Absent from v1-era Parquets, hence the
+# tolerant read below.
+PROV_COLS = ["asr_training_source", "category", "group_id", "group_mode", "item_index",
+             "voice"]
 
 
 def parquet_files(parquet_dir: Path, source: str, split: str) -> list[Path]:
