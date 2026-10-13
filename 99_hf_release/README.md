@@ -124,7 +124,7 @@ configs:
 - [Evaluation as a standardized benchmark](#evaluation-as-a-standardized-benchmark)
 - [Considerations for Using the Data](#considerations-for-using-the-data)
   - [Audio quality](#audio-quality)
-  - [The single-voice drawback](#the-single-voice-drawback)
+  - [The ten voices, and what synthetic audio still costs](#the-ten-voices-and-what-synthetic-audio-still-costs)
   - [Other limitations](#other-limitations)
   - [Privacy and PII](#privacy-and-pii)
 - [Licensing](#licensing)
@@ -139,6 +139,7 @@ configs:
 
 ## Changelog
 
+- **v2** (TODO: release date): **all the audio is new**, read by **ten French voices** instead of one. The texts are v1.3's (same labels, same `asr_training_source`, same file names, same group keys), so this is a voice-diversity release and not a text release: the point is that a model can no longer overfit a single speaker's acoustics. New `voice` column saying which of the ten read each clip. The **splits are pinned to v1.3** clip by clip, so WER on v2 `test` is comparable with WER on v1.3 `test` (the only difference is the audio); a clip v1.3 did not have follows its group's split. Synthesis moved to `cfg_alpha` **2.0** (measured band 1.2 to 2.0, see [Audio synthesis](#audio-synthesis-tts)) and the quality pass now walks **down** from it, 2.0 to 1.2, instead of up. Every quality-control column (`stt_transcript`, `cer`, `cer_tail`, `n_stt_check`, `qc_status`, `regenerated`, `cfg_alpha`) was recomputed on the v2 audio: none of v1's were carried over, because they describe clips that no longer exist. 72 clips v1 had dropped for bad **audio** (their text was fine) are back, and the 63 clips an UltiMed-finetuned Parakeet had flagged in v1 audio are **not** pre-dropped here, since that list was about v1 waveforms. Main corpus now TODO clips / TODO h / TODO GB. v1's single-voice audio is **not** kept anywhere: this release replaces it under the same repo id.
 - **v1.3** (2026-09-28): more label conventions, no new audio, 64 clips dropped (63,219 then 48,041 clip labels changed). A spelled number before a unit of measure or a duration is now written in digits, as the corpus majority already did (62k `milligrammes` after digits vs 1.9k after words): `quatre milligrammes` -> `4 milligrammes`, `zéro virgule vingt-cinq milligramme` -> `0,25 milligramme`, `deux cent cinquante millilitres` -> `250 millilitres`, `cinq jours sur sept` -> `5 jours sur 7`. Most counts stay spelled (`deux comprimés`), and so does a lone `un` / `une` (`une heure`, `une fois par jour`). `petit déjeuner` is hyphenated (`petit-déjeuner`, 213 vs 35). Words spelled two ways that sound the same now have one spelling, found by transcribing val/test with a fine-tuned Parakeet and ranking the diffs: the `œ` ligature is written `oe` everywhere (`coeur`, `oedème`, `oeil`, `oesophage`; `oeil` was already the majority, 10.7k vs 1.5k), `aiguë` (28.4k) over `aigüe` (1.4k), `compte rendu` (81k) over `compte-rendu` (2k), `bétabloquant` over `bêtabloquant` / `bêta-bloquant`. Suture gauges read `Vicryl 3-0` (was also `Vicryl trois zéro` and `Vicryl 3 zéro`), in the label only: the TTS source keeps the words the voice said. A decimal half in digits becomes a decimal (`3 virgule 5 mégahertz` -> `3,5 mégahertz`), and `grays`, `hertz` and `teslas` join the units written after digits. A second pass (48,041 clip labels changed), from a Parakeet sweep of val/test/PARROT and half of train, ranking the diffs where Parakeet and the stage-06 Whisper transcript agree against the label: `fois` and `séances` counts, the head of a range and a score out of 10 are written in digits (`deux fois par jour` -> `2 fois par jour`, 31.7k labels spelled it and 8.9k did not; `deux à trois jours` -> `2 à 3 jours`; `deux sur dix` -> `2 sur 10`); a staging number is written in digits after `stade`, `grade`, `type`, `classe`, `palier`, `niveau` and `NYHA` (`stade IIIb` -> `stade 3b`, `palier deux` -> `palier 2`; the corpus mixed Roman numerals, digits and words), while Roman numerals elsewhere stay (`angiotensine II`); `anévrisme` (2.7k) over `anévrysme` (1.0k), `urètre` / `urétral` over `urèthre` / `uréthral`; a split prefix is glued (`extra hépatiques` -> `extra-hépatiques`, `multi lithiasique` -> `multilithiasique`); and a sentence-initial `A` before an infinitive gets its accent (`A surveiller` -> `À surveiller`, 8.9k labels already wrote `À`). The pipeline also learnt to repair cp1252 mojibake (a C1 control character such as U+009C standing for `œ`), found in a hand-made evaluation set but in no UltiMed clip. Dropped 63 clips whose audio does not say their label, found by that Parakeet sweep (it covered val, test, PARROT and a third of train) and invisible to the stage-06 Whisper QC: 49 where the voice babbles a few invented words BEFORE the sentence (`John Ritteny Dudd, transmission IDE...`), which Whisper silently skips, and 14 where it skipped a phrase (mostly inside long lab-value lists), confirmed by the Whisper transcript missing it too; the list ships in the GitHub repo as `99_hf_release/asr_flagged_clips.jsonl`. One more test clip was dropped because its relabelled text became identical to a training text. Main corpus now 601,264 clips / 3,104.4 h / 254.61 GB (train 485,962, val 57,700, test 57,602). val/test labels changed, so WER on v1.3 is not directly comparable to v1.2 numbers.
 - **v1.2** (2026-09-27): label conventions, no new audio. Every `text` label and its `asr_training_source` now follow one written form per spoken thing, chosen as the corpus majority, applied to both so audio and label still say the same words (18,777 clips changed). Drug names get one spelling each: the ALLCAPS copies of the drug database are recased (`DOLIPRANE` -> `Doliprane`, `PARACETAMOL` -> `paracétamol`, `UVEDOSE` -> `Uvedose`) and accent variants harmonized (`Primperan` -> `Primpéran`); substances take the ANSM accents, brands the spelling the corpus uses most (a brand never written other than ALLCAPS gets Title case with no accent, since nothing tells its accents), and acronyms stay ALLCAPS (`LP`, `AINS`). Titles before a name are written out (`M.` -> `Monsieur`, `Mme` -> `Madame`, `Mlle` -> `Mademoiselle`, `Dr` / `Pr` -> `docteur` / `professeur`, capitalized at a sentence start), with `Monsieur` / `Madame` capitalized before a name and left lowercase otherwise (`le monsieur du lit 4`). Dates use digits (`le quinze mars deux mille vingt` -> `le 15 mars 2020`, `premier janvier` -> `1er janvier`), and clock times read `14 heures 30` (v1.1 mixed `14h30`, `14 h 30` and the spoken form). Dropped the 2 clips whose label held an ellipsis (truncated or anonymized text). Main corpus now 601,328 clips / 3,105.0 h / 254.65 GB. The per-source `<source>/{train,val,test}` NeMo manifests now match the release-wide split (the Parquet always used the release-wide one). val/test labels changed, so WER on v1.2 is not directly comparable to v1.1 numbers.
 - **v1.1** (2026-09-25): data fixes, no new audio. Dropped the 6 `qc_status: exhausted` clips (they failed QC and no redraw fixed them, so their audio does not match their label; v1.0 shipped them by mistake) and 2 PARHAF val/test clips whose sentence also appears in a training clip. Main corpus is now 601,330 clips / 3,105.0 h / 254.65 GB. Normalized the `text` labels: every percentage is written `%` (v1.0 mixed `pour cent`, `pourcent` and `%`; a "per hundred X" such as `pour cent millilitres` is kept), whitespace runs including 6 raw newlines collapse to one space, and the 4 characters the Parakeet tokenizer cannot represent as written are replaced by their NFKC form (`CO₂` -> `CO2`) or dropped (`™`). `asr_training_source` uses the one-word `pourcent` everywhere (those clips were read from `pour cent` or `%`, spoken identically). The pipeline's generators now write `%` in the label directly, so a rebuild reproduces this. The val/test labels changed with it, so WER on v1.1 is not directly comparable with v1.0 numbers.
@@ -154,12 +155,12 @@ A 3000+ hours corpus of **dictation-style French medical sentences** spoken by a
 | Task | Automatic Speech Recognition (training **and** evaluation) |
 | Audio | **24 kHz, mono, FLAC (PCM 16-bit), straight out of [Voxtral][voxtral]**, unprocessed (see [Audio synthesis](#audio-synthesis-tts)) |
 | Packaging | **Sharded Parquet with embedded FLAC** (one subset per source, split into `<source>/<split>-*.parquet`); rebuild NeMo loose/tarred data with `scripts/parquet_to_nemo.py`; see [Repository layout](#repository-layout-on-the-hub) |
-| Clips | **601,264** (main corpus) + 1,549 (PARROT subset) |
-| Duration | **3,104.4 h** (main corpus) + 10.1 h (PARROT subset) |
-| On-disk size | **254.61 GB** (main corpus) + 851 MB (PARROT subset) |
+| Clips | **TODO (v2)**; v1.3 shipped 601,264 (main corpus) + 1,549 (PARROT subset) |
+| Duration | **TODO (v2)**; v1.3 shipped 3,104.4 h (main corpus) + 10.1 h (PARROT subset) |
+| On-disk size | **TODO (v2)**; v1.3 shipped 254.61 GB (main corpus) + 851 MB (PARROT subset) |
 | Splits | train / val / test, target 80 / 10 / 10, balanced by **audio duration** |
 | Sources | public French medical dictionaries (Wiktionary + others), French drug names, PARHAF, common medical acronyms (Wikipedia-sourced, hand-filtered) (main corpus, CC BY 4.0); PARROT radiology (separate CC BY-NC-SA 4.0, test-only subset) |
-| Voice | a single voice (`fr_female`) everywhere -- see [the drawback](#the-single-voice-drawback) |
+| Voices | **ten French voices**, 5 female and 5 male (2 shipped [Voxtral][voxtral] voices + 8 hybrids I built), one per clip, picked by hash -- see [the ten voices](#the-ten-voices-and-what-synthetic-audio-still-costs) |
 
 Numbers regenerate from the source NeMo manifests (the working master the Parquet is built from) with:
 
@@ -179,7 +180,7 @@ A finetuned release of [nvidia/parakeet-tdt-0.6b-v3](https://huggingface.co/nvid
 
 Made entirely by **Olivier Cornelis** ([olicorne.org](https://olicorne.org), Hugging Face [@Olicorne](https://huggingface.co/Olicorne)), French resident psychiatrist and developer. Fully self-funded, no conflicts of interest to declare.
 
-- Version: **v1** (this repo is the frozen v1 corpus: a single voice throughout). A future **v2** will be the same corpus re-synthesized with several voices, published as its own repo; this one stays as it is.
+- Version: **v2** (v1.3's texts and splits, every clip re-synthesized with ten French voices). It is published **over** v1 under this repo id, so the single-voice v1 audio is no longer downloadable here; the repo id still says `v1` for the moment, the [Changelog](#changelog) is what tells you which audio you are getting.
 - Fine-tuned model: [Olicorne/parakeet-tdt-0.6b-v3-UltiMed-onnx](https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-UltiMed-onnx) (a [nvidia/parakeet-tdt-0.6b-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) fine-tune, released separately, trained with NeMo)
 - Multilingual baseline it was fine-tuned from: [Olicorne/parakeet-tdt-0.6b-v3-optimized-onnx](https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-optimized-onnx) (the upstream ONNX rebuilt for int8 accuracy and browser speed; use it when you do not need French medical vocabulary)
 - In-browser app that runs either model: [Parakeet Web](https://github.com/thiswillbeyourgithub/parakeet_web)
@@ -202,11 +203,11 @@ row["audio"]  # 24 kHz mono waveform, decoded from the embedded FLAC
 row["text"]   # the transcript, and the field you train an ASR model on
 ```
 
-- **What you get**: ~3,104 h (601,264 clips) of clean, studio-quality **synthetic** French medical speech. Each clip is a short dictation-style sentence (anatomy, pathology, drug names, clinical phrasing) spoken by a single high-quality voice and paired with its exact transcript. Built to train **and** evaluate medical ASR.
+- **What you get**: ~3,100 h (about 600k clips) of clean, studio-quality **synthetic** French medical speech. Each clip is a short dictation-style sentence (anatomy, pathology, drug names, clinical phrasing) read by one of **ten** voices (5 female, 5 male, two native French and eight accented) and paired with its exact transcript. Built to train **and** evaluate medical ASR.
 - **Train on the `text` field.** Everything else (`asr_training_source`, provenance columns) is there for transparency, not as a label.
 - **Subsets, picked by config name**: `dictionary_CC_BY_4.0`, `drugs_CC_BY_4.0`, `parhaf_CC_BY_4.0`, `acronyms_CC_BY_4.0` are the main corpus (**CC BY 4.0**); `parrot_CC_BY-NC-SA_4.0` is a small, separate, **evaluation-only** radiology set under a **non-commercial** licence. Download or skip each independently.
 - **`val` / `test` are ready-made in-domain benchmarks**: held out group-disjoint from `train`, so report WER on `test` to benchmark technical French medical speech.
-- **The one caveat to know up front**: a **single voice** everywhere, so no speaker / accent / noise diversity, and a model can overfit its acoustics. See [the single-voice drawback](#the-single-voice-drawback).
+- **The one caveat to know up front**: the audio is **synthetic**, all of it out of one TTS model. The ten voices give you speaker, accent and gender diversity, but there is still no real **recording condition**: no room, no microphone, no background noise, no telephone channel. See [the ten voices](#the-ten-voices-and-what-synthetic-audio-still-costs).
 - **Training with NeMo?** NeMo does not read Parquet directly; rebuild the loose/tarred NeMo layout with `scripts/parquet_to_nemo.py`. See [Loading and training](#loading-and-training).
 
 </details>
@@ -328,12 +329,14 @@ TTS settings:
 
 | Setting | Value |
 |---|---|
-| Voice | `fr_female` |
+| Voices | ten, one per clip (roster and assignment rule below) |
 | Euler steps | 16 |
-| CFG alpha | 1.3 |
+| CFG alpha | **2.0** for the whole first pass; a redraw walks **down** 2.0, 1.8, 1.6, 1.4, 1.2 |
 | Acoustic temperature | 0.7 |
-| Seed | 42 |
+| Seed | 42, sent as `extra_params.voxtral_noise_seed` (the only route that reaches this model's randomness) |
 | Output | 24 kHz mono FLAC (PCM 16-bit) |
+
+`cfg_alpha` **2.0** is not inherited, it was measured: 16 voices x 10 values from 0.1 to 5.0 on one dense medical sentence, with the noise seed pinned, listened to by ear. The usable band is 1.2 to 2.0 (1.5 to 2.0 for the hybrid voices, which need more guidance to hold their articulation), and it is asymmetric: below 1.2 the flow-matching decoder stops following the text and degrades fast (at 0.5 and below every voice rambled to ~2.7x the sentence's natural length instead of stopping), while above 3.0 distortion grows and takes increasingly fail to terminate at all. 2.0 is therefore the **top** of the band, which is why the quality pass redraws downwards from it. v1 ran the whole corpus at 1.3, inside the same band.
 
 **The clips are the raw FLAC the model emitted**: no trimming, silence removal, loudness normalization, or resampling.
 
@@ -368,7 +371,7 @@ UltiMed-ASR-FR-v1/
   regex-fixes/ MOVED.txt                                                          # points to the fix rules in the finetuned model repo
 ```
 
-- **`<source>/<split>-NNNNN-of-NNNNN.parquet`**: ~2,500 clips each. Every row embeds the **original FLAC bytes verbatim** (byte-identical round-trip) in the `datasets` `Audio` feature, plus `text`, `duration`, `category`, provenance (`group_id`, `group_mode`, `item_index`), `filename` and the quality-control columns (`cer`, `cer_tail`, `stt_transcript`, `stt_model`, `n_stt_check`, `cfg_alpha`, `regenerated`, `qc_status`). Rebuild with `uv run scripts/build_parquet.py`, after `uv run 03_sync_hotfix_results.py --apply` has carried stage 06's results into the manifests. To drop the known-weak `exhausted` clips and the val/test clips whose text repeats a training text first, run `uv run 04_drop_bad_rows.py --apply` between those two steps (script written with Claude Code). Then `uv run 05_normalize_text.py --apply` writes every percentage as `%` in the label and `pourcent` in the TTS text, collapses whitespace, replaces the few characters the Parakeet tokenizer cannot represent as written, and applies the label conventions of `utils/label_conventions.py` to both texts (one spelling per drug name, titles written out, dates in digits, clock times as `14 heures 30`; also Claude Code). `04` also drops labels holding an ellipsis.
+- **`<source>/<split>-NNNNN-of-NNNNN.parquet`**: ~2,500 clips each. Every row embeds the **original FLAC bytes verbatim** (byte-identical round-trip) in the `datasets` `Audio` feature, plus `text`, `duration`, `category`, provenance (`group_id`, `group_mode`, `item_index`, `voice`), `filename` and the quality-control columns (`cer`, `cer_tail`, `stt_transcript`, `stt_model`, `n_stt_check`, `cfg_alpha`, `regenerated`, `qc_status`). Rebuild with `uv run scripts/build_parquet.py`, after `uv run 03_sync_hotfix_results.py --apply` has carried stage 06's results into the manifests. To drop the known-weak `exhausted` clips and the val/test clips whose text repeats a training text first, run `uv run 04_drop_bad_rows.py --apply` between those two steps (script written with Claude Code). Then `uv run 05_normalize_text.py --apply` writes every percentage as `%` in the label and `pourcent` in the TTS text, collapses whitespace, replaces the few characters the Parakeet tokenizer cannot represent as written, and applies the label conventions of `utils/label_conventions.py` to both texts (one spelling per drug name, titles written out, dates in digits, clock times as `14 heures 30`; also Claude Code). `04` also drops labels holding an ellipsis.
 - **One subset per source**, each a declared config, browsable and downloadable independently. The licence is encoded in the config name (`dictionary_CC_BY_4.0`, `drugs_CC_BY_4.0`, `parhaf_CC_BY_4.0`, `acronyms_CC_BY_4.0`, `parrot_CC_BY-NC-SA_4.0`) so it shows in the viewer's subset dropdown; the Parquet still lives under the plain `dictionary/`, `drugs/`, `parhaf/`, `acronyms/`, `parrot/` folders.
 - **`dictionary` + `drugs` + `parhaf` + `acronyms`** are the main corpus (CC BY 4.0); **`parrot`** is separate (CC BY-NC-SA 4.0, **test-only**), download or skip independently.
 - **`scripts/`**: `build_parquet.py` (how the Parquet was built) and `parquet_to_nemo.py` (rebuilds the NeMo layout, loose or tarred; see [Loading and training](#loading-and-training)).
@@ -389,6 +392,7 @@ Each Parquet row is one clip, with these columns:
 - `duration`: clip length in seconds (from the FLAC header).
 - `category`: the source (`dictionary`, `drugs`, `parhaf`, `acronyms`, or `parrot`).
 - `group_id` / `group_mode` / `item_index`: provenance used by the split logic (`distribute` for dictionary / drug / acronym term variants, `atomic` for PARHAF / PARROT document chunks); ignored during training.
+- `voice`: which of the ten voices read this clip (`fr_female`, `fr_male`, or one of the eight `h_*` hybrids). Always set in v2; it is an empty string only on v1-era manifests, which were single-voice and carried no such field. Use it to score a model per voice, to hold a voice out, or to train on a subset of the roster.
 - `filename`: the clip's source basename, e.g. `000014_0001_abaissement_de_la_cataracte.flac`.
 
 Every clip was also transcribed back and scored, and those results ship with it:
@@ -398,10 +402,10 @@ Every clip was also transcribed back and scored, and those results ship with it:
 - `stt_transcript`: what the STT model actually heard, so every `cer` above can be checked rather than trusted.
 - `stt_model`: which model produced them, `whisper.cpp/ggml-large-v3-turbo` (Whisper large-v3-turbo served by whisper.cpp through an OpenAI-compatible endpoint). Spelled out on purpose: the API alias the client sends is `whisper-1`, which says nothing about what actually ran.
 - `n_stt_check`: how many readings a clip needed. `null` for the vast majority (read once); set when a bad score triggered a re-transcription at a higher temperature to rule out an STT hallucination, in which case the best reading is the one scored.
-- `cfg_alpha`: the classifier-free guidance the audio was drawn at (1.3 for the original pass, 1.0 to 3.0 for a regenerated clip).
+- `cfg_alpha`: the classifier-free guidance the audio was drawn at (2.0 for the original pass, 2.0 down to 1.2 for a regenerated clip).
 - `regenerated` / `qc_status`: whether the quality pass replaced this clip. `qc_status` is `improved` (a better draw replaced the original), `exhausted` (the clip tripped a gate but no redraw was good enough, so **the original audio ships**: v1.0 shipped 6 of them by mistake and v1.1 dropped them, so the value no longer appears), or `original` (never tripped a gate). Across the corpus 932 clips were replaced and the mean CER of the shipped audio against its label is **0.012**.
 
-**On seeds.** The per-clip TTS seed is deliberately **not** shipped. The serving stack ignored the per-request seed for most of the corpus (it reached a sampler that this model does not use, while the flow-matching noise came from a global RNG), so a seed column would have implied a reproducibility that does not exist. Regenerating a byte-identical clip from the released text is not possible; the audio itself is the artifact.
+**On seeds.** There is no seed column because there is no per-clip seed: the whole v2 pass was drawn at `voxtral_noise_seed = 42`, sent nested in `extra_params`, which is the only route that reaches this model's randomness. The flat `seed` field does nothing here (it lands in a sampler that is handed logits with a single finite entry, so its result is forced), and the audio's only randomness is the Gaussian each frame's flow-matching ODE starts from. v1 learned that the hard way and shipped unseeded. Even with the seed pinned, reproducing a clip byte for byte needs the same server build, the same `cfg_alpha` and the same voice; treat the audio itself as the artifact.
 
 **Why two fields.** `text` is the clean transcript the model must produce; `asr_training_source` is the same sentence adjusted only where the voice would mispronounce a token: Roman numerals after a staging word (`type II`, `grade I`, `stade II`) written out, and the rarer `/`, `µ`, `°` units and `ARNm` spelled out. Everything else, plain digits included (`16 mg`, `4 semaines`), stays as written. Both are French, restricted to characters the [Parakeet TDT v3][parakeet-v3] tokenizer can represent (see [Text generation](#text-generation-llm)), and free of banned non-spoken symbols.
 
@@ -526,30 +530,53 @@ When you publish results, state the model, the exact subset and split, and that 
 ## Considerations for Using the Data
 
 <details>
-<summary><b>Expand</b>: audio quality, the single-voice drawback, the other limitations, and privacy.</summary>
+<summary><b>Expand</b>: audio quality, the ten voices, the other limitations, and privacy.</summary>
 
 ### Audio quality
 
 <details>
 <summary><b>Expand</b>: what the clips actually sound like.</summary>
 
-High-fidelity 24 kHz mono: clean, studio-style speech, no background noise, channel effects, or clipping. The `fr_female` voice reads technical vocabulary (drug names, anatomy, pathology) accurately, exactly what an in-domain medical set needs. The flip side (one uniform voice, no real-world noise) is covered below.
+High-fidelity 24 kHz mono: clean, studio-style speech, no background noise, channel effects, or clipping. All ten voices read technical vocabulary (drug names, anatomy, pathology) accurately, which is the single criterion they were selected on, and that is exactly what an in-domain medical set needs. The flip side (synthetic speech, no real recording condition) is covered below.
 
 </details>
 
-### The single-voice drawback
+### The ten voices, and what synthetic audio still costs
 
 <details>
-<summary><b>Expand</b>: why a single voice was kept, and what it costs you.</summary>
+<summary><b>Expand</b>: the roster, how a clip gets its voice, and the diversity that is still missing.</summary>
 
-The most important limitation: **a single voice (`fr_female`) is used for every clip**, kept because its quality and jargon accuracy were far ahead of the alternatives. So the corpus has **no speaker, accent, gender, or recording-condition diversity**, and a model trained only on it may overfit this voice's acoustics; take measures against that.
+v1 read all 600k clips with **one** voice (`fr_female`), and that was the limitation everyone pointed at first: no speaker, accent or gender diversity, so a model could learn one speaker's acoustics instead of French medical speech. v2 re-synthesized the entire corpus with **ten** voices, 5 female and 5 male:
 
-Voxtral-4B-TTS-2603 has two voices designed for French: `fr_female` and `fr_male`.
+| `voice` | gender | accent | origin |
+|---|---|---|---|
+| `fr_female` | F | native French | shipped Voxtral voice |
+| `fr_male` | M | native French | shipped Voxtral voice |
+| `h_itf_arm` | M | Arabic-accented French | hybrid |
+| `h_frf_esm` | M | Spanish-accented French | hybrid |
+| `h_frf_itm` | M | Italian-accented French | hybrid |
+| `h_frf_ptm` | M | Portuguese-accented French | hybrid |
+| `h_frm_nlf` | F | Dutch-accented French | hybrid |
+| `h_itf_def` | F | German-accented French | hybrid |
+| `h_frm_ptf` | F | Portuguese-accented French | hybrid |
+| `h_frm_chf` | F | native French, brighter delivery | hybrid |
 
-- `fr_female`: subjectively excellent and, crucially, **rarely mispronounces technical jargon** (drug names, anatomy, pathology), exactly what an in-domain medical read must get right. The clips are the model's direct output.
-- `fr_male`: excellent too (better than the best voices of every other local TTS I tried), but it makes more mistakes on technical words, so I did not use it.
+**Where the eight hybrids come from.** Voxtral ships 20 voices but only two meant for French, and its open checkpoint ships **no voice encoder**, so a real voice clone is not possible: `ref_audio` cloning hits exactly the missing weights. A Voxtral voice is however just a small `[N, 3072]` bfloat16 prefix in the LLM's embedding space, so new voices can be made by blending and splicing the shipped ones, no training and no encoder involved. Each `h_<a>_<b>` name is such a blend: the voice you hear is the **acoustic** donor `<b>` (its timbre and accent), while the **semantic** donor `<a>` only moves pronunciation stability. That is why eight of Voxtral's non-French voices end up reading French with their own accent, which is precisely the diversity v1 lacked.
 
-If a better TTS comes along, or Voxtral releases its voice embedder, I might redo a pass to add voice diversity. The only other models that could pronounce this jargon were either very expensive or about to be sunset (`gpt-4o-mini-tts-2025-12-15`).
+**They were auditioned, not assumed.** Blends can land off the manifold real prefixes live on and come out as mush, so the roster is the survivor of two listening rounds: 16 candidates cleared on FLEURS sentences, then **all 16 re-auditioned on hard medical text**, which disagreed about 6 of them (FLEURS clearance does not predict medical clearance: a voice that reads the news cleanly can still mangle a drug name). Ten distinct identities survived, all judged by ear on jargon accuracy first.
+
+**How a clip gets its voice.** A blake2b hash of the clip's group key, modulo ten, indexes the roster. Two regimes, on purpose:
+
+- **dictionary, drugs, acronyms** (92.5% of the clips) hash **per clip**, so the ~8 written variants of one term are spread over about 5 different voices (measured: 5.74 distinct voices per term in the dictionary, 4.99 for drugs, 2.68 for acronyms). You hear any given drug name in several accents, and a voice that happens to read one term badly cannot take all of that term's clips down with it.
+- **PARHAF and PARROT** hash **per document**, so every chunk of one clinical report keeps the same reader. A report switching speaker mid-sentence would be an artifact no real dictation has.
+
+It is a hash and not a counter, which is what makes the assignment stable: adding, dropping or re-generating a clip never moves another clip to another voice, so the corpus can be rebuilt incrementally and a resumed run assigns exactly what the crashed one would have.
+
+The balance is close to even but not exact, for an arithmetic reason rather than a bug: a dataset with only a few hundred groups (acronyms, PARROT) cannot divide evenly over ten voices. `scripts/get_statistics.py` prints the per-voice counts, including the per-split ones, so you can check no voice is over-represented in `val` or `test` before benchmarking on them.
+
+**What is still missing, and it matters.** Ten voices are ten voices, not a speaker population: every clip still comes out of **one TTS model**, at 24 kHz, in studio conditions. There is no room acoustics, no microphone colour, no codec, no background noise, no overlapping speech, no disfluency, and the prosody is uniformly dictation-style. The accents are embedding surgery on a French-capable model, not recordings of actual Arabic, Spanish or Dutch speakers of French, so treat them as **acoustic variety**, not as a representative sample of accented French. For deployment, augment (noise, impulse responses, codecs, speed perturbation) and, where you can, fine-tune on real in-domain recordings; this corpus is the vocabulary and the benchmark, not the channel.
+
+The voices were built, blended and auditioned in my own Voxtral serving harness, which is where the recipe and the selection scripts live: [TODO][voxtral-harness].
 
 </details>
 
@@ -675,6 +702,7 @@ Olivier Cornelis, feel free to reach me at [olicorne.org](https://olicorne.org)
 [parrot-paper]: https://doi.org/10.1016/j.ejrai.2025.100066
 [wiki-abbrev]: https://fr.wikipedia.org/wiki/Liste_d%27abr%C3%A9viations_en_sant%C3%A9
 [voxtral]: https://huggingface.co/mistralai/Voxtral-4B-TTS-2603
+[voxtral-harness]: TODO
 [openrouter]: https://openrouter.ai/
 [deepseek]: https://openrouter.ai/deepseek/deepseek-v4-pro
 
