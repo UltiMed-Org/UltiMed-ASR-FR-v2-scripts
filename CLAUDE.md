@@ -475,18 +475,25 @@ duplication"). `tests/test_audio_truncation.py` covers that guard on both sides.
 
 **Voices (v2).** Batch mode spreads the corpus over the ten French voices of
 `utils/voice_assignment.py` instead of reading all of it with one: the voice is a
-per-request field, so one run covers all ten with no restart. The default is
+per-request field, so one run covers all ten with no restart. The flag default is
 `--voice-mode group`, i.e. a term's variants (and a document's chunks) are read by
 one speaker, assigned by hashing the group key; `--voice-mode row` gives every clip
 its own draw, `--voice X` or `--voice-mode single` is the v1 behaviour, and
-`--voices-file` swaps the roster. The run logs the spread and writes
+`--voices-file` swaps the roster. **v2 uses BOTH modes, one per stage** (decided
+2026-10-14, see `docs/V2_REGENERATION_RUNBOOK.md` step 1): `row` for 01_dictionnary,
+02_drugs and 07_acronyms, because a term's variants are independent sentences and
+should be heard in several accents (and a bad voice/term pairing then costs one clip,
+not all ~8), and `group` for 03_PARHAF and 04_PARROT, because their groups are
+documents whose consecutive chunks must keep one reader. Both are hashes, so edit and
+resume stability is identical either way. The run logs the spread and writes
 `voice_assignment.json` beside the audio for stage 99 to label from. The ten names
 were chosen by ear in the CrispASR repo; see the roster entry under "known
 duplication" and the `utils/voice_assignment.py` entry above for why the assignment
 is a hash. v2 is generated at Voxtral `cfg_alpha` **2.0** (the CrispASR compose
-default since the 2026-10-13 sweep), dropping to 1.5 for a clip that needs a retry:
-below ~1.2 the decoder stops following the text, and at 3.0+ runs distort and
-increasingly fail to terminate at all. `tests/test_voice_column.py`
+default since the 2026-10-13 sweep), and stage 06's retry ladder walks **down** from
+it (2.0, 1.8, 1.6, 1.4, floor 1.2, commit `bd062a0`): below ~1.2 the decoder stops
+following the text, and at 3.0+ runs distort and increasingly fail to terminate at
+all. `tests/test_voice_column.py`
 (`uv run tests/...`) pins that the voice stage 05 sent is the voice stage 99 writes.
 
 ### `06_hotfixes/` (active)

@@ -73,7 +73,16 @@ uv run 01_generate_audio.py \
   another voice, so clips already on disk stay correctly labelled (a resume
   matches filenames, and a filename says nothing about the voice).
 - `--voice-mode row`: every clip draws its own voice, spreading a term's
-  variants over speakers.
+  variants over speakers. The key is `group:index`, where the index is
+  `chunk_index` when the row has one (PARHAF/PARROT, whose `variant_index` is
+  always 0) and `variant_index` otherwise, so the mode is not silently the same
+  as `group` on the document stages.
+- **What v2 actually runs** (decided 2026-10-14): `row` for `01_dictionnary`,
+  `02_drugs` and `07_acronyms`, `group` for `03_PARHAF` and `04_PARROT`. A term's
+  variants are independent sentences, so hearing them in several accents is worth
+  more than one voice per term; a document's chunks are one report and keep one
+  reader. The mode is recorded per audio folder in `voice_assignment.json`, so
+  mixing them across stages needs nothing special.
 - `--voice X` or `--voice-mode single`: one voice for everything, i.e. v1.
   `--voice` wins over the roster, so the old invocations still behave.
 - `--voices-file FILE`: another roster, one name per line, `#` comments
