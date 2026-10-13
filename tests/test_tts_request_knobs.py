@@ -7,18 +7,31 @@
 
 Run: `uv run tests/test_tts_request_knobs.py`
 
-This exists because the knobs failed SILENTLY. `cfg_alpha` used to be sent nested in
-`extra_params` against a server with no reader for it there, and the flat `seed` used
-to be trusted to vary the audio, so five "different" draws were five identical requests
-whose audio differed only through global-RNG drift. Nothing errored, nothing logged, and
-the cfg ramp in `_synthesize_draft` had no effect at all. So the request BODY is pinned
-here, not just the arithmetic that feeds it.
+This exists because the knobs failed SILENTLY. A TTS server takes a request that sets
+`cfg_alpha`, answers 200, logs nothing, and synthesizes at its own startup value anyway
+if the field is spelled the way it is not read; the flat `seed` was likewise trusted to
+vary the audio when on Voxtral it cannot. Five "different" draws were then five
+identical requests whose audio differed only through global-RNG drift, and the cfg ramp
+in `_synthesize_draft` had no effect at all. Nothing about the resulting wav says so. So
+the request BODY is pinned here, not just the arithmetic that feeds it.
 
-Both knobs are flat fields, which is a contract of the forked vllm-omni the CrispASR
-voxtral-tts image is built from (`CrispASR/voxtral/vllm-omni`): it promotes `cfg_alpha`
-to a top-level field and routes the flat `seed` into stage 0's `voxtral_noise_seed`.
-Upstream drops the first and cannot act on the second. If these assertions ever need
-changing, check the fork's `serving_speech.py::_apply_voxtral_request_knobs` first.
+Where the knobs ride is the whole subject, so read this before changing an assertion.
+Both travel NESTED, in `extra_params`: `cfg_alpha` and `voxtral_noise_seed`. That is the
+route a STOCK vllm-omni reads too, because it merges a request's `extra_params` dict into
+stage 0's `SamplingParams.extra_args`, which is exactly where the model looks
+(`_extract_cfg_alpha`). The flat spellings are not an equivalent choice: a flat
+`cfg_alpha` only works against the forked vllm-omni the CrispASR voxtral-tts image is
+built from (`CrispASR/voxtral/vllm-omni`, which promotes it to a real field), and
+upstream's request model declares no `model_config`, so pydantic's `extra='ignore'` drops
+it and still answers 200. Nesting therefore works on both servers and flat does not,
+which is why stage 05's `build_body` and this stage's `tts_synthesize` agree on it
+(`tests/test_tts_wire_format.py` pins the same shape from the other side).
+
+The flat `seed` is still sent, and for a different reason: TADA and qwen3-tts read it,
+while on Voxtral it is arithmetically inert (stage 0 hands vLLM's sampler a vocab-wide
+-inf row with one finite entry), so `voxtral_noise_seed` in `extra_params` is the copy
+that actually pins Voxtral's per-frame noise. Both spellings are asserted below;
+dropping either silently de-seeds one backend.
 
 This file was written with Claude Code.
 """
@@ -91,17 +104,31 @@ def _driver_default(name: str) -> float:
 bodies = _capture_bodies(5, cfg_alpha_start=_driver_default("CFG_ALPHA_START"),
                          cfg_alpha_step=_driver_default("CFG_ALPHA_STEP"))
 eq("one request per draw", len(bodies), 5)
-# Near the server's tuned value (it boots at 1.3), not a wide sweep: the draws have to
-# land where the model is usable, and the winner is picked on CER anyway.
-eq("cfg_alpha ladder", [b.get("cfg_alpha") for b in bodies], [1.0, 1.5, 2.0, 2.5, 3.0])
+
+
+def _alpha(body: dict):
+    """The cfg_alpha the server will read: nested, see the module docstring."""
+    return (body.get("extra_params") or {}).get("cfg_alpha")
+
+
+# Around the server's tuned value (the CrispASR voxtral-tts service boots at
+# cfg_alpha 2.0, measured band 1.2-2.0), not a wide sweep: the draws have to land where
+# the model is usable, and the winner is picked on CER anyway.
+eq("cfg_alpha ladder", [_alpha(b) for b in bodies], [1.5, 1.75, 2.0, 2.25, 2.5])
 eq("seed ladder", [b.get("seed") for b in bodies], [43, 44, 45, 46, 47])
 
 # --- where the server actually reads them -------------------------------------------
-# FLAT, both of them. Nesting cfg_alpha under extra_params is what made the ramp inert
-# for a while: keep this assertion, it is the whole point of the file.
+# NESTED in extra_params, both of them, which is the only route a stock vllm-omni acts
+# on: keep these assertions, they are the whole point of the file. A flat cfg_alpha is
+# the failure that made the ramp inert, and it is invisible from the client side (200,
+# no log, audio at the startup default).
 first = bodies[0]
-eq("cfg_alpha is a top-level field", "cfg_alpha" in first, True)
-eq("no extra_params nesting", first.get("extra_params"), None)
+eq("cfg_alpha rides inside extra_params", _alpha(first), 1.5)
+eq("cfg_alpha is not sent flat", "cfg_alpha" in first, False)
+eq("the noise seed rides inside extra_params too",
+   (first.get("extra_params") or {}).get("voxtral_noise_seed"), 43)
+# Kept flat as well, for the backends that do read it (TADA, qwen3-tts).
+eq("seed is also sent flat", first.get("seed"), 43)
 eq("text is sent as input", first.get("input"), "bonjour")
 eq("voice is forwarded", first.get("voice"), "fr_female")
 
@@ -112,7 +139,11 @@ eq("speed omitted when jitter is off", "speed" in first, False)
 eq("model omitted when unset", "model" in first, False)
 # A negative start is the documented way to leave guidance entirely to the server.
 off = _capture_bodies(2, cfg_alpha_start=None)
-eq("cfg_alpha omitted when disabled", ["cfg_alpha" in b for b in off], [False, False])
+eq("cfg_alpha omitted when disabled", [_alpha(b) for b in off], [None, None])
+# The seed still has to reach the server when guidance is off, so extra_params must not
+# vanish with cfg_alpha: it is the dict that carries voxtral_noise_seed.
+eq("the noise seed survives cfg_alpha being off",
+   [(b.get("extra_params") or {}).get("voxtral_noise_seed") for b in off], [43, 44])
 
 # --- speed jitter, if someone turns it on -------------------------------------------
 # It cycles around the base, but note it is NOT a second source of variation on this
