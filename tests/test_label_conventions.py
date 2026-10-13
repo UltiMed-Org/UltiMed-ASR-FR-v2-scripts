@@ -251,6 +251,10 @@ def test_thousands() -> None:
         ("Phytoestrogènes, xénoestrogènes, hypoestrogénie.",) * 2,
         ("Aphtes, un aphte, canthus, bullage, règle de Naegele, prédescemétique.", "Aftes, un afte, cantus, bulage, règle de Négélé, prédéscémétique."),
         ("Aphtose, épicanthus, Naegeli, membrane de Descemet, Henle, Dix-Hallpike.",) * 2,
+        ("Eutrophique, lymphome, neurinomes, descemétite, Haemophilus influenzae, un E-C-B-C.", "Eutrofique, lymphôme, neurinômes, déscémétite, Haemophilus influenzae".replace("influenzae", "influenza-é") + ", un Eu-C-B-C."),
+        ("Micafungine, muqueuse fundique, centre apneustique, maladie de Sever, microtie, HELLP syndrome.", "Micafongine, muqueuse fondique, centre apneu-stique, maladie de Séver, microssie, Help syndrome."),
+        # ties go to the real spelling
+        ("Syndrome, carcinome, hématome, glaucome, eutocique, aphteuse, fundus, sacrum, IgM, sever.",) * 2,
     ])
     print("test_thousands: OK")
 

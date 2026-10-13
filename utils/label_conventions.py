@@ -1183,9 +1183,11 @@ def restore_tts_accents(text: str, table: dict[str, str] | None = None) -> str:
 # ear (2026-10-09): ``naevus`` was read "naévouze", ``praevia`` "praévia", ``99m`` "99
 # mètres", ``foetus`` "feutusse", ``caecum`` "ka-é-cum", ``macroadénome`` "macrodénome",
 # ``chordome`` "corps-d'homme", ``foramens`` "fora-ment", ``eutrophe`` "utrophe",
-# ``aphtes`` "aptes", ``canthus`` "kintus", ``bullage`` "boulage". Latin
-# ``oe`` / ``ae`` read ``é`` (``œ`` did not help), ``-ome`` gets the closed ``ô``. The
-# label keeps the written form.
+# ``aphtes`` "aptes", ``canthus`` "kintus", ``bullage`` "boulage", ``HELLP`` spelled. Latin
+# ``oe`` / ``ae`` read ``é`` (``œ`` did not help), ``-ome`` gets the closed ``ô`` where it
+# was misread (not ``syndrome``, ``carcinome``: those were fine). A respelling is kept only
+# when it sounds strictly better: on a tie the real spelling wins, as the TTS was trained on
+# it (user rule 2026-10-13). The label keeps the written form.
 _TTS_RESPELLINGS = (
     (re.compile(r"\b([Nn])aev"), r"\1év"),
     (re.compile(r"\b([Pp])raevia\b"), r"\1révia"),
@@ -1199,14 +1201,23 @@ _TTS_RESPELLINGS = (
     (re.compile(r"\bOestr"), "Éstr"),
     (re.compile(r"(?<=[Ll]ymph)oed"), "éd"),
     (re.compile(r"\b([Mm]acro|[Ff]ibro)adénome"), r"\1-adénome"),
-    (re.compile(r"\b([Cc]hord|[Cc]olob|[Ss]cot)ome"), r"\1ôme"),
+    (re.compile(r"\b([Cc]hord|[Cc]olob|[Ss]cot|[Ll]ymph|[Nn]eurin)ome"), r"\1ôme"),
     (re.compile(r"\b([Ff])oramens\b"), r"\1oramènes"),
-    (re.compile(r"\b([Ee])utrophe"), r"\1utrofe"),
+    (re.compile(r"\b([Ee])utroph"), r"\1utrof"),
     (re.compile(r"\b([Aa])phte(s?)\b"), r"\1fte\2"),
     (re.compile(r"\b([Cc])anthus\b"), r"\1antus"),
     (re.compile(r"\b([Bb])ullage\b"), r"\1ulage"),
     (re.compile(r"\bNaegele\b"), "Négélé"),
-    (re.compile(r"\b([Pp])rédescemétique"), r"\1rédéscémétique"),
+    # the adjectives only: the eponym ``Descemet`` itself was fine
+    (re.compile(r"([Dd])escemét"), r"\1éscémét"),
+    (re.compile(r"\b([Ii])nfluenzae\b"), r"\1nfluenza-é"),
+    (re.compile(r"\bE-C-B-C\b"), "Eu-C-B-C"),
+    (re.compile(r"fungine\b"), "fongine"),
+    (re.compile(r"\b([Ff])undique"), r"\1ondique"),
+    (re.compile(r"\b([Aa])pneustique"), r"\1pneu-stique"),
+    (re.compile(r"\bSever\b"), "Séver"),
+    (re.compile(r"\b([Mm])icrotie"), r"\1icrossie"),
+    (re.compile(r"\bHELLP\b"), "Help"),
     (re.compile(r"\b99m\b"), "99-M"),
 )
 
