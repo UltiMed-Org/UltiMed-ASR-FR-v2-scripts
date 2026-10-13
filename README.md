@@ -90,7 +90,7 @@ Top-level numbered folders are ordered pipeline stages. Files numbered inside a 
 | [`02_drugs/`](02_drugs/) | French and international drug names to medication-dictation sentences. Importance comes from real 2025 sales volumes rather than an LLM, and sentences name real dosages. [`02_drugs/sources/`](02_drugs/sources/) holds the scripts that build the stage's inputs from the public drug databases. |
 | [`03_PARHAF/`](03_PARHAF/) | PARHAF clinical documents, chunked and rewritten into faithful spoken-French paragraphs. |
 | [`04_PARROT/`](04_PARROT/) | PARROT radiology reports, French rows only, same chunk-and-rewrite path. |
-| [`05_generate_audio/`](05_generate_audio/) | Runs a local TTS server over every stage's text output. Resumable, with a truncation guard. |
+| [`05_generate_audio/`](05_generate_audio/) | Runs a local TTS server over every stage's text output. Resumable, with a truncation guard. Reads the corpus with ten French voices, one per term or document, since v2 (v1 was single-voice). |
 | [`06_hotfixes/`](06_hotfixes/) | The quality loop: score every clip against its transcript, regenerate the bad ones, keep the best draw. [`manifest_listener/`](06_hotfixes/manifest_listener/) is the human-in-the-loop complement, a small app for listening to clips and flagging them. |
 | [`07_acronyms/`](07_acronyms/) | 511 hand-filtered medical acronyms, each spoken with its real pronunciation while the label keeps the written form. |
 | [`99_hf_release/`](99_hf_release/) | Build NeMo manifests, package as sharded Parquet, publish. This folder is also the working copy of the published dataset repo itself: see [below](#99_hf_release-is-the-dataset-repo). |

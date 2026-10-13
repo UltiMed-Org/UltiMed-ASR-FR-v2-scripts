@@ -52,6 +52,48 @@ uv run 01_generate_audio.py \
   --seed 42
 ```
 
+## Ten voices (v2)
+
+v1 read the whole corpus with a single voice (`fr_female`). v2 spreads it over
+the ten French voices in `utils/voice_assignment.py`, which were picked by ear
+in the CrispASR harness repo (`voxtral/cloning/voices_fr_production.txt`). The
+voice is a per-request field, so **one run covers all ten**, no restart and no
+second pass:
+
+```bash
+uv run 01_generate_audio.py \
+  --input ../01_dictionnary/generated_dataset.jsonl \
+  --output ./audio          # --voice-mode group is the default
+```
+
+- `--voice-mode group` (default): the voice is a hash of the row's group key,
+  so all variants of a term, and all chunks of a PARHAF/PARROT document, are
+  read by one speaker. A hash rather than a round-robin because it is stable
+  under editing: adding or deleting a row does not move any other group to
+  another voice, so clips already on disk stay correctly labelled (a resume
+  matches filenames, and a filename says nothing about the voice).
+- `--voice-mode row`: every clip draws its own voice, spreading a term's
+  variants over speakers.
+- `--voice X` or `--voice-mode single`: one voice for everything, i.e. v1.
+  `--voice` wins over the roster, so the old invocations still behave.
+- `--voices-file FILE`: another roster, one name per line, `#` comments
+  ignored. It reads the CrispASR file above as is. **File order is part of the
+  mapping**, so re-ordering it re-assigns every voice.
+
+The run logs the spread (`voices: 10 of them, by term_index (group mode):
+fr_female=52564, ...`) and writes `voice_assignment.json` into the output
+folder: the roster, the mode, the group field and the row count per voice.
+Stage 99 reads that file to put the right name in the manifest's `voice`
+column, so do not delete it, and do not edit the roster between generating and
+releasing. The balance is deliberately approximate, measured at 2.8 pct spread
+over `01_dictionnary`'s 62,448 term groups and up to 50 pct over `04_PARROT`'s
+475 document groups.
+
+v2 is generated at Voxtral `cfg_alpha` **2.0**, retrying a bad clip at 1.5:
+below about 1.2 the flow-matching decoder stops following the text, and from
+3.0 up takes distort and increasingly fail to terminate at all (measured in
+the CrispASR repo, 160-take sweep, 2026-10-13).
+
 Per-request knobs (`--instruction`, `--voice`, `--seed`, `--speed`,
 `--model`, and the talker sampling flags `--temperature`, `--top-p`,
 `--top-k`, `--repetition-penalty`, `--do-sample`) are sent only when set;

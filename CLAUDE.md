@@ -106,9 +106,13 @@ preview approach was retired (`build_tarred.py` / `build_preview_parquet.py`
 deleted). The dataset is published (NOTICE + card shipped) at
 `Olicorne/UltiMed-ASR-FR-v1`, and the pipeline scripts at
 `github.com/thiswillbeyourgithub/UltiMed-ASR-FR-v1-scripts`. The `-v1`
-suffix is deliberate: a future v2 re-synthesizes the same corpus with several
-voices (v1 is single-voice `fr_female` throughout) and gets its OWN repo, so this
-one is frozen. The repo name is hardcoded as `REPO_ID` in both
+suffix names the PUBLISHED dataset, which stays as it is (single-voice
+`fr_female` throughout): the v1 Hub repo is frozen, these scripts are not. v2
+re-synthesizes the same corpus with ten voices and is being built HERE, in this
+repo, on top of the same text corpus and stages; only the audio and the
+`voice` column differ. Plan for a v2 Hub repo of its own when it ships, and keep
+the pipeline scripts version-agnostic (that is why the GitHub link below is
+unsuffixed). The repo name is hardcoded as `REPO_ID` in both
 `scripts/upload_to_hf.py` and `scripts/remove_arxiv_tag.py`, and appears in the
 dataset card (title, `pretty_name`, the `load_dataset` examples, the BibTeX) and
 in `NOTICE.md`; the GitHub link stays unsuffixed because the pipeline repo builds
@@ -301,6 +305,35 @@ from _pipeline_shared import call_llm, PricingTracker  # noqa: E402
   lazily) so `tests/test_nemo_manifest.py`
   (`python tests/test_nemo_manifest.py`) exercises the splitter without those
   wheels. Do not fork the split logic into a stage.
+- **`voice_assignment.py`** decides which of the ten v2 French voices reads a row,
+  for both stage `05` (sends it per request) and stage `99` (writes the `voice`
+  column). It is stdlib-only: `VOICES_FR_V2` (the roster, in order), `group_field`,
+  `assignment_key`, `voice_for_key` / `voice_for_row`, `load_voices`, plus the
+  provenance file both stages share (`write_provenance` / `read_provenance` /
+  `provenance_key` / `PROVENANCE_FILENAME`). Three decisions worth knowing before
+  touching it, all covered by `tests/test_voice_assignment.py` (`python tests/...`)
+  and end to end by `tests/test_voice_column.py` (`uv run tests/...`):
+  - **It hashes the group key, it does not round-robin.** A counter would be exactly
+    balanced but would shift every later group when a row is added or deleted,
+    silently mislabelling audio already on disk (clips are matched for resume by
+    filename, and the filename does not depend on the voice). The hash makes each
+    group's voice independent of every other row, so the corpus can keep being
+    edited and a run can resume. The price is lumpy balance: measured 2.8 pct spread
+    on `01_dictionnary`, up to 50 pct on `04_PARROT` (475 document groups over ten
+    voices), which is acceptable at ~60k clips per voice overall.
+  - **`blake2b`, never the builtin `hash()`.** Python randomises string hashing per
+    process, and stage 99 re-derives the voice in a different process (usually a
+    different day) than stage 05, so `hash()` would produce a column that does not
+    describe the audio.
+  - **The group key, not the row**, so a term's variants and a document's chunks are
+    read by one speaker. The field mirrors `01_build_nemo_manifest.detect_grouping`
+    (`source_id` when present, else `term_index`); if those two ever disagree, a clip
+    could be split across voices while still claiming to be one group.
+  Stage 05 records the roster / mode / field in `voice_assignment.json` beside the
+  audio, and stage 99 labels from THAT, not from the current `VOICES_FR_V2`, so
+  editing the roster in code cannot relabel clips already generated (the drift is
+  logged). Audio with no record gets no `voice` field unless
+  `--voice-fallback NAME` supplies it, which is how a v1 rebuild says `fr_female`.
 
 ## Core data model
 
@@ -428,6 +461,22 @@ stopped for LENGTH, not at the end of the text, so it is rejected instead of
 written and the row counts as failed (see the frame-cap note under "known
 duplication"). `tests/test_audio_truncation.py` covers that guard on both sides.
 
+**Voices (v2).** Batch mode spreads the corpus over the ten French voices of
+`utils/voice_assignment.py` instead of reading all of it with one: the voice is a
+per-request field, so one run covers all ten with no restart. The default is
+`--voice-mode group`, i.e. a term's variants (and a document's chunks) are read by
+one speaker, assigned by hashing the group key; `--voice-mode row` gives every clip
+its own draw, `--voice X` or `--voice-mode single` is the v1 behaviour, and
+`--voices-file` swaps the roster. The run logs the spread and writes
+`voice_assignment.json` beside the audio for stage 99 to label from. The ten names
+were chosen by ear in the CrispASR repo; see the roster entry under "known
+duplication" and the `utils/voice_assignment.py` entry above for why the assignment
+is a hash. v2 is generated at Voxtral `cfg_alpha` **2.0** (the CrispASR compose
+default since the 2026-10-13 sweep), dropping to 1.5 for a clip that needs a retry:
+below ~1.2 the decoder stops following the text, and at 3.0+ runs distort and
+increasingly fail to terminate at all. `tests/test_voice_column.py`
+(`uv run tests/...`) pins that the voice stage 05 sent is the voice stage 99 writes.
+
 ### `06_hotfixes/` (active)
 Quality control over the synthesized clips: transcribe each one with Whisper, score
 the transcript against the label (CER), regenerate the bad clips, keep the best draw.
@@ -531,6 +580,14 @@ The derived dataset must ship correct attribution. Summary (full detail in
   to audio), and add "no endorsement".
 - Ship a "research use only, not for clinical deployment" disclaimer.
 - Do **not** redistribute the PARHAF test set (embargoed); training set only.
+- **TODO (v2):** `99_hf_release/README.md` is the PUBLISHED v1 dataset card, so it
+  still documents v1's columns and its single `fr_female` voice. When v2 ships,
+  document the `voice` column there (ten voices, one per term/document) and in the
+  "Scale and cost" row of the root `README.md`. Deliberately not done yet: the card
+  must keep describing the data that is actually on the Hub. `build_parquet.py`
+  already writes the column, empty for v1-era manifests, so a v1 rebuild stays
+  truthful (and `01_build_nemo_manifest.py --voice-fallback fr_female` fills it in
+  with the name v1 audio never recorded).
 
 ## Known duplication and gotchas
 
@@ -562,6 +619,16 @@ Flagging these because avoiding silent duplication is a hard rule in this repo:
   Note the compose file's `VOXTRAL_MAX_MODEL_LEN` is shared between prompt tokens
   and generated frames, so it must stay above `VOXTRAL_MAX_TOKENS` + the prompt or
   the real cap is lower than this constant (today: 6144 vs 4096, so 4096 binds).
+- **The v2 voice roster (deliberate copy).** `utils/voice_assignment.py`'s
+  `VOICES_FR_V2` copies the ten names from `CrispASR/voxtral/cloning/
+  voices_fr_production.txt` in the separate CrispASR harness repo, where they were
+  chosen by ear (that repo's `PLAN_VOXTRALTTS_CLONING_TEST.md`, stages A9 and A10).
+  Same reasoning as `VOXTRAL_VOICES` above: this repo must stay self-contained, so
+  the list lives in both. If the roster changes there, update it here too, and
+  remember that **order is part of the mapping** (re-ordering re-assigns every
+  voice) and that changing it after generating invalidates the `voice` column of
+  the clips already written. `--voices-file` points stage 05 straight at that file
+  when you want to avoid the copy for a one-off run.
 - **Text stages share one engine.** All five stages plug into
   `utils/text_generation_engine.py` via a `StageAdapter`; do not copy the run loop
   / dedup / stats / source-pass into a stage. Dictionary + drugs + acronyms are the
