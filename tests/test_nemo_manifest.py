@@ -1,7 +1,9 @@
 """Stdlib tests for utils/nemo_manifest: split-spec parsing, the grouped,
 duration-aware train/val/test splitter (atomic + distribute guarantees,
 singletons by ratio, duration balance, determinism), and the duration cache's
-size/mtime validation (a clip whose bytes changed must be re-probed).
+size/mtime validation (a clip whose bytes changed must be re-probed), and the
+pinning of a split to an earlier generation of the audio (v2 must inherit v1's
+train/val/test, since a fresh duration-greedy draw would leak the old test set).
 
 Run: python tests/test_nemo_manifest.py
 """
@@ -15,7 +17,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "utils"))
 from nemo_manifest import (  # noqa: E402
     SPLITS,
     assign_splits,
+    assign_splits_pinned,
     audio_index,
+    load_pinned_splits,
     parse_split,
     probe_durations,
     relativize,
@@ -298,6 +302,109 @@ def test_probe_durations_drops_legacy_unstamped_entries():
         assert probe_durations([clip], cache_path=cache, progress=False) == {clip.name: 3.0}
         assert fake.calls == [clip.name]
         assert json.loads(cache.read_text())[clip.name][0] == 3.0
+
+
+# --------------------------------------------------------------------------- #
+# pinning: a regenerated corpus must inherit the previous generation's split
+# --------------------------------------------------------------------------- #
+def _write_manifest(path: Path, rels: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(
+        json.dumps({"audio_filepath": rel, "duration": 1.0, "text": "x"}) + "\n"
+        for rel in rels))
+
+
+def test_load_pinned_splits_release_wide_wins():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "NeMO_files"
+        # Per-dataset manifests, relative to <root>/<name>/.
+        _write_manifest(root / "dictionary" / "train.jsonl",
+                        ["../../dictionary/000001_0000_a.flac"])
+        _write_manifest(root / "dictionary" / "test.jsonl",
+                        ["../../dictionary/000002_0000_b.flac"])
+        _write_manifest(root / "drugs" / "val.jsonl", ["../../drugs/000003_0000_c.flac"])
+        # Release-wide manifests, relative to <root>/, disagreeing about b.flac: an
+        # unsynced tree, which the per-source sync of 02 is meant to prevent.
+        _write_manifest(root / "train.jsonl", ["../dictionary/000001_0000_a.flac",
+                                               "../dictionary/000002_0000_b.flac"])
+        _write_manifest(root / "val.jsonl", ["../drugs/000003_0000_c.flac"])
+
+        pins = load_pinned_splits(root)
+    # Keyed on <source folder>/<file>, so the audio root can move (v2 did).
+    assert pins == {
+        "dictionary/000001_0000_a.flac": "train",
+        "dictionary/000002_0000_b.flac": "train",   # release-wide beat per-dataset "test"
+        "drugs/000003_0000_c.flac": "val",
+    }, pins
+
+
+def test_load_pinned_splits_refuses_an_empty_root():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td) / "NeMO_files"
+        (root / "dictionary").mkdir(parents=True)
+        try:
+            load_pinned_splits(root)
+        except FileNotFoundError:
+            pass
+        else:
+            raise AssertionError("a root with no train/val/test.jsonl must raise")
+
+
+def _pinned_row(clip, gid, mode="atomic", dur=1.0):
+    return {"clip": clip, "group_id": gid, "group_mode": mode, "duration": float(dur)}
+
+
+def test_assign_splits_pinned():
+    """Three paths: the clip's own pin, its group's pin, and a fresh split."""
+    rows = [
+        _pinned_row("dictionary/a.flac", "dictionary:1"),   # pinned test
+        _pinned_row("dictionary/b.flac", "dictionary:1"),   # same group, no pin of its own
+        _pinned_row("dictionary/c.flac", "dictionary:2"),   # pinned train
+        _pinned_row("acronyms/d.flac", "acronyms:9"),       # group unknown to v1
+    ]
+    pins = {"dictionary/a.flac": "test", "dictionary/c.flac": "train",
+            "drugs/gone.flac": "val"}   # a v1 clip v2 does not have: simply unused
+    labels, stats = assign_splits_pinned(rows, parse_split("80/10/10"), pins,
+                                         key=lambda r: r["clip"])
+    # b follows its group instead of being placed on its own, which is what keeps an
+    # atomic group from straddling two splits.
+    assert labels[:3] == ["test", "test", "train"], labels
+    assert labels[3] in SPLITS, labels
+    assert stats == {"clip": 2, "group": 1, "fresh": 1}, stats
+
+
+def test_assign_splits_pinned_group_majority_and_ties():
+    """A distribute group legitimately spans splits in v1, so the group vote takes the
+    majority; an even vote goes to the earliest of SPLITS (train before val)."""
+    # Row order puts the LOSING split first in both groups, so a vote that merely
+    # returned the first-seen pin would fail here (it did, until it was tested).
+    rows = [
+        _pinned_row("dictionary/c.flac", "dictionary:1", mode="distribute"),   # train
+        _pinned_row("dictionary/a.flac", "dictionary:1", mode="distribute"),   # val
+        _pinned_row("dictionary/b.flac", "dictionary:1", mode="distribute"),   # val
+        _pinned_row("dictionary/new.flac", "dictionary:1", mode="distribute"),
+        _pinned_row("dictionary/y.flac", "dictionary:2", mode="distribute"),   # val
+        _pinned_row("dictionary/x.flac", "dictionary:2", mode="distribute"),   # train
+        _pinned_row("dictionary/new2.flac", "dictionary:2", mode="distribute"),
+    ]
+    pins = {"dictionary/a.flac": "val", "dictionary/b.flac": "val", "dictionary/c.flac": "train",
+            "dictionary/x.flac": "train", "dictionary/y.flac": "val"}
+    labels, stats = assign_splits_pinned(rows, parse_split("80/10/10"), pins,
+                                         key=lambda r: r["clip"])
+    assert labels[3] == "val", labels      # 2 val vs 1 train
+    assert labels[6] == "train", labels    # 1 val vs 1 train -> SPLITS order
+    assert stats == {"clip": 5, "group": 2, "fresh": 0}, stats
+
+
+def test_assign_splits_pinned_without_pins_matches_assign_splits():
+    """An empty pin map must behave exactly like the plain splitter, so the option
+    cannot change a build that does not use it."""
+    rows = [_pinned_row(f"dictionary/{i}.flac", f"dictionary:{i // 3}", dur=1 + i % 5)
+            for i in range(30)]
+    ratios = parse_split("80/10/10")
+    labels, stats = assign_splits_pinned(rows, ratios, {}, key=lambda r: r["clip"])
+    assert labels == assign_splits(rows, ratios), labels
+    assert stats == {"clip": 0, "group": 0, "fresh": 30}, stats
 
 
 def _run():

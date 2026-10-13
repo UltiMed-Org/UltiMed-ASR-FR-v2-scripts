@@ -54,7 +54,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "utils"))
 from nemo_manifest import (  # noqa: E402
     SPLITS,
     assign_splits,
+    assign_splits_pinned,
+    clip_key,
     format_summary,
+    load_pinned_splits,
     parse_split,
     read_jsonl,
     relativize,
@@ -147,13 +150,21 @@ def refix_row(row: dict, subdir: Path, parent_dir: Path) -> dict:
                    "differently-licensed subset shipped on its own (repeatable).")
 @click.option("--absolute", is_flag=True,
               help="Write absolute audio_filepath (embeds the machine path; off by default).")
+@click.option("--pin-splits-from", "pin_splits_from", default=None, metavar="DIR",
+              type=click.Path(path_type=Path),
+              help="Manifest root of an EARLIER generation (e.g. v1's NeMO_files/). The "
+                   "release-wide split keeps each clip where it was there, matched on "
+                   "<source>/<file>, instead of being redrawn: the draw is duration-greedy, "
+                   "so regenerated audio reshuffles train/val/test and leaks the old test "
+                   "set into the new train set. Only the split label is read. Requires the "
+                   "default --stratify-duration path.")
 @click.option("--sync-per-source-only", is_flag=True,
               help="Only rewrite each <name>/{train,val,test}.jsonl from the EXISTING "
                    "top-level split (no re-split), e.g. on manifests built before the "
                    "combine did it.")
 def main(root: Path, split_spec: str, stratify_duration: bool, stratify: bool,
          strict_coverage: bool, exclude: tuple[str, ...], absolute: bool,
-         sync_per_source_only: bool):
+         pin_splits_from: Path | None, sync_per_source_only: bool):
     logger.remove()
     logger.add(sys.stderr, level="INFO",
                format="<green>{time:HH:mm:ss}</green> <level>{message}</level>")
@@ -187,8 +198,19 @@ def main(root: Path, split_spec: str, stratify_duration: bool, stratify: bool,
             rows = load_full(sd)
             all_rows.extend(rows)
             logger.info("  loaded {} rows from {}", len(rows), sd.name)
-        labels = assign_splits(all_rows, ratios, stratify=stratify, by_duration=True,
-                               strict_coverage=strict_coverage)
+        if pin_splits_from:
+            # The release-wide split is the one the trainer and every published
+            # comparison read, so this is where pinning matters most.
+            pins = load_pinned_splits(Path(pin_splits_from))
+            labels, pin_stats = assign_splits_pinned(
+                all_rows, ratios, pins, key=lambda r: clip_key(str(r["_audio_abs"])),
+                stratify=stratify, by_duration=True, strict_coverage=strict_coverage)
+            logger.info("pinned to {} ({} clips known there): {} rows by clip, {} by group, "
+                        "{} split fresh", pin_splits_from, len(pins), pin_stats["clip"],
+                        pin_stats["group"], pin_stats["fresh"])
+        else:
+            labels = assign_splits(all_rows, ratios, stratify=stratify, by_duration=True,
+                                   strict_coverage=strict_coverage)
         counts = write_splits(root, all_rows, labels, absolute=absolute)
         agg = summarize(all_rows, labels)
         logger.info("global duration re-split -> full={} train={} val={} test={}\n{}",
@@ -197,6 +219,13 @@ def main(root: Path, split_spec: str, stratify_duration: bool, stratify: bool,
         for name, c in sync_per_source_splits(root, subdirs).items():
             logger.info("  {}: per-source split synced to the release-wide one: {}", name, c)
         return
+
+    if pin_splits_from:
+        raise click.UsageError(
+            "--pin-splits-from needs the global re-split (the default "
+            "--stratify-duration); with --no-stratify-duration this script only "
+            "concatenates the per-dataset splits, so pin those in "
+            "01_build_nemo_manifest.py instead")
 
     # Plain concat: keep each dataset's own split, only fix the paths, then
     # report the duration balance that fell out of the count-based sub-splits.

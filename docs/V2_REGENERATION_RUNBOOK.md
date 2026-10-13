@@ -35,6 +35,8 @@ sudo docker compose up -d --build voxtral-tts
 
 Nothing listens on `:8003` until that is done, and stage 05 aborts on an unreachable server rather than writing partial work.
 
+**How long the run takes.** Measured from v1's own `05_generate_audio/tts_generate.log` (623,944 per-clip lines), in audio-hours produced per wall-clock hour: the PARHAF stretch of 2026-07-29/30 held **15.6-15.9x** realtime for 20 hours straight (~1,750-2,100 clips/h at 28-32 s per clip), and the dictionary run of 2026-07-14/15 peaked at **18.3-20.5x** (~3,700-4,100 clips/h at 17.9 s per clip), median 14.9x. v2 is the same 3,115 hours of audio, so at a sustained 15x it is **~208 wall hours, i.e. 8.7 days of uninterrupted generation**; at the peak rate ~156 h. All of v1 was generated on the 3090 Ti power-capped to 100-200 W during the heatwave, so uncapped should land at the fast end. Stage 06's QC is serial wall time on top (the GPU cannot host the TTS and the STT server at once) and is **unmeasured**: time it on acronyms first, 1,596 clips and 4.1 h of audio, then multiply by 760.
+
 
 ## 1. Generate (stage 05)
 
@@ -47,13 +49,14 @@ for s in 01_dictionnary 02_drugs 03_PARHAF 04_PARROT 07_acronyms; do
     --input  "../$s/generated_dataset.jsonl" \
     --output "../$s/generated_audios" \
     --cfg-alpha 2.0 \
-    --concurrency 4
+    --concurrency 10
 done
 ```
 
 - `--voice-mode group` is the default and is what v2 wants: one speaker per term (or per document), assigned by hashing the group key so adding or removing a row never moves another group to another voice.
 - `cfg_alpha` **2.0** is the top of the band measured on 2026-10-13 (16 voices x 10 values, 160 takes): usable 1.2-2.0, and 1.5-2.0 for the hybrid voices. It is deliberately the top, not the middle: below 1.2 the flow-matching decoder stops following the text and degrades fast, while above 2.0 distortion grows and takes increasingly fail to terminate at all. Stage 06's retry ladder therefore walks **down** from it (step -0.2, floor 1.2) rather than up.
-- `--concurrency 4` because the acoustic stage runs `codec-bs=1`, so Voxtral's audio throughput saturates around client concurrency 4-8.
+- `--concurrency 10` is what v1 ran (`docs/BUILD_LOG.md` line 55) and what the throughput below was measured at. CrispASR's own notes say the acoustic stage is `codec-bs=1` and saturates around 4-8 concurrent clients; 10 did not hurt, so there is no reason to lower it.
+- **Voice mode is a decision to make before launching**, because the voice is baked into the audio. `--voice-mode group` (the default) gives each term exactly ONE voice, so a drug name exists in the corpus in a single accent and a bad voice-term pairing costs all ~8 variants of that term. `--voice-mode row` hashes `group:variant_index` instead, giving the dictionary 5.74 distinct voices per term, drugs 4.99, acronyms 2.68, and a flatter per-voice balance (dictionary spread 2.8% -> 1.2%, acronyms 45% -> 16%). Edit stability is unaffected: row mode is still a hash, not a counter. Group mode is right where the group is a DOCUMENT (PARHAF, PARROT: consecutive chunks of one clinical report should share a reader), which is why the recommendation is per stage: `row` for dictionary / drugs / acronyms (92.5% of the clips), `group` for PARHAF / PARROT. Note row mode is currently a silent no-op on the document stages anyway: their rows carry `variant_index: 0` with the real index in `chunk_index`, and `voice_for_row` prefers `variant_index`.
 - Each run writes `voice_assignment.json` beside the audio. **Stage 99 labels the `voice` column from that file**, so do not re-order `utils/voice_assignment.py`'s roster afterwards: the file order is part of the mapping and every clip already on disk would become mislabelled.
 
 
@@ -92,13 +95,23 @@ uv run scripts/build_parquet.py              # last, once the manifests are fina
 **(d) `.size_cache.json`.** `scripts/get_statistics.py` keys its size cache on **absolute** paths, which for v2 live under the new v2 root, so it cannot serve a v1 value. Nothing to do; noted because the handoff flagged it as a risk.
 
 
-## 4. Still open: pin the splits (blocks the v1-vs-v2 comparison, not the generation)
+## 4. Pin the splits to v1 (required for any v1-vs-v2 comparison)
 
-`assign_splits` (`utils/nemo_manifest.py`) is duration-greedy, so v2's new durations produce a **different** train/val/test than v1's. Every v1-vs-v2 WER comparison then leaks: a sentence that was in v1's test set can land in v2's train set, and the model trained on v2 is evaluated on text it saw.
+`assign_splits` (`utils/nemo_manifest.py`) is duration-greedy, so v2's new durations would produce a **different** train/val/test than v1's. Every v1-vs-v2 WER comparison would then leak: a sentence that was in v1's test set can land in v2's train set, and the v2 model is evaluated on text it was trained on.
 
-Recommendation (agreed with the handoff, not implemented): at manifest-build time, pin each v2 clip to its v1 split by clip key (audio folder, `term_index`, `variant_index`), read from `/media/.../audio_datasets/NeMO_files/*/{train,val,test}.jsonl`. Take **only** the split label from those rows, never any other field, so no v1 QC value rides along. The ~72 rows that v1 had dropped for audio reasons have no v1 split and need a fresh one (train, or `assign_splits` with their group kept together).
+Both stage-99 split sites now take `--pin-splits-from DIR` (`load_pinned_splits` + `assign_splits_pinned`):
 
-This is needed after generation, so it blocks nothing today. It does have to exist before any v2 model is compared with the published v1 numbers.
+```bash
+V1=/media/$USER/ssd1TO/audio_datasets/NeMO_files
+uv run 01_build_nemo_manifest.py --all --pin-splits-from "$V1"
+uv run 02_combine_nemo_manifests.py  --pin-splits-from "$V1"
+```
+
+Each clip keeps the split it had in v1, matched on `clip_key` (`<source folder>/<file>`, which survives the audio moving to the v2 root). **Only the split label is read**, never any other column, so no v1 duration, CER, transcript or `qc_status` rides along. A clip v1 did not have follows its group's pinned split (so an atomic group cannot straddle two splits) and, failing that, is split normally; the run logs the three counts.
+
+Measured on the real v1 manifests: 602,813 pins read in 17.3 s, no disagreement between the per-dataset and release-wide levels, 80.6 / 9.6 / 9.8 shares. Against v2's 602,885 input rows that leaves exactly the 72 restored rows to split fresh.
+
+`--pin-splits-from` is refused in the combiner's `--no-stratify-duration` mode, which only concatenates the per-dataset splits: pin those in `01_build_nemo_manifest.py` instead.
 
 A second confound, independent of the splits: v2 has slightly more rows than v1 (the 72 restored, minus 2 dropped for text). A parakeet v2-vs-v1 comparison that wants to isolate *voice diversity* has to match the row count, otherwise dataset size is confounded with it.
 

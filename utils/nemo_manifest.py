@@ -38,8 +38,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
 
 log = logging.getLogger("nemo_manifest")
 
@@ -254,6 +256,172 @@ def format_summary(agg: dict[str, dict[str, float]]) -> str:
             f"{a['duration'] / 3600.0:8.2f} h ({a['duration_pct']:5.1f}%)"
         )
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# pinning a split to an earlier generation of the audio
+# --------------------------------------------------------------------------- #
+# Pull just the one field out of a manifest line. Pinning reads 2+ GB of v1
+# manifests and needs ONE key per row, so parsing every row into a dict (with its
+# text, transcript and QC columns) would dominate the build for nothing.
+_AUDIO_FIELD = re.compile(r'"audio_filepath"\s*:\s*"((?:[^"\\]|\\.)*)"')
+
+
+def _audio_filepath(line: str) -> str | None:
+    """``audio_filepath`` of a manifest line, or None for a blank/odd line."""
+    m = _AUDIO_FIELD.search(line)
+    if m:
+        return m.group(1)
+    if not line.strip():
+        return None
+    try:  # a value with escapes the regex gave up on: pay for the full parse
+        return json.loads(line).get("audio_filepath")
+    except json.JSONDecodeError:
+        return None
+
+
+def load_pinned_splits(root: Path) -> dict[str, str]:
+    """``{clip_key: split}`` read from an EARLIER generation's manifests.
+
+    Why this exists: ``assign_splits`` is duration-greedy, so re-synthesizing an
+    unchanged corpus (v2 reads every clip with a new voice) yields different
+    durations and therefore a different train/val/test. Any comparison between the
+    two generations then leaks, in the direction that flatters the new one: a
+    sentence the old test set measured can land in the new train set, so the new
+    model is scored on text it was trained on. Pinning each clip to the split it
+    already had keeps the two generations comparable.
+
+    **Only the split label travels.** Nothing else of the old row is read, so no
+    stale duration, CER, transcript or ``qc_status`` can ride along; those describe
+    audio that no longer exists, which is exactly what the rest of stage 99 is
+    careful about.
+
+    Both levels are scanned: ``<root>/{train,val,test}.jsonl`` (the release-wide
+    split, what the trainer reads) and ``<root>/<dataset>/{train,val,test}.jsonl``
+    (per dataset). The release-wide label wins where the two disagree, and the
+    disagreements are counted in a warning, since ``02_combine_nemo_manifests.py``
+    syncs the two levels and a synced tree has none.
+
+    Parameters
+    ----------
+    root : Path
+        Manifest root of the previous generation (v1's ``NeMO_files/``).
+
+    Returns
+    -------
+    dict[str, str]
+        ``clip_key`` (``<source folder>/<file>``) to split name. The key is a folder
+        plus a file name, not an absolute path, so it still matches after the audio
+        has moved to another root, which is what v2 did.
+    """
+    if not root.is_dir():
+        raise FileNotFoundError(f"no manifest root to pin splits from: {root}")
+    pins: dict[str, str] = {}
+
+    def scan(manifest: Path, split: str) -> int:
+        n = 0
+        with manifest.open() as f:
+            for line in f:
+                rel = _audio_filepath(line)
+                if rel:
+                    pins[clip_key(resolve_audio(manifest.parent, rel))] = split
+                    n += 1
+        return n
+
+    # Per dataset first, then release-wide on top, so the release-wide label wins.
+    per_dataset = 0
+    for sub in sorted(d for d in root.iterdir() if d.is_dir()):
+        for split in SPLITS:
+            manifest = sub / f"{split}.jsonl"
+            if manifest.is_file():
+                per_dataset += scan(manifest, split)
+    before = dict(pins)
+    release = 0
+    for split in SPLITS:
+        manifest = root / f"{split}.jsonl"
+        if manifest.is_file():
+            release += scan(manifest, split)
+    if not pins:
+        raise FileNotFoundError(f"{root} holds no train/val/test.jsonl to pin splits from")
+    conflicts = sum(1 for k, v in pins.items() if k in before and before[k] != v)
+    if conflicts:
+        log.warning("pinned splits: %d clips sat in a different split per dataset than "
+                    "release-wide in %s; the release-wide one wins", conflicts, root)
+    log.info("pinned splits: %d clips from %s (%d per-dataset rows, %d release-wide rows)",
+             len(pins), root, per_dataset, release)
+    return pins
+
+
+def assign_splits_pinned(
+    rows: Sequence[dict],
+    ratios: dict[str, float],
+    pins: Mapping[str, str],
+    *,
+    key: Callable[[dict], str],
+    stratify: bool = True,
+    by_duration: bool = True,
+    strict_coverage: bool = True,
+) -> tuple[list[str], dict[str, int]]:
+    """Like ``assign_splits``, but keep the split an earlier generation gave a clip.
+
+    Resolution order per row:
+
+    1. the clip's own pin (``pins[key(row)]``);
+    2. failing that, the split its GROUP's pinned clips are in. A row the old
+       generation did not have (a restored clip, a newly added variant) must not be
+       placed on its own: that could put it in another split than the rest of its
+       term, breaking the atomic-group guarantee the splitter exists to make. A
+       ``distribute`` group that legitimately spans splits contributes several
+       votes and the largest wins, ties going to the earliest of ``SPLITS``;
+    3. failing that, ``assign_splits`` over the remaining rows alone, which keeps
+       the usual group guarantees among them and gives them the ordinary ratios.
+
+    Parameters
+    ----------
+    rows, ratios, stratify, by_duration, strict_coverage
+        As ``assign_splits``; the last three apply to step 3 only.
+    pins : Mapping[str, str]
+        From ``load_pinned_splits``.
+    key : Callable[[dict], str]
+        Row to ``clip_key``. The caller owns it because the two stage-99 scripts
+        hold the audio path differently (``_audio_abs`` vs an ``audio_filepath``
+        relative to the manifest).
+
+    Returns
+    -------
+    labels : list[str]
+        Split per row, parallel to ``rows``.
+    stats : dict[str, int]
+        ``{"clip": pinned by their own key, "group": pinned by their group,
+        "fresh": split by assign_splits}``. Worth logging: a build meant to
+        reproduce a previous split that reports a large ``fresh`` is pinning
+        against the wrong root, or against a corpus whose file names moved.
+    """
+    labels: list[str | None] = [None] * len(rows)
+    votes: dict[object, Counter] = defaultdict(Counter)
+    for i, row in enumerate(rows):
+        pin = pins.get(key(row))
+        if pin in SPLITS:
+            labels[i] = pin
+            votes[row.get("group_id")][pin] += 1
+    n_clip = sum(1 for lab in labels if lab is not None)
+
+    n_group = 0
+    for i, row in enumerate(rows):
+        if labels[i] is not None:
+            continue
+        group = votes.get(row.get("group_id"))
+        if group:
+            labels[i] = min(group.items(), key=lambda kv: (-kv[1], SPLITS.index(kv[0])))[0]
+            n_group += 1
+
+    todo = [i for i, lab in enumerate(labels) if lab is None]
+    if todo:
+        fresh = assign_splits([rows[i] for i in todo], ratios, stratify=stratify,
+                              by_duration=by_duration, strict_coverage=strict_coverage)
+        for i, lab in zip(todo, fresh):
+            labels[i] = lab
+    return [lab for lab in labels], {"clip": n_clip, "group": n_group, "fresh": len(todo)}  # type: ignore[misc]
 
 
 # --------------------------------------------------------------------------- #

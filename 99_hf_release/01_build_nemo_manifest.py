@@ -75,8 +75,11 @@ from loguru import logger
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "utils"))
 from nemo_manifest import (  # noqa: E402
     assign_splits,
+    assign_splits_pinned,
     audio_index,
+    clip_key,
     format_summary,
+    load_pinned_splits,
     parse_split,
     probe_durations,
     summarize,
@@ -208,6 +211,7 @@ def build_dataset(
     group_mode: str | None,
     limit: int | None,
     voice_fallback: str | None = None,
+    pins: dict[str, str] | None = None,
 ) -> None:
     if not input_path.is_file():
         logger.error("{}: input not found: {}", name, input_path)
@@ -310,8 +314,19 @@ def build_dataset(
     if dropped_dur:
         logger.warning("[{}] dropped {} rows with unreadable/zero duration", name, dropped_dur)
 
-    labels = assign_splits(kept, ratios, stratify=stratify, by_duration=by_duration,
-                           strict_coverage=strict_coverage)
+    if pins:
+        # Reproduce the previous generation's train/val/test instead of drawing a new
+        # one: re-synthesized audio has different durations, and this splitter is
+        # duration-greedy, so a fresh draw would move clips across splits and leak the
+        # old test set into the new train set. See load_pinned_splits.
+        labels, pin_stats = assign_splits_pinned(
+            kept, ratios, pins, key=lambda r: clip_key(str(r["_audio_abs"])),
+            stratify=stratify, by_duration=by_duration, strict_coverage=strict_coverage)
+        logger.info("[{}] splits pinned: {} by clip, {} by group, {} split fresh",
+                    name, pin_stats["clip"], pin_stats["group"], pin_stats["fresh"])
+    else:
+        labels = assign_splits(kept, ratios, stratify=stratify, by_duration=by_duration,
+                               strict_coverage=strict_coverage)
     counts = write_splits(out_dir, kept, labels, absolute=absolute)
     agg = summarize(kept, labels)
     total_h = sum(a["duration"] for a in agg.values()) / 3600.0
@@ -354,14 +369,28 @@ def build_dataset(
                    "the record but was read entirely by fr_female, so a v1 rebuild "
                    "wants --voice-fallback fr_female; without it those rows get no "
                    "voice field. Ignored where a record exists.")
+@click.option("--pin-splits-from", "pin_splits_from", default=None, metavar="DIR",
+              type=click.Path(path_type=Path),
+              help="Manifest root of an EARLIER generation (e.g. v1's NeMO_files/). Each "
+                   "clip keeps the split it had there, matched on <source>/<file>, instead "
+                   "of being re-split: this splitter is duration-greedy, so regenerated "
+                   "audio would otherwise reshuffle train/val/test and leak the old test "
+                   "set into the new train set. Only the split label is read, never any "
+                   "other column. Clips the old root does not know follow their group, or "
+                   "are split normally.")
 @click.option("--limit", type=int, default=None, help="Debug: cap rows per dataset.")
 def main(input_path, audio_dir, name, do_all, outdir, split_spec, stratify,
          stratify_duration, strict_coverage, group_by, group_mode, jobs, absolute,
-         voice_fallback, limit):
+         voice_fallback, pin_splits_from, limit):
     logger.remove()
     logger.add(sys.stderr, level="INFO",
                format="<green>{time:HH:mm:ss}</green> <level>{message}</level>")
     ratios = parse_split(split_spec)
+    # Read once for the whole run: the v1 manifests are gigabytes, and every dataset
+    # looks up the same map (clip keys are namespaced by their source folder).
+    pins = load_pinned_splits(Path(pin_splits_from)) if pin_splits_from else None
+    if pins:
+        logger.info("pinning splits to {} ({} clips known there)", pin_splits_from, len(pins))
     logger.info("split {} -> train {:.1%} val {:.1%} test {:.1%} | stratify={} by_duration={} "
                 "coverage={}", split_spec, ratios["train"], ratios["val"], ratios["test"],
                 stratify, stratify_duration, "strict" if strict_coverage else "best-effort")
@@ -377,7 +406,7 @@ def main(input_path, audio_dir, name, do_all, outdir, split_spec, stratify,
                 REPO_ROOT / stage["input"],
                 SCRIPT_DIR / "data" / stage["audio"],
                 outdir, stage_ratios, stratify, stratify_duration, strict_coverage, jobs,
-                absolute, group_by, group_mode, limit, voice_fallback,
+                absolute, group_by, group_mode, limit, voice_fallback, pins,
             )
         return
 
@@ -385,7 +414,7 @@ def main(input_path, audio_dir, name, do_all, outdir, split_spec, stratify,
         raise click.UsageError("give --all, or all of --input / --audio-dir / --name")
     build_dataset(name, input_path, audio_dir, outdir, ratios, stratify,
                   stratify_duration, strict_coverage, jobs, absolute, group_by,
-                  group_mode, limit, voice_fallback)
+                  group_mode, limit, voice_fallback, pins)
 
 
 if __name__ == "__main__":
