@@ -33,7 +33,14 @@ Two modes, selected by what --input is:
   concurrent requests server-side, so raising it speeds the run up, while
   the single-context TADA/crispasr backend wants 1. A tqdm bar tracks the
   remaining work; per-row failures are logged and skipped, and the run
-  exits non-zero if any row failed.
+  exits non-zero if any row failed (130 if you interrupted it).
+
+  Stopping is safe at any moment: each clip is written to a .tmp sibling and
+  renamed, so there is no half-written file for a resume to mistake for a
+  finished one, and Ctrl-C cancels the queued clips instead of draining them
+  (it only waits for the requests already in flight). Re-running the same
+  command picks up exactly the clips that are missing, including the ones a
+  previous run failed or rejected as truncated.
 
 Voices in batch mode: v1 read the whole corpus with one voice (fr_female),
 v2 spreads it over the ten French voices in utils/voice_assignment.py, which
@@ -424,6 +431,7 @@ def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
     failed = generated = 0
     total_audio = 0.0
     aborted = False
+    interrupted = False
     # Fan out over a thread pool: each synthesize() call is an independent HTTP
     # request writing its own deterministic filename, so it is thread-safe. Running
     # several in flight lets a vLLM/Voxtral server batch them together server-side
@@ -451,19 +459,38 @@ def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
                 total_audio += dur
             logger.debug("{} ({}{:.2f}s backend)", out.name,
                          f"{dur:.2f}s audio, " if dur is not None else "", elapsed)
+    except KeyboardInterrupt:
+        # Ctrl-C has to stop the run in seconds, and without this it does not. Every
+        # row is submitted up front, so the plain shutdown(cancel_futures=False) below
+        # keeps the pool working through the ENTIRE remaining queue while the terminal
+        # looks hung: measured on a 2000-task stand-in, one interrupt still executed
+        # 2000/2000 tasks, which on a 534k-clip stage is days of "stopping". Cancelling
+        # the queued futures leaves only the in-flight requests, i.e. a few seconds, and
+        # each of those writes through a .tmp rename, so nothing is left half-written
+        # and the next run resumes on exactly the clips that are missing.
+        interrupted = True
+        logger.warning("interrupted: {} clips written, dropping the queued ones; "
+                       "re-run the same command to resume", generated)
     finally:
-        # On abort, drop queued-but-unstarted work so an unreachable server fails
-        # fast instead of grinding through every remaining row; in-flight requests
-        # are left to finish. On success, wait for the pool normally.
-        pool.shutdown(wait=not aborted, cancel_futures=aborted)
+        # On abort or interrupt, drop queued-but-unstarted work so the run stops
+        # instead of grinding through every remaining row; in-flight requests are
+        # left to finish (wait=True) because they are seconds away and atomic. On
+        # success, wait for the pool normally.
+        pool.shutdown(wait=not aborted, cancel_futures=aborted or interrupted)
     if aborted:
         # Everything not written counts as failed so the run exits non-zero; a
         # re-run resumes cheaply via the skip-existing logic above.
         failed += len(todo) - generated - failed
 
     audio_info = f", {total_audio / 60:.1f} min of audio" if total_audio else ""
-    logger.info("done: {} generated{}, {} failed, {} skipped as existing, {} bad rows",
+    logger.info("done{}: {} generated{}, {} failed, {} skipped as existing, {} bad rows",
+                " (interrupted)" if interrupted else "",
                 generated, audio_info, failed, skipped_existing, bad_rows)
+    # 130 is the shell's conventional "killed by SIGINT", and generate_v2.sh keys on it
+    # to stop the whole run instead of moving to the next stage (a stage exiting 1 for a
+    # handful of failed clips must NOT stop it, since a re-run retries exactly those).
+    if interrupted:
+        return 130
     return 1 if (failed or bad_rows) else 0
 
 

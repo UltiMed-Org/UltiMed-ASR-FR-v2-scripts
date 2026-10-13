@@ -55,12 +55,21 @@ curl -fsS -m 5 "$URL/health" >/dev/null \
   || { echo "no TTS server on $URL -- start it first: sudo docker compose up -d --build voxtral-tts" >&2; exit 1; }
 
 echo "v2 run: ${#STAGES[@]} stage(s), cfg_alpha $CFG_ALPHA, concurrency $CONCURRENCY, log $LOG_FILE"
+echo "stop it any time with Ctrl-C: in-flight clips finish, queued ones are dropped, and"
+echo "re-running this same command resumes on exactly the clips that are missing."
 run_start=$SECONDS
+with_failures=()
 for s in "${STAGES[@]}"; do
   m="${MODE[$s]}"
   echo
   echo "=== $s (--voice-mode $m) $(date '+%Y-%m-%d %H:%M:%S') ==="
   stage_start=$SECONDS
+  # `|| rc=$?` instead of letting `set -e` act, because the two non-zero exits mean
+  # opposite things: 130 is "the operator stopped this" and must stop everything, while
+  # 1 is "some clips failed" and must NOT abandon the remaining stages over a handful of
+  # transient 500s out of 600k requests (a later re-run retries exactly those, since
+  # resume matches clips by filename).
+  rc=0
   uv run 01_generate_audio.py \
     --input  "../$s/generated_dataset.jsonl" \
     --output "../$s/generated_audios" \
@@ -68,8 +77,29 @@ for s in "${STAGES[@]}"; do
     --voice-mode "$m" \
     --cfg-alpha "$CFG_ALPHA" \
     --concurrency "$CONCURRENCY" \
-    --log-file "$LOG_FILE"
-  printf '=== %s done in %s ===\n' "$s" "$(date -u -d "@$((SECONDS - stage_start))" '+%H:%M:%S')"
+    --log-file "$LOG_FILE" || rc=$?
+  elapsed="$(date -u -d "@$((SECONDS - stage_start))" '+%H:%M:%S')"
+  case "$rc" in
+    0) printf '=== %s done in %s ===\n' "$s" "$elapsed" ;;
+    130)
+      printf '=== %s interrupted after %s: re-run to resume ===\n' "$s" "$elapsed"
+      exit 130 ;;
+    *)
+      # A dead server reports the same exit 1 as a few bad clips, and continuing would
+      # then burn through the remaining stages failing every row. One health probe tells
+      # the two apart for free.
+      if ! curl -fsS -m 5 "$URL/health" >/dev/null; then
+        echo "=== $s exited $rc after $elapsed and $URL is not answering: stopping ===" >&2
+        exit 1
+      fi
+      echo "=== $s exited $rc after $elapsed (clips failed, server still up); continuing ===" >&2
+      with_failures+=("$s") ;;
+  esac
 done
-printf '\nall stages done in %s. Next: the QC loop, 06_hotfixes/driver.sh (see the runbook).\n' \
-  "$(date -u -d "@$((SECONDS - run_start))" '+%H:%M:%S')"
+printf '\nall stages done in %s.\n' "$(date -u -d "@$((SECONDS - run_start))" '+%H:%M:%S')"
+if [[ ${#with_failures[@]} -gt 0 ]]; then
+  printf 'clips failed in: %s. Re-run this script to retry just those, then go to the QC loop.\n' \
+    "${with_failures[*]}" >&2
+  exit 1
+fi
+printf 'Next: the QC loop, 06_hotfixes/driver.sh (see docs/V2_REGENERATION_RUNBOOK.md).\n'
