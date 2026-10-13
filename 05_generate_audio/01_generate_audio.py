@@ -527,8 +527,11 @@ def main() -> int:
                         "applies). Honoured per request by both TADA and Voxtral.")
     p.add_argument("--cfg-alpha", type=float, default=None,
                    help="Voxtral classifier-free guidance, sent as extra_params.cfg_alpha (default: "
-                        "not sent, the server's VOXTRAL_CFG_ALPHA applies, 1.3 in the CrispASR "
-                        "compose). Higher follows the text more closely.")
+                        "not sent, the server's VOXTRAL_CFG_ALPHA applies, 2.0 in the CrispASR "
+                        "compose since the 2026-10-13 sweep, which is what v2 is generated at). "
+                        "Higher follows the text more closely, but the measured usable band is "
+                        "1.2-2.0 (1.5-2.0 for the hybrid voices): 1.0 is CFG off and the decoder "
+                        "stops following the text, 3.0+ distorts and often never terminates.")
     p.add_argument("--format", default="flac",
                    choices=("wav", "pcm", "f32", "flac", "mp3", "aac", "opus"),
                    help="Audio response format and file extension (default: flac, "

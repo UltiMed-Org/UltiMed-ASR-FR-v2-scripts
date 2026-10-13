@@ -84,9 +84,9 @@ IMPROVED / EXHAUSTED lines). Per-clip stt_seconds / stt_rtf are also stored in t
 output jsonl. Every row also carries a top-level ``cfg_alpha`` recording the TTS
 cfg_alpha behind its CURRENT audio: a regenerated clip stores its winning draw's
 cfg_alpha, while a clip that keeps its original audio (passed under the threshold, or
-exhausted) stores ``--original-cfg-alpha`` (1.3 by default, the value the whole dataset
-was synthesized with per ``99_hf_release/README.md``). Audio is replaced through atomic
-writes (temp + fsync + os.replace)
+exhausted) stores ``--original-cfg-alpha`` (2.0 by default, the value v2 audio is
+generated at; v1 audio was drawn at 1.3, so pass it when running over v1). Audio is
+replaced through atomic writes (temp + fsync + os.replace)
 for both the ``.bak`` backup and the new clip, so an interrupted run can never
 corrupt a clip.
 
@@ -1419,8 +1419,8 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
             stats["transcribed"] += 1
         # Every clip records the cfg_alpha behind its CURRENT audio. A clip that keeps
         # its original audio (passed with low CER, exhausted, or flagged pending_tts)
-        # carries the dataset's original synthesis cfg_alpha (--original-cfg-alpha, 1.3
-        # per the release README); a win overwrites this with the draw's cfg_alpha in
+        # carries the dataset's original synthesis cfg_alpha (--original-cfg-alpha, 2.0
+        # for v2 and 1.3 for v1); a win overwrites this with the draw's cfg_alpha in
         # _apply_improvement. setdefault so a prior improved value is never clobbered.
         row.setdefault("cfg_alpha", cfg.original_cfg_alpha)
 
@@ -1652,7 +1652,7 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
 @click.option("--speed-jitter", default=0.0, type=float, help="Optional: also vary speed by +/- this each attempt (e.g. 0.03). Not needed when the seed works.")
 @click.option("--cfg-alpha-start", default=1.5, type=float, help="TTS cfg_alpha sent on the first re-attempt (raised by --cfg-alpha-step each attempt to push the model harder). Default 1.5, the floor of the measured usable band (1.2-2.0 for the shipped voices, 1.5-2.0 for the hybrids the v2 roster leans on); 1.0 is CFG off, which makes the decoder stop following the text, so do not ladder through it. Pass a negative value to omit cfg_alpha entirely.")
 @click.option("--cfg-alpha-step", default=0.25, type=float, help="Amount added to cfg_alpha on each successive re-attempt. With the default start, five draws walk 1.5 to 2.5: the band, plus a little headroom above it.")
-@click.option("--original-cfg-alpha", default=1.3, type=float, help="cfg_alpha the ORIGINAL dataset audio was synthesized with (1.3, per 99_hf_release/README.md). Written as each clip's `cfg_alpha` when it keeps its original audio (passed / exhausted); a regenerated clip records its winning draw's cfg_alpha instead.")
+@click.option("--original-cfg-alpha", default=2.0, type=float, help="cfg_alpha the ORIGINAL dataset audio was synthesized with. Default 2.0, the value v2 is generated at (VOXTRAL_CFG_ALPHA in the CrispASR compose since the 2026-10-13 sweep); pass 1.3 when running over v1 audio, which was drawn at that. Written as each clip's `cfg_alpha` when it keeps its original audio (passed / exhausted); a regenerated clip records its winning draw's cfg_alpha instead.")
 @click.option("--refresh-duration/--no-refresh-duration", default=True, help="Re-probe and update each row's `duration` when its audio is replaced (keeps stage-99 splits correct).")
 @click.option("--force", is_flag=True, help="Re-process clips already marked improved/exhausted in a previous run.")
 @click.option("--retry-exhausted", is_flag=True, help="Give the clips marked `exhausted` (flagged bad, no draw good enough) another run: they are treated as if they carried no marker, so a rescore can clear them and an stt pass can send the ones that still read bad back through the tts queue. Unlike --force this leaves the clips that already passed and the ones already improved alone, so a retry costs only the known-weak tail (173 clips after the 0.08 sweep) instead of re-transcribing the corpus. Use it after a scoring-rule change or with a different seed / cfg_alpha ladder.")

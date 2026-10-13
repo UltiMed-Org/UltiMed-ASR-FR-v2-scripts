@@ -587,7 +587,13 @@ The derived dataset must ship correct attribution. Summary (full detail in
   must keep describing the data that is actually on the Hub. `build_parquet.py`
   already writes the column, empty for v1-era manifests, so a v1 rebuild stays
   truthful (and `01_build_nemo_manifest.py --voice-fallback fr_female` fills it in
-  with the name v1 audio never recorded).
+  with the name v1 audio never recorded). Two more rows of that card go stale with
+  v2 and must move in the same edit: the synthesis table's `CFG alpha | 1.3` becomes
+  2.0, and the `cfg_alpha` column description ("1.3 for the original pass, 1.0 to 3.0
+  for a regenerated clip") becomes 2.0 for the pass and 1.5 to 2.5 for a regenerated
+  clip, matching driver.sh's ladder. Note the plan is to publish v2 under the v1 repo
+  id and rename later, so the card and the data stop agreeing the moment the upload
+  starts: update it with the upload, not after.
 
 ## Known duplication and gotchas
 
