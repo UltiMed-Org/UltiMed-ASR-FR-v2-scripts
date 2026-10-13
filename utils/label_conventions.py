@@ -568,7 +568,9 @@ _STAGING_WORD = r"\b(?:[Ss]tades?|[Gg]rades?|[Tt]ypes?|[Cc]lasses?|[Pp]aliers?|[
 # ("un type un peu particulier").
 _STAGE_NUM = (r"(?:[IVX]+[A-Da-d]?|(?:un(?!\s+peu\b)|deux|trois|quatre|cinq|six|sept|huit|neuf|dix)"
               r"|\d+[A-Da-d]?)")
-_STAGING_RE = re.compile(rf"({_STAGING_WORD}\s+)({_STAGE_NUM}(?:\s*(?:-|/|à|et|ou|,)\s*{_STAGE_NUM})*)\b")
+# Not before ``-word``: the TTS source respells ``de type IgM`` as ``de type I-gé-M``.
+_STAGING_RE = re.compile(
+    rf"({_STAGING_WORD}\s+)({_STAGE_NUM}(?:\s*(?:-|/|à|et|ou|,)\s*{_STAGE_NUM})*)\b(?![-'’]\w)")
 _STAGE_TOKEN_RE = re.compile(r"\b([IVX]+)([A-Da-d]?)\b|\b(un|deux|trois|quatre|cinq|six|sept|huit|neuf|dix)\b")
 
 
@@ -1197,7 +1199,7 @@ _TTS_RESPELLINGS = (
     (re.compile(r"([Ff])oet"), r"\1ét"),
     (re.compile(r"([Cc])oeli"), r"\1éli"),
     # not the o of a prefix: ``phytoestrogènes`` is phyto + estrogènes
-    (re.compile(r"(?<![Pp]hyt)(?<![Xx]én)(?<![Hh]yp)(?<![Mm]yc)oestr"), "éstr"),
+    (re.compile(r"(?<![Pp]hyt)(?<![Xx]én)(?<![Hh]yp)(?<![Mm]yc)(?<!o-)oestr"), "éstr"),
     (re.compile(r"\bOestr"), "Éstr"),
     (re.compile(r"(?<=[Ll]ymph)oed"), "éd"),
     (re.compile(r"\b([Mm]acro|[Ff]ibro)adénome"), r"\1-adénome"),

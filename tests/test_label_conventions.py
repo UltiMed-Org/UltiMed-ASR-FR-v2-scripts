@@ -229,6 +229,22 @@ def test_generic_labs() -> None:
     ])
 
 
+
+def test_tts_source_pipeline_idempotent() -> None:
+    """A respelled TTS source must survive a second full pass: 05 is re-run over sources it
+    already rewrote. ``de type I-gé-M`` became ``de type 1-gé-M`` (staging numeral) and
+    ``xéno-éstrogènes`` lost its hyphen (2026-10-13 SSD run)."""
+    tts = lambda t: apply_label_conventions(t, tts_source=True)
+    for text, want in [
+        ("Anticorps de type IgM, classe IgA, grade IgE.", "Anticorps de type I-gé-M, classe I-gé-A, grade I-gé-E."),
+        ("Phyto-oestrogènes et xéno-oestrogènes.", "Phyto-oestrogènes et xéno-oestrogènes."),
+        ("Stade I-II, type II.", "Stade 1-2, type 2."),
+    ]:
+        once = tts(text)
+        assert once == want, (text, once)
+        assert tts(once) == once, ("not idempotent", once, tts(once))
+    print("test_tts_source_pipeline_idempotent: OK")
+
 def test_thousands() -> None:
     check(normalize_thousands, [
         ("Plaquettes à 1 200 000 par millimètre cube, 1 sur 10 000.", "Plaquettes à 1200000 par millimètre cube, 1 sur 10000."),
@@ -254,6 +270,7 @@ def test_thousands() -> None:
         ("Eutrophique, lymphome, neurinomes, descemétite, Haemophilus influenzae, un E-C-B-C.", "Eutrofique, lymphôme, neurinômes, déscémétite, Haemophilus influenzae".replace("influenzae", "influenza-é") + ", un Eu-C-B-C."),
         ("Micafungine, muqueuse fundique, centre apneustique, maladie de Sever, microtie, HELLP syndrome.", "Micafongine, muqueuse fondique, centre apneu-stique, maladie de Séver, microssie, Help syndrome."),
         ("IgA, IgE, IgM, IgG, IgA1, IgG4.", "I-gé-A, I-gé-E, I-gé-M, IgG, IgA1, IgG4."),
+        ("Phyto-oestrogènes, xéno-oestrogènes.",) * 2,
         # ties go to the real spelling
         ("Syndrome, carcinome, hématome, glaucome, eutocique, aphteuse, fundus, sacrum, sever.",) * 2,
     ])
@@ -480,6 +497,7 @@ if __name__ == "__main__":
     test_quantities()
     test_compounds()
     test_sutures_and_decimals()
+    test_tts_source_pipeline_idempotent()
     test_thousands()
     test_spelling()
     test_staging()
