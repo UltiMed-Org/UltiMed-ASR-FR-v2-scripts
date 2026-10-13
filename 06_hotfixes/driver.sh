@@ -186,6 +186,10 @@ MIN_IMPROVEMENT="${MIN_IMPROVEMENT:-0.02}"
 MAX_AUDIO_SECONDS="${MAX_AUDIO_SECONDS:-327.68}"
 STT_PARALLEL="${STT_PARALLEL:-10}"
 TTS_PARALLEL="${TTS_PARALLEL:-2}"
+# FALLBACK voice only: a v2 manifest row carries its own `voice` (one of the ten),
+# and the clip is regenerated with that one, because the voice column is re-derived
+# from the group key and cannot follow a regeneration. This value is used for rows
+# without the field, i.e. v1 audio, which fr_female read entirely.
 TTS_VOICE="${TTS_VOICE:-fr_female}"
 # Classifier-free guidance per draw: draw N gets START + STEP * N (N from 0), so the
 # defaults walk 1, 1.5, 2, 2.5, 3 across the five draws of a redo. The point is spread:

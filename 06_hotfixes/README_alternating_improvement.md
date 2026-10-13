@@ -115,7 +115,10 @@ process. Alternatively, put those vars in `06_hotfixes/.env` (sourced by the dri
 just run `sudo ./driver.sh`. `.env` holds a token, so it must be gitignored.
 
 Override any default via env, e.g. `N_IMPROV=8 CER_THRESHOLD=0.25 sudo -E ./driver.sh`.
-The defaults mirror the manual runs (`--tts-voice fr_female`, `--stt-parallel 10`,
+The defaults mirror the manual runs (`--tts-voice fr_female`, now only a FALLBACK
+for clips with no `voice` field in their manifest row: a v2 clip is regenerated with
+the voice that read it originally, since the `voice` column is re-derived from the
+group key and so cannot follow a regeneration; `--stt-parallel 10`,
 `--tts-parallel 2`, `--shuffle`, output dir `improved/`, bad-clip threshold
 `CER_THRESHOLD=0.08`, tail threshold `TAIL_CER_THRESHOLD=0.12`, minimum gain to replace a
 clip `MIN_IMPROVEMENT=0.02`).

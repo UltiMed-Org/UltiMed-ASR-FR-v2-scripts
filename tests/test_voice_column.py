@@ -6,6 +6,8 @@
 #   "tqdm>=4.66",
 #   "loguru>=0.7",
 #   "click>=8.1",
+#   "requests>=2.31",
+#   "jiwer>=3.0",
 # ]
 # ///
 """End to end: the voice stage 05 SENT is the voice stage 99 WRITES.
@@ -37,10 +39,16 @@ clips it wrote, and compares the two. Four cases:
    no voice at all writes no `voice` field rather than guessing one, and stage 99's
    `--voice-fallback` is what labels that unrecorded audio when the operator knows
    the name (a v1 rebuild: `fr_female` throughout).
+5. **A stage-06 regeneration keeps the clip's own voice.** The column cannot follow a
+   regeneration (it is re-derived from the group key), so a replacement clip spoken by
+   a different voice is a clip whose label lies. `--tts-voice` is only the fallback for
+   rows without the field.
 
 No server and no GPU: `post_json` is replaced by one that returns a real one-second
-FLAC, which matters because stage 99 then probes real durations off real files. Run it
-under uv, like the other tests that import a stage module (soundfile at import time):
+FLAC, which matters because stage 99 then probes real durations off real files. The
+dependency list is the union of the three stage scripts' own, since importing stage 06
+pulls in its STT half (jiwer, requests). Run it under uv, like the other tests that
+import a stage module:
 
     uv run tests/test_voice_column.py
 
@@ -62,6 +70,7 @@ import soundfile as sf
 HERE = Path(__file__).resolve().parent
 TTS_PATH = HERE.parent / "05_generate_audio" / "01_generate_audio.py"
 MANIFEST_PATH = HERE.parent / "99_hf_release" / "01_build_nemo_manifest.py"
+IMPROVE_PATH = HERE.parent / "06_hotfixes" / "01_recursive_improvement.py"
 
 sys.path.insert(0, str(HERE.parent / "utils"))
 import voice_assignment as va  # noqa: E402
@@ -84,19 +93,23 @@ def load_module(path: Path, name: str):
     return mod
 
 
-def one_second_flac() -> bytes:
-    """A real 1 s 24 kHz mono FLAC, so both stages parse real headers.
+def flac_seconds(seconds: float) -> bytes:
+    """A real 24 kHz mono FLAC of that length, so both stages parse real headers.
 
     Stage 05 reads the duration out of the payload (truncation guard) and stage 99
     probes it off the written file, so a fake byte string would fail for the wrong
     reason.
     """
     buf = io.BytesIO()
-    sf.write(buf, [0.0] * 24000, 24000, format="FLAC")
+    sf.write(buf, [0.0] * int(24000 * seconds), 24000, format="FLAC")
     return buf.getvalue()
 
 
-FLAC = one_second_flac()
+FLAC = flac_seconds(1.0)
+# A second, different payload for stage 06's regeneration: a draw byte-identical to
+# the original clip raises SeedDeterminismError there (the seed had no effect), which
+# is a guard worth not tripping over in a test about voices.
+FLAC_REDO = flac_seconds(1.2)
 
 
 def tts_args(out_dir: Path, **over) -> SimpleNamespace:
@@ -306,6 +319,73 @@ with tempfile.TemporaryDirectory() as td:
                           voice_fallback="fr_female")
     check("--voice-fallback labels unrecorded audio",
           set(got.values()) == {"fr_female"}, str(set(got.values())))
+
+# ------------------------------------- 5. stage 06 regenerates with the clip's voice
+m06 = load_module(IMPROVE_PATH, "improve_under_test")
+m06.logger.remove()
+asked: list[str | None] = []
+
+
+def fake_tts_synthesize(url, text, **kw):
+    """Stand in for the retrying HTTP helper; record the voice it was asked for."""
+    asked.append(kw.get("voice"))
+    return FLAC_REDO
+
+
+m06.tts_synthesize = fake_tts_synthesize
+
+
+class _NullSem:
+    """The TTS concurrency semaphore, which _synthesize_draft enters."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def improve_cfg(**over) -> SimpleNamespace:
+    """A stage-06 cfg with the fields the TTS half reads."""
+    cfg = dict(
+        tts_url="http://unused", tts_format="flac", tts_voice="fr_female",
+        tts_model=None, tts_speed=None, tts_timeout=30.0, tts_max_retries=1,
+        tts_sem=_NullSem(), speed_jitter=0.0, start_seed=43, n_improv=1,
+        cfg_alpha_start=None, cfg_alpha_step=0.0, max_audio_seconds=327.68,
+        mode="tts", audio_key="audio_filepath", audio_root=None,
+        cer_threshold=0.08, tail_cer_threshold=0.12, min_improvement=0.02,
+    )
+    cfg.update(over)
+    return SimpleNamespace(**cfg)
+
+
+# The voice the row carries wins over --tts-voice ...
+asked.clear()
+m06._synthesize_draft(0, improve_cfg(), "clip", "texte", 1, "nothash", set(),
+                      voice="h_frf_itm")
+check("stage 06 regenerates with the row's voice", asked == ["h_frf_itm"], str(asked))
+
+# ... and --tts-voice is what a row without the field falls back to (v1 audio).
+asked.clear()
+m06._synthesize_draft(0, improve_cfg(), "clip", "texte", 1, "nothash", set())
+check("--tts-voice is the fallback, not the rule", asked == ["fr_female"], str(asked))
+
+# The whole path, from the manifest row to the request: combined_worker in tts mode
+# goes straight to generate_drafts, no STT server involved.
+with tempfile.TemporaryDirectory() as td:
+    td = Path(td)
+    clip = td / "000001_0000_terme.flac"
+    clip.write_bytes(FLAC)
+    rec = {
+        "audio_filepath": clip.name,
+        "asr_training_source": "Un texte a refaire.",
+        "voice": "h_frm_ptf",
+        "improvement": {"status": "pending_tts", "orig_cer": 0.4},
+    }
+    asked.clear()
+    out = m06.combined_worker(0, rec, improve_cfg(), "whisper", td / "manifest.jsonl")
+    check("the row's voice reaches the request through combined_worker",
+          asked == ["h_frm_ptf"], f"{asked} action={out.get('action')}")
 
 print(f"\n{len(failures)} failed" if failures else "\nall checks passed")
 sys.exit(1 if failures else 0)

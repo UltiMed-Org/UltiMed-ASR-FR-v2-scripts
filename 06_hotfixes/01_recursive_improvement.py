@@ -443,7 +443,7 @@ def tts_synthesize(
 
 def _synthesize_draft(
     attempt: int, cfg: SimpleNamespace, ident: str, text: str,
-    orig_len: int, orig_hash: str, seen_hashes: set[str],
+    orig_len: int, orig_hash: str, seen_hashes: set[str], voice: str | None = None,
 ) -> dict:
     """Synthesize ONE candidate for the given attempt index (the TTS-only half of a
     regeneration, shared by ``both`` mode's inline loop and ``tts`` mode's draft
@@ -451,6 +451,14 @@ def _synthesize_draft(
     "duplicate", "truncated"}``: ``duplicate`` is True when the draw byte-repeats an
     earlier one (seeds collided), ``truncated`` when it stopped on the backend's frame
     cap rather than at the end of the text; either way the caller skips the draw.
+
+    ``voice`` is the voice THIS clip was originally read by, from the manifest row's
+    ``voice`` field (v2 spreads the corpus over ten voices, one per term/document).
+    A regeneration has to use it, or the replacement clip would be spoken by someone
+    else while the manifest, the Parquet and any per-voice evaluation still say the
+    original name: the voice column is re-derived from the group key, so it cannot
+    follow a regeneration. None falls back to ``--tts-voice``, which is the v1 case
+    (one voice for the whole corpus, no per-row record).
 
     Only the network call is gated by ``tts_sem`` so a clip busy on STT never holds a
     TTS slot. ``tts_synthesize`` retries transient failures itself and raises
@@ -472,7 +480,7 @@ def _synthesize_draft(
     with cfg.tts_sem:
         payload = tts_synthesize(
             cfg.tts_url, text,
-            response_format=cfg.tts_format, seed=seed, voice=cfg.tts_voice,
+            response_format=cfg.tts_format, seed=seed, voice=voice or cfg.tts_voice,
             speed=speed, model=cfg.tts_model, timeout=cfg.tts_timeout,
             max_retries=cfg.tts_max_retries, cfg_alpha=cfg_alpha,
         )
@@ -539,7 +547,7 @@ def _score_audio_file(
 def run_regeneration(
     pos: int, ident: str, audio_path: Path, text: str,
     source: str | None, target: str | None, orig_cer: float, cfg: SimpleNamespace,
-    orig_tail: float | None = None,
+    orig_tail: float | None = None, voice: str | None = None,
 ) -> dict:
     """Regenerate one bad clip, trying up to --n-improv draws to clear BOTH gates (CER
     under --cer-threshold and tail CER under --tail-cer-threshold), stopping early the
@@ -570,7 +578,8 @@ def run_regeneration(
         # Synthesize one candidate (TTS only). Empty / duration-0 audio and a draw
         # byte-identical to the original abort the run (GenerationError /
         # SeedDeterminismError); a draw that merely repeats an earlier one is skipped.
-        draft = _synthesize_draft(attempt, cfg, ident, text, orig_len, orig_hash, seen_hashes)
+        draft = _synthesize_draft(attempt, cfg, ident, text, orig_len, orig_hash,
+                                  seen_hashes, voice=voice)
         seed, speed, cfg_alpha, dur = draft["seed"], draft["speed"], draft["cfg_alpha"], draft["dur"]
         alpha_s = f" alpha={cfg_alpha}" if cfg_alpha is not None else ""
         if draft["truncated"]:
@@ -682,6 +691,7 @@ def clear_drafts(audio_path: Path) -> None:
 
 def generate_drafts(
     pos: int, ident: str, audio_path: Path, text: str, orig_cer: float, cfg: SimpleNamespace,
+    voice: str | None = None,
 ) -> dict:
     """TTS-only half of a split regeneration (``--mode tts``): synthesize up to
     ``--n-improv`` candidates for one bad clip and persist each as a sidecar draft
@@ -713,7 +723,8 @@ def generate_drafts(
     )
     for attempt in range(cfg.n_improv):
         attempts = attempt + 1
-        draft = _synthesize_draft(attempt, cfg, ident, text, orig_len, orig_hash, seen_hashes)
+        draft = _synthesize_draft(attempt, cfg, ident, text, orig_len, orig_hash,
+                                  seen_hashes, voice=voice)
         seed, cfg_alpha = draft["seed"], draft["cfg_alpha"]
         alpha_s = f" alpha={cfg_alpha}" if cfg_alpha is not None else ""
         if draft["truncated"]:
@@ -748,7 +759,7 @@ def generate_drafts(
 def score_and_pick(
     pos: int, ident: str, drafts: list[dict],
     source: str | None, target: str | None, orig_cer: float, cfg: SimpleNamespace,
-    orig_tail: float | None = None,
+    orig_tail: float | None = None, voice: str | None = None,
 ) -> dict:
     """STT-only half of a split regeneration (``--mode stt``): transcribe every
     candidate a prior ``--mode tts`` pass persisted, score each, and pick the best.
@@ -873,7 +884,8 @@ def combined_worker(pos: int, rec: dict, cfg: SimpleNamespace, model_key: str, i
             out["orig_cer"] = imp_state.get("orig_cer")
             out["orig_tail"] = imp_state.get("orig_tail")
             out["improvement"] = generate_drafts(
-                pos, ident, audio_path, text, imp_state.get("orig_cer") or 0.0, cfg
+                pos, ident, audio_path, text, imp_state.get("orig_cer") or 0.0, cfg,
+                voice=rec.get("voice"),
             )
         return out
 
@@ -1041,7 +1053,8 @@ def combined_worker(pos: int, rec: dict, cfg: SimpleNamespace, model_key: str, i
     if (is_bad(orig_cer, orig_tail, cfg) and cfg.n_improv > 0 and text
             and cfg.mode == "both" and not cfg.rescore_only):
         out["improvement"] = run_regeneration(
-            pos, ident, audio_path, text, source, target, orig_cer, cfg, orig_tail=orig_tail)
+            pos, ident, audio_path, text, source, target, orig_cer, cfg,
+            orig_tail=orig_tail, voice=rec.get("voice"))
     return out
 
 
@@ -1620,7 +1633,7 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
 @click.option("--stt-max-retries", default=4, type=int, help="STT retries on transient errors.")
 # TTS (should match how the dataset audio was originally synthesized).
 @click.option("--tts-url", default="http://127.0.0.1:8003", help="Base URL of the TTS server.")
-@click.option("--tts-voice", default=None, help="TTS voice (match the original run for a consistent dataset). Unset keeps the server default.")
+@click.option("--tts-voice", default=None, help="Fallback TTS voice, used only for clips whose manifest row carries no `voice` field (v1 audio). A v2 row is regenerated with ITS OWN voice, since the voice column is re-derived from the group key and cannot follow a regeneration. Unset keeps the server default.")
 @click.option("--tts-speed", default=None, type=float, help="Base TTS speed (unset = server default).")
 @click.option("--tts-model", default=None, help="TTS `model` field (e.g. mistralai/Voxtral-4B-TTS-2603 if vLLM rejects a modelless request).")
 @click.option("--tts-format", default="flac", help="TTS response format / clip extension (should match the dataset, default flac).")
