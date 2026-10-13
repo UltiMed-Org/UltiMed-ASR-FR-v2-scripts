@@ -33,8 +33,10 @@ clips it wrote, and compares the two. Four cases:
 3. **`--group-by` at stage 99 does not move the voice.** Splitting choices are a
    release-time decision; who read the clip is a fact about the audio, recorded at
    synthesis.
-4. **The v1 shapes.** `--voice X` labels every row X (a one-name roster), and a run
-   with no voice at all writes no `voice` field rather than guessing one.
+4. **The v1 shapes.** `--voice X` labels every row X (a one-name roster), a run with
+   no voice at all writes no `voice` field rather than guessing one, and stage 99's
+   `--voice-fallback` is what labels that unrecorded audio when the operator knows
+   the name (a v1 rebuild: `fr_female` throughout).
 
 No server and no GPU: `post_json` is replaced by one that returns a real one-second
 FLAC, which matters because stage 99 then probes real durations off real files. Run it
@@ -192,11 +194,12 @@ def manifest_voices(m99, input_path: Path, audio_dir: Path, out_root: Path,
     Keyed by the TTS input text because that is the one field both sides carry: the
     manifest row has `asr_training_source`, the request body has it as `input`.
     """
-    opts = dict(group_by=None, group_mode=None)
+    opts = dict(group_by=None, group_mode=None, voice_fallback=None)
     opts.update(over)
     m99.build_dataset(
         name, input_path, audio_dir, out_root, m99.parse_split("80/10/10"),
         True, True, False, 2, False, opts["group_by"], opts["group_mode"], None,
+        opts["voice_fallback"],
     )
     full = out_root / name / "full.jsonl"
     rows = [json.loads(line) for line in full.read_text().splitlines() if line.strip()]
@@ -297,6 +300,12 @@ with tempfile.TemporaryDirectory() as td:
     got = manifest_voices(m99, inp, audio, td / "NeMO", "dictionary")
     check("stage 99 then writes no voice field rather than guessing",
           set(got.values()) == {None}, str(set(got.values())))
+    # ... unless the operator supplies the name the files do not carry, which is how a
+    # v1 rebuild gets a truthful column instead of an empty one.
+    got = manifest_voices(m99, inp, audio, td / "NeMO_fallback", "dictionary",
+                          voice_fallback="fr_female")
+    check("--voice-fallback labels unrecorded audio",
+          set(got.values()) == {"fr_female"}, str(set(got.values())))
 
 print(f"\n{len(failures)} failed" if failures else "\nall checks passed")
 sys.exit(1 if failures else 0)

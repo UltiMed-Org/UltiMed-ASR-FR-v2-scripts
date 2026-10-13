@@ -27,7 +27,8 @@ next to the audio. That file, not this repo's current ``VOICES_FR_V2``, is the
 authority: editing the roster in code must not relabel audio already on disk, and a
 drift between the two is logged. Audio with no such record (v1, single-voice, or a
 run that used the server's default voice) gets no ``voice`` field rather than a
-guessed one.
+guessed one, unless ``--voice-fallback NAME`` supplies the name the operator knows
+(``--voice-fallback fr_female`` for a v1 rebuild).
 
 Clips are matched to rows by the stage-05 filename prefix
 ``{term_index:06d}_{variant_index:04d}`` (reusing that naming, not re-deriving the
@@ -124,8 +125,9 @@ def detect_grouping(sample: dict, group_by: str | None, group_mode: str | None) 
     return field, mode
 
 
-def resolve_voices(audio_dir: Path, input_path: Path,
-                   name: str) -> tuple[tuple[str, ...] | None, str, str | None]:
+def resolve_voices(audio_dir: Path, input_path: Path, name: str,
+                   fallback: str | None = None,
+                   ) -> tuple[tuple[str, ...] | None, str, str | None]:
     """Return (roster, mode, group_field) to label this stage's clips with, or None.
 
     Parameters
@@ -136,6 +138,11 @@ def resolve_voices(audio_dir: Path, input_path: Path,
         That stage's `generated_dataset.jsonl`.
     name
         Stage name, for the log lines.
+    fallback
+        Voice to label clips that carry no record with (`--voice-fallback`). This is
+        for v1 audio, which has no `voice_assignment.json` but was read entirely by
+        `fr_female`: the name is known to the operator, just not to the files. Without
+        it such clips get no `voice` field.
 
     Returns
     -------
@@ -157,16 +164,20 @@ def resolve_voices(audio_dir: Path, input_path: Path,
     Either way guessing would put a wrong name on every row, so the field is omitted.
     """
     prov = read_provenance(audio_dir, input_path)
-    if prov is None:
-        logger.warning("[{}] no {} entry in {}: no 'voice' field written "
-                       "(v1 audio, or a run that used the server's default voice)",
-                       name, PROVENANCE_FILENAME, audio_dir)
+    if prov is None or not (prov.get("voices") or ()):
+        why = (f"no {PROVENANCE_FILENAME} entry in {audio_dir}" if prov is None
+               else f"{PROVENANCE_FILENAME} records no roster")
+        if fallback:
+            # A one-name roster reproduces a constant: every key hashes to the only
+            # name there is. So the fallback needs no special case downstream.
+            logger.warning("[{}] {}: labelling every clip {!r} (--voice-fallback)",
+                           name, why, fallback)
+            return (fallback,), "single", None
+        logger.warning("[{}] {}: no 'voice' field written (v1 audio, or a run that "
+                       "used the server's default voice; --voice-fallback NAME labels "
+                       "it anyway)", name, why)
         return None, "single", None
-    voices = tuple(prov.get("voices") or ())
-    if not voices:
-        logger.warning("[{}] {} records no roster: no 'voice' field written",
-                       name, PROVENANCE_FILENAME)
-        return None, "single", None
+    voices = tuple(prov["voices"])
     mode = prov.get("mode") or "group"
     if mode not in (*MODES, "single"):
         logger.error("[{}] {} records mode {!r}, which this version cannot reproduce: "
@@ -196,6 +207,7 @@ def build_dataset(
     group_by: str | None,
     group_mode: str | None,
     limit: int | None,
+    voice_fallback: str | None = None,
 ) -> None:
     if not input_path.is_file():
         logger.error("{}: input not found: {}", name, input_path)
@@ -208,7 +220,8 @@ def build_dataset(
     logger.info("[{}] indexing audio in {}", name, audio_dir)
     index = audio_index(audio_dir)
     logger.info("[{}] {} audio clips found", name, len(index))
-    voices, voice_mode, voice_field = resolve_voices(audio_dir, input_path, name)
+    voices, voice_mode, voice_field = resolve_voices(audio_dir, input_path, name,
+                                                     voice_fallback)
 
     rows: list[dict] = []
     missing_audio = bad_rows = 0
@@ -336,9 +349,15 @@ def build_dataset(
               help="Threads used to probe FLAC durations.")
 @click.option("--absolute", is_flag=True,
               help="Write absolute audio_filepath (embeds the machine path; off by default).")
+@click.option("--voice-fallback", default=None, metavar="NAME",
+              help="Label clips that carry no voice record with NAME. v1 audio predates "
+                   "the record but was read entirely by fr_female, so a v1 rebuild "
+                   "wants --voice-fallback fr_female; without it those rows get no "
+                   "voice field. Ignored where a record exists.")
 @click.option("--limit", type=int, default=None, help="Debug: cap rows per dataset.")
 def main(input_path, audio_dir, name, do_all, outdir, split_spec, stratify,
-         stratify_duration, strict_coverage, group_by, group_mode, jobs, absolute, limit):
+         stratify_duration, strict_coverage, group_by, group_mode, jobs, absolute,
+         voice_fallback, limit):
     logger.remove()
     logger.add(sys.stderr, level="INFO",
                format="<green>{time:HH:mm:ss}</green> <level>{message}</level>")
@@ -358,14 +377,15 @@ def main(input_path, audio_dir, name, do_all, outdir, split_spec, stratify,
                 REPO_ROOT / stage["input"],
                 SCRIPT_DIR / "data" / stage["audio"],
                 outdir, stage_ratios, stratify, stratify_duration, strict_coverage, jobs,
-                absolute, group_by, group_mode, limit,
+                absolute, group_by, group_mode, limit, voice_fallback,
             )
         return
 
     if not (input_path and audio_dir and name):
         raise click.UsageError("give --all, or all of --input / --audio-dir / --name")
     build_dataset(name, input_path, audio_dir, outdir, ratios, stratify,
-                  stratify_duration, strict_coverage, jobs, absolute, group_by, group_mode, limit)
+                  stratify_duration, strict_coverage, jobs, absolute, group_by,
+                  group_mode, limit, voice_fallback)
 
 
 if __name__ == "__main__":
