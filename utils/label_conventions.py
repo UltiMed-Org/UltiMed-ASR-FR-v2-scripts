@@ -1183,8 +1183,8 @@ def restore_tts_accents(text: str, table: dict[str, str] | None = None) -> str:
 # ear (2026-10-09): ``naevus`` was read "naévouze", ``praevia`` "praévia", ``99m`` "99
 # mètres", ``foetus`` "feutusse", ``caecum`` "ka-é-cum", ``macroadénome`` "macrodénome",
 # ``chordome`` "corps-d'homme", ``foramens`` "fora-ment", ``eutrophe`` "utrophe",
-# ``aphtes`` "aptes", ``canthus`` "kintus", ``bullage`` "boulage", ``HELLP`` spelled. Latin
-# ``oe`` / ``ae`` read ``é`` (``œ`` did not help), ``-ome`` gets the closed ``ô`` where it
+# ``aphtes`` "aptes", ``canthus`` "kintus", ``bullage`` "boulage", ``HELLP`` spelled,
+# ``IgA`` / ``IgE`` in English. Latin ``oe`` / ``ae`` read ``é`` (``œ`` did not help), ``-ome`` gets the closed ``ô`` where it
 # was misread (not ``syndrome``, ``carcinome``: those were fine). A respelling is kept only
 # when it sounds strictly better: on a tie the real spelling wins, as the TTS was trained on
 # it (user rule 2026-10-13). The label keeps the written form.
@@ -1218,6 +1218,8 @@ _TTS_RESPELLINGS = (
     (re.compile(r"\bSever\b"), "Séver"),
     (re.compile(r"\b([Mm])icrotie"), r"\1icrossie"),
     (re.compile(r"\bHELLP\b"), "Help"),
+    # read as English letters; ``IgG`` was fine
+    (re.compile(r"\bIg([AE])\b"), r"I-gé-\1"),
     (re.compile(r"\b99m\b"), "99-M"),
 )
 

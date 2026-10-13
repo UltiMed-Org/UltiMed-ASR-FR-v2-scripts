@@ -253,6 +253,7 @@ def test_thousands() -> None:
         ("Aphtose, épicanthus, Naegeli, membrane de Descemet, Henle, Dix-Hallpike.",) * 2,
         ("Eutrophique, lymphome, neurinomes, descemétite, Haemophilus influenzae, un E-C-B-C.", "Eutrofique, lymphôme, neurinômes, déscémétite, Haemophilus influenzae".replace("influenzae", "influenza-é") + ", un Eu-C-B-C."),
         ("Micafungine, muqueuse fundique, centre apneustique, maladie de Sever, microtie, HELLP syndrome.", "Micafongine, muqueuse fondique, centre apneu-stique, maladie de Séver, microssie, Help syndrome."),
+        ("IgA, IgE, IgG, IgA1, IgG4.", "I-gé-A, I-gé-E, IgG, IgA1, IgG4."),
         # ties go to the real spelling
         ("Syndrome, carcinome, hématome, glaucome, eutocique, aphteuse, fundus, sacrum, IgM, sever.",) * 2,
     ])
