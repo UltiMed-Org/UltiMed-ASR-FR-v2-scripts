@@ -14,9 +14,10 @@ Stage 06 regenerates bad clips by OVERWRITING the audio in place, so the clips o
 SSD are already the good ones, but the manifests built before that run still describe the
 old audio: a regenerated draw is a different length (deltas up to ~115 s observed, and a
 handful of clips cross the trainer's 45 s ``max_duration`` in one direction or the other).
-Rebuilding the manifests instead of patching them would not fix that by itself either,
-because ``probe_durations`` caches by FILE NAME with no mtime or size, so a rebuild
-happily reuses every stale value.
+Rebuilding the manifests instead of patching them is a second, slower route to the
+same durations (``probe_durations`` validates its per-name cache against each clip's
+size and mtime, so an overwritten clip is re-probed rather than served stale), but it
+would not carry over the CER, the transcript or the ``qc_status`` below.
 
 So this reads stage 06's scored output (which already carries the re-probed duration and
 the transcript of the audio that actually shipped) and, joining on the resolved absolute

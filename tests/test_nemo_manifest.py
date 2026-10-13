@@ -1,9 +1,11 @@
-"""Stdlib tests for utils/nemo_manifest: split-spec parsing and the grouped,
+"""Stdlib tests for utils/nemo_manifest: split-spec parsing, the grouped,
 duration-aware train/val/test splitter (atomic + distribute guarantees,
-singletons by ratio, duration balance, determinism).
+singletons by ratio, duration balance, determinism), and the duration cache's
+size/mtime validation (a clip whose bytes changed must be re-probed).
 
 Run: python tests/test_nemo_manifest.py
 """
+import json
 import os
 import sys
 import tempfile
@@ -15,6 +17,7 @@ from nemo_manifest import (  # noqa: E402
     assign_splits,
     audio_index,
     parse_split,
+    probe_durations,
     relativize,
     summarize,
 )
@@ -210,6 +213,91 @@ def test_audio_index_skips_non_flac_and_loops():
         idx = audio_index(d)
     assert set(idx) == {"000014_0000", "000015_0001"}
     assert idx["000014_0000"].name == "000014_0000_abaissement.flac"
+
+
+# --------------------------------------------------------------------------- #
+# probe_durations: the cache must never answer for bytes it did not probe
+# --------------------------------------------------------------------------- #
+class _FakeInfo:
+    """What ``soundfile.info`` gives ``probe_durations``: frames + samplerate."""
+
+    def __init__(self, frames: int, samplerate: int) -> None:
+        self.frames = frames
+        self.samplerate = samplerate
+
+
+class _FakeSF:
+    """Stands in for the ``soundfile`` wheel so this stays a stdlib test.
+
+    The reported duration is the clip file's own byte length (one second per
+    byte), which is what lets a test rewrite a clip and check that the new
+    "audio" is actually re-read. ``calls`` counts probes, so a cache HIT is
+    observable rather than merely plausible.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def info(self, path: str) -> _FakeInfo:
+        self.calls.append(Path(path).name)
+        return _FakeInfo(frames=len(Path(path).read_bytes()), samplerate=1)
+
+
+def _with_fake_sf():
+    """Install the fake wheel and return it (``probe_durations`` imports lazily)."""
+    fake = _FakeSF()
+    sys.modules["soundfile"] = fake
+    return fake
+
+
+def test_probe_durations_cache_hit_and_invalidation():
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        clip = d / "000014_0000_abaissement.flac"
+        clip.write_bytes(b"xx")                     # 2 bytes -> 2.0 s
+        cache = d / ".duration_cache.json"
+
+        fake = _with_fake_sf()
+        assert probe_durations([clip], cache_path=cache, progress=False) == {clip.name: 2.0}
+        assert fake.calls == [clip.name]
+
+        # Untouched clip: served from cache, never probed again.
+        fake = _with_fake_sf()
+        assert probe_durations([clip], cache_path=cache, progress=False) == {clip.name: 2.0}
+        assert fake.calls == []
+
+        # Same name, different audio (stage 06 overwrites in place, and a new
+        # generation of the dataset reuses every file name): must be re-probed,
+        # which is exactly what a name-only cache got wrong.
+        clip.write_bytes(b"xxxxx")                  # 5 bytes -> 5.0 s
+        fake = _with_fake_sf()
+        assert probe_durations([clip], cache_path=cache, progress=False) == {clip.name: 5.0}
+        assert fake.calls == [clip.name]
+
+        # Byte-identical size but rewritten (mtime moved): still re-probed,
+        # because size alone cannot tell two takes of equal length apart.
+        st = clip.stat()
+        clip.write_bytes(b"yyyyy")
+        os.utime(clip, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+        fake = _with_fake_sf()
+        assert probe_durations([clip], cache_path=cache, progress=False) == {clip.name: 5.0}
+        assert fake.calls == [clip.name]
+
+
+def test_probe_durations_drops_legacy_unstamped_entries():
+    """A cache written before the stamp existed (bare floats) carries v1
+    durations under v2's file names, so it must be reprobed, not trusted."""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        clip = d / "000014_0000_abaissement.flac"
+        clip.write_bytes(b"xxx")                    # 3 bytes -> 3.0 s
+        cache = d / ".duration_cache.json"
+        cache.write_text(json.dumps({clip.name: 99.0}))
+
+        fake = _with_fake_sf()
+        assert probe_durations([clip], cache_path=cache, progress=False) == {clip.name: 3.0}
+        assert fake.calls == [clip.name]
+        assert json.loads(cache.read_text())[clip.name][0] == 3.0
 
 
 def _run():

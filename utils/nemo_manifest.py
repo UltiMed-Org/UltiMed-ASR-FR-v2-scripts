@@ -323,21 +323,66 @@ def probe_durations(
     """Return ``{filename: duration_seconds}`` for ``paths``.
 
     Durations are read from the FLAC header only (``soundfile.info``), never a
-    full decode. Results are cached by *file name* (location-independent, so the
-    cache survives the audio folder being moved or re-symlinked) in
-    ``cache_path`` as JSON; a re-run probes only the clips missing from it.
-    Corrupt/unreadable clips are logged and omitted from the result.
+    full decode. Results are cached in ``cache_path`` as JSON, one
+    ``name: [duration_seconds, size_bytes, mtime_ns]`` entry per clip: still
+    keyed by *file name* (location-independent, so the cache survives the audio
+    folder being moved or re-symlinked) but each hit is **validated against the
+    file's current size and mtime**, and only reused for bytes that still look
+    like the ones that were probed.
+
+    That validation is the point. The same file name carries different audio in
+    two routine situations: stage 06 regenerates a bad clip by overwriting it in
+    place (duration deltas up to ~115 s observed, enough to cross the trainer's
+    ``max_duration``), and a new generation of the dataset re-synthesizes the
+    whole corpus under the very same names. A name-only cache answered both with
+    a silently wrong duration. A stale entry, or a legacy duration-only one
+    written before the stamp existed, is simply re-probed and counted in a
+    warning. Corrupt/unreadable clips are logged and omitted from the result.
     """
     import soundfile as sf  # lazy: keeps the module importable without the wheel
 
-    cache: dict[str, float] = {}
+    cache: dict[str, list] = {}
     if cache_path and cache_path.exists():
         try:
-            cache = json.loads(cache_path.read_text())
+            raw = json.loads(cache_path.read_text())
         except (json.JSONDecodeError, OSError):
             log.warning("could not read duration cache %s, reprobing", cache_path)
+            raw = {}
+        # A bare float is a pre-stamp entry: unverifiable, so it is dropped
+        # rather than trusted (it may well describe an older generation's audio).
+        cache = {k: v for k, v in raw.items() if isinstance(v, list) and len(v) == 3}
+        legacy = len(raw) - len(cache)
+        if legacy:
+            log.warning("duration cache %s: %d entries carry no size/mtime stamp, reprobing them",
+                        cache_path, legacy)
 
-    todo = [p for p in paths if p.name not in cache]
+    # One stat per clip (no decode, microseconds each) is what lets a hit be
+    # verified; it is the whole cost of the safety above.
+    stamps: dict[Path, tuple[int, int] | None] = {}
+    for p in paths:
+        try:
+            st = p.stat()
+            stamps[p] = (st.st_size, st.st_mtime_ns)
+        except OSError:
+            stamps[p] = None  # missing/broken clip: let the probe report it
+
+    out: dict[str, float] = {}
+    todo: list[Path] = []
+    stale = 0
+    for p in paths:
+        hit = cache.get(p.name)
+        stamp = stamps[p]
+        if hit is not None and stamp is not None and (int(hit[1]), int(hit[2])) == stamp:
+            out[p.name] = float(hit[0])
+            continue
+        if hit is not None:
+            stale += 1
+            cache.pop(p.name, None)
+        todo.append(p)
+    if stale:
+        log.warning("duration cache %s: %d of %d clips changed on disk since they were "
+                    "probed, reprobing them", cache_path, stale, len(paths))
+
     if todo:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -356,11 +401,17 @@ def probe_durations(
                 bar = tqdm(total=len(todo), unit="clip", desc="probing durations")
             except ImportError:
                 bar = None
+        by_name = {p.name: p for p in todo}
         with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
             for fut in as_completed(pool.submit(one, p) for p in todo):
                 name, dur = fut.result()
+                stamp = stamps[by_name[name]]
                 if dur is not None:
-                    cache[name] = dur
+                    out[name] = dur
+                    # No stamp means the clip could not be stat-ed, so there is
+                    # nothing to validate a future hit against: do not cache it.
+                    if stamp is not None:
+                        cache[name] = [dur, stamp[0], stamp[1]]
                 if bar is not None:
                     bar.update(1)
         if bar is not None:
@@ -371,7 +422,7 @@ def probe_durations(
             tmp.write_text(json.dumps(cache))
             tmp.replace(cache_path)
 
-    return {p.name: cache[p.name] for p in paths if p.name in cache}
+    return out
 
 
 # --------------------------------------------------------------------------- #

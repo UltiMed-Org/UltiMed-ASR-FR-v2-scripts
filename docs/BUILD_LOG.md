@@ -172,7 +172,11 @@ uv run 01_build_nemo_manifest.py \
   `{term_index:06d}_{variant_index:04d}` filename prefix (reusing that naming, not
   re-deriving the slug); rows whose audio is missing are dropped.
 - `duration` is read from the FLAC header (`soundfile`) and cached per dataset in
-  `.duration_cache.json`, so re-runs are cheap.
+  `.duration_cache.json`, so re-runs are cheap. Each entry stores the clip's size and
+  mtime next to the duration and is only reused while both still match, because the
+  same file name carries different audio twice over: stage 06 overwrites a bad clip in
+  place, and a new generation of the dataset (v2) re-synthesizes every name. Entries
+  that fail that check, and legacy duration-only ones, are re-probed with a warning.
 - `audio_filepath` is stored **relative** to the manifest, never absolute: an
   absolute path under the audio SSD would bake in the home/username.
 - `--split` (default `80/10/10`) sets the ratio; a `0` disables that split.
