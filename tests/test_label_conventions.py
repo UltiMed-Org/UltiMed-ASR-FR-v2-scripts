@@ -299,6 +299,8 @@ def test_spelling() -> None:
         ("Scannographique, shampoing, 30 paquets années, 1 paquet-années.", "Scanographique, shampooing, 30 paquets-année, 1 paquet-année."),
         ("50 gray, 2,5 gray, 1,8 gray, 1 gray.", "50 grays, 2,5 grays, 1,8 gray, 1 gray."),
         ("Elodie, Élodie et Mélodie.", "Hélodie, Élodie et Mélodie."),
+        ("Du Ketoprofen, sous cisplatin, par Céfépim, le CEFEPIM, aspirin, ASPIRIN Protect, la Fucidin, BisoC, myopathie statin-induite, une penicillin binding protein.",
+         "Du Kétoprofène, sous cisplatine, par Céfépime, le céfépime, aspirine, Aspirine Protect, la Fucidine, Bisoce, myopathie statino-induite, une penicillin binding protein."),
         ("Nævus du cæcum, placenta prævia, Æ.", "Naevus du caecum, placenta praevia, Ae."),
     ])
     print("test_spelling: OK")

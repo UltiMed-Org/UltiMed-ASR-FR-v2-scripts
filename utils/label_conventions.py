@@ -821,6 +821,18 @@ _SPELLING_RULES = (
     # 2026-10-13, author's choice: the unaccented ``Elodie`` drawn from the INSEE first-name
     # pool becomes ``Hélodie`` (``Élodie`` stays).
     (re.compile(r"\bElodie\b"), "Hélodie"),
+    # 2026-10-13, English drug spellings missing the French final e (found by matching every
+    # label word plus ``e`` against utils/drug_casing.json). ``penicillin binding protein``
+    # is an English term and stays.
+    (re.compile(r"\b([Kk])[eé]toprofen\b"), r"\1étoprofène"),
+    (re.compile(r"\b([Cc])isplatin\b"), r"\1isplatine"),
+    (re.compile(r"\b([Cc])[eé]f[eé]pim\b"), r"\1éfépime"),
+    (re.compile(r"\bCEFEPIM\b"), "céfépime"),
+    (re.compile(r"\b([Aa])spirin\b"), r"\1spirine"),
+    (re.compile(r"\bASPIRIN\b"), "Aspirine"),
+    (re.compile(r"\b([Ff])ucidin\b"), r"\1ucidine"),
+    (re.compile(r"\bBisoC\b"), "Bisoce"),
+    (re.compile(r"\b([Ss])tatin-induit"), r"\1tatino-induit"),
 )
 
 
