@@ -412,6 +412,14 @@ def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
                          field=field, counts=per_voice)
     else:
         logger.info("voices: single ({})", args.voice or "server default")
+        # Single-voice runs are recorded too, with a one-name roster, so stage 99 can
+        # still label the clips (hashing a one-name roster always returns that name).
+        # Only when --voice was given, though: without it the voice is whatever the
+        # server booted with and this process never learns its name, so there is
+        # nothing truthful to write and stage 99 falls back to no voice column.
+        if args.voice:
+            write_provenance(out_dir, jsonl_path, voices=(args.voice,), mode="single",
+                             field=None, counts=Counter({args.voice: len(planned)}))
 
     failed = generated = 0
     total_audio = 0.0
