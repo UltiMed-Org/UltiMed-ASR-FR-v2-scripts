@@ -121,7 +121,7 @@ Per clip (in the pool):
    recheck rescued drops the marker and is treated as a normal good clip (no regeneration).
 2. If that best CER is >= ``--cer-threshold``, improve it: up to ``--n-improv``
    attempts, re-synthesize via the TTS server (seed incremented each attempt,
-   TTS ``cfg_alpha`` ramped from ``--cfg-alpha-start`` by ``--cfg-alpha-step`` each
+   TTS ``cfg_alpha`` walked from ``--cfg-alpha-start`` by ``--cfg-alpha-step`` each
    attempt, optional ``--speed-jitter``), re-transcribe, re-score. The goal is a draw with
    CER BELOW ``--cer-threshold``: stop early the moment one is reached. If no draw
    gets under the threshold, keep the lowest-CER draw as long as it still beats the
@@ -469,14 +469,25 @@ def _synthesize_draft(
     wasting the whole run producing no change."""
     seed = cfg.start_seed + attempt
     speed = attempt_speed(cfg.tts_speed, cfg.speed_jitter, attempt)
-    # Nudge the TTS guidance up on each re-attempt: cfg_alpha starts at
-    # --cfg-alpha-start on the first re-attempt and grows by --cfg-alpha-step each
-    # attempt, pushing the model harder to follow the text when the first draws stay
-    # bad. None -> knob omitted (server keeps its default).
+    # Walk the TTS guidance DOWN on each re-attempt: cfg_alpha starts at
+    # --cfg-alpha-start (the value the dataset was generated at, the top of the usable
+    # band) and moves by --cfg-alpha-step each attempt, which is negative, so the draws
+    # descend toward --cfg-alpha-floor. Descending rather than ascending because the
+    # measured band is 1.2-2.0 and 2.0 is its TOP: there is room below the generation
+    # value and almost none above it, and a clip that derailed at 2.0 is usually
+    # over-guided (clipped, rushed, distorted) rather than under-guided.
+    #
+    # The floor is a hard clamp, not a hint, because --n-improv is user-settable: five
+    # draws from 2.0 at -0.2 land exactly on 1.2, but ten draws would walk into 0.2,
+    # i.e. CFG off, where the flow-matching decoder stops following the text and
+    # invents phonetically plausible words. That is the defect this stage repairs, so
+    # it must never be a draw. None start -> knob omitted (server keeps its default).
     cfg_alpha = (
         None if cfg.cfg_alpha_start is None
         else round(cfg.cfg_alpha_start + cfg.cfg_alpha_step * attempt, 4)
     )
+    if cfg_alpha is not None and cfg.cfg_alpha_floor is not None:
+        cfg_alpha = max(cfg_alpha, cfg.cfg_alpha_floor)
     with cfg.tts_sem:
         payload = tts_synthesize(
             cfg.tts_url, text,
@@ -1650,8 +1661,9 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
 @click.option("--min-improvement", default=0.02, type=float, help="When no draw reaches --cer-threshold, keep the lowest-CER draw only if it beats the original CER by at least this. A draw below the threshold is always kept. Non-zero matters once the gate is low: a clip flagged at 0.09 whose best draw lands at 0.088 was not repaired, it was fitted to the judge, and a clean clip's CER moves that much on Whisper's own spelling choices. Pass 0 to accept any gain.")
 @click.option("--start-seed", default=43, type=int, help="First seed; each attempt uses start-seed + attempt. Always sent (Voxtral respects the request seed).")
 @click.option("--speed-jitter", default=0.0, type=float, help="Optional: also vary speed by +/- this each attempt (e.g. 0.03). Not needed when the seed works.")
-@click.option("--cfg-alpha-start", default=1.5, type=float, help="TTS cfg_alpha sent on the first re-attempt (raised by --cfg-alpha-step each attempt to push the model harder). Default 1.5, the floor of the measured usable band (1.2-2.0 for the shipped voices, 1.5-2.0 for the hybrids the v2 roster leans on); 1.0 is CFG off, which makes the decoder stop following the text, so do not ladder through it. Pass a negative value to omit cfg_alpha entirely.")
-@click.option("--cfg-alpha-step", default=0.25, type=float, help="Amount added to cfg_alpha on each successive re-attempt. With the default start, five draws walk 1.5 to 2.5: the band, plus a little headroom above it.")
+@click.option("--cfg-alpha-start", default=2.0, type=float, help="TTS cfg_alpha sent on the first re-attempt. Default 2.0, the value the dataset itself is generated at and the TOP of the measured usable band (1.2-2.0); --cfg-alpha-step then walks the later draws DOWN from it. Pass a negative value to omit cfg_alpha entirely.")
+@click.option("--cfg-alpha-step", default=-0.2, type=float, help="Added to cfg_alpha on each successive re-attempt, normally NEGATIVE so the ladder descends. With the defaults, five draws walk 2.0, 1.8, 1.6, 1.4, 1.2. Prefer the equals form for a negative value (--cfg-alpha-step=-0.2): this click version accepts the bare form too, but the equals form cannot be read as another option whatever the version.")
+@click.option("--cfg-alpha-floor", default=1.2, type=float, help="Hard lower clamp on the ladder (default 1.2, the measured floor of the usable band). It matters because --n-improv is free: without it, ten draws at the default step would reach 0.2, i.e. CFG off, where the decoder stops following the text. Pass a negative value to remove the clamp.")
 @click.option("--original-cfg-alpha", default=2.0, type=float, help="cfg_alpha the ORIGINAL dataset audio was synthesized with. Default 2.0, the value v2 is generated at (VOXTRAL_CFG_ALPHA in the CrispASR compose since the 2026-10-13 sweep); pass 1.3 when running over v1 audio, which was drawn at that. Written as each clip's `cfg_alpha` when it keeps its original audio (passed / exhausted); a regenerated clip records its winning draw's cfg_alpha instead.")
 @click.option("--refresh-duration/--no-refresh-duration", default=True, help="Re-probe and update each row's `duration` when its audio is replaced (keeps stage-99 splits correct).")
 @click.option("--force", is_flag=True, help="Re-process clips already marked improved/exhausted in a previous run.")
@@ -1673,7 +1685,8 @@ def main(
     stt_timeout, stt_max_retries, tts_url, tts_voice, tts_speed, tts_model, tts_format, tts_timeout,
     tts_max_retries, max_audio_seconds, mode, n_improv, cer_threshold, tail_cer_threshold, min_improvement,
     start_seed, speed_jitter,
-    cfg_alpha_start, cfg_alpha_step, original_cfg_alpha, refresh_duration, force, retry_exhausted,
+    cfg_alpha_start, cfg_alpha_step, cfg_alpha_floor, original_cfg_alpha, refresh_duration,
+    force, retry_exhausted,
     rescore, rescore_only,
     stt_parallel, tts_parallel, shuffle, flush_every, flush_interval, limit,
 ):
@@ -1703,9 +1716,12 @@ def main(
         tail_cer_threshold=(float("inf") if tail_cer_threshold < 0 else tail_cer_threshold),
         min_improvement=min_improvement,
         start_seed=start_seed, speed_jitter=speed_jitter,
-        # cfg_alpha ramps up on each re-attempt; a negative start disables the knob.
+        # cfg_alpha walks down on each re-attempt; a negative start disables the knob
+        # and a negative floor removes the clamp (both are "no value" sentinels, since
+        # cfg_alpha itself is only meaningful above 0).
         cfg_alpha_start=(None if cfg_alpha_start < 0 else cfg_alpha_start),
         cfg_alpha_step=cfg_alpha_step,
+        cfg_alpha_floor=(None if cfg_alpha_floor < 0 else cfg_alpha_floor),
         # cfg_alpha the original dataset audio was made with, written on every clip that
         # keeps its original audio (99_hf_release/README.md documents it as 1.3).
         original_cfg_alpha=original_cfg_alpha,

@@ -33,11 +33,12 @@
 # Optional overrides (defaults match the manual runs):
 #   TARGET_USER (defaults to whoever ran sudo) OUTPUT AUDIO_ROOT N_IMPROV
 #   CER_THRESHOLD STT_PARALLEL TTS_PARALLEL TTS_VOICE GPU_POWER_LIMIT
-#   CFG_ALPHA_START / CFG_ALPHA_STEP  TTS guidance ladder across the draws of one redo:
-#                       draw N uses START + STEP * N, so the defaults (1.5 / 0.25) walk
-#                       1.5, 1.75, 2, 2.25, 2.5 over five draws, inside the measured
-#                       usable band (see the note at the assignment). A negative START
-#                       omits the knob, leaving the server's startup value every draw.
+#   CFG_ALPHA_START / CFG_ALPHA_STEP / CFG_ALPHA_FLOOR  TTS guidance ladder across
+#                       the draws of one redo: draw N uses START + STEP * N clamped at
+#                       FLOOR, so the defaults (2.0 / -0.2 / 1.2) walk DOWN 2, 1.8, 1.6,
+#                       1.4, 1.2 over five draws, which is the measured usable band (see
+#                       the note at the assignment). A negative START omits the knob,
+#                       leaving the server's startup value every draw.
 #   TAIL_CER_THRESHOLD  CER gate on the last ~30s of clips longer than 30s (default 0.12,
 #                       looser than CER_THRESHOLD because the tail is a short window;
 #                       negative disables the tail gate)
@@ -192,27 +193,31 @@ TTS_PARALLEL="${TTS_PARALLEL:-2}"
 # from the group key and cannot follow a regeneration. This value is used for rows
 # without the field, i.e. v1 audio, which fr_female read entirely.
 TTS_VOICE="${TTS_VOICE:-fr_female}"
-# Classifier-free guidance per draw: draw N gets START + STEP * N (N from 0), so the
-# defaults walk 1.5, 1.75, 2, 2.25, 2.5 across the five draws of a redo. The point is
-# spread: a clip the TTS derailed on at its tuned setting is unlikely to be rescued by
-# another draw at the same setting, and the winner is picked on CER anyway, so a draw
-# that guidance pushed too hard simply loses.
+# Classifier-free guidance per draw: draw N gets START + STEP * N (N from 0), clamped
+# at FLOOR, so the defaults walk 2.0, 1.8, 1.6, 1.4, 1.2 across the five draws of a
+# redo. The point is spread: a clip the TTS derailed on at its tuned setting is unlikely
+# to be rescued by another draw at the same setting, and the winner is picked on CER
+# anyway, so a draw at the wrong guidance simply loses.
 #
-# The window is measured, not guessed, and that is why it is this narrow: 16 French
+# The ladder DESCENDS because the window is measured and 2.0 sits at its top: 16 French
 # voices x 10 values from 0.1 to 5.0 on one dense medical sentence, listened to on
 # 2026-10-13 (CrispASR voxtral/cloning/cfg_sweep.sh). Usable band 1.2-2.0 for the
-# shipped voices and 1.5-2.0 for the hybrids, which the v2 roster is mostly made of, so
-# 1.5 is the floor worth retrying at. The generation pass itself runs at 2.0, the top of
-# the band, which leaves the ladder room to go down as well as up. Below 1.2 quality
-# falls off much faster than the same distance above 2.0 (at 0.5 and under, every voice
-# rambled to ~2.7x the sentence's natural length instead of stopping), and the earlier
-# 1.0 start was worse than a wasted draw: 1.0 is CFG off, which makes the flow-matching
-# decoder stop following the text and invent phonetically plausible words, exactly the
-# failure this stage is trying to repair. The server's entrypoint refuses 1.0 at startup
-# for that reason. Needs the forked vllm-omni to be useful (upstream drops a flat
+# shipped voices, 1.5-2.0 for the hybrids. The generation pass runs at 2.0, so every
+# retry worth making is below it: from 3.0 up, distortion grows with the value and
+# takes increasingly fail to terminate at all, while 1.2-2.0 is all usable. A clip that
+# derailed at 2.0 is over-guided, not under-guided.
+#
+# FLOOR is a hard clamp and not decoration: N_IMPROV is settable, and ten draws at
+# -0.2 would reach 0.2. Below ~1.2 quality falls off far faster than the same distance
+# above 2.0 (at 0.5 and under, every voice rambled to ~2.7x the sentence's natural
+# length instead of stopping), and 1.0 is CFG off, which makes the flow-matching
+# decoder stop following the text and invent phonetically plausible words: exactly the
+# failure this stage exists to repair. The server's entrypoint refuses 1.0 at startup
+# for the same reason. Needs the forked vllm-omni to be useful (upstream drops a flat
 # cfg_alpha silently); the pass sends it nested in extra_params, see tts_synthesize.
-CFG_ALPHA_START="${CFG_ALPHA_START:-1.5}"
-CFG_ALPHA_STEP="${CFG_ALPHA_STEP:-0.25}"
+CFG_ALPHA_START="${CFG_ALPHA_START:-2.0}"
+CFG_ALPHA_STEP="${CFG_ALPHA_STEP:--0.2}"
+CFG_ALPHA_FLOOR="${CFG_ALPHA_FLOOR:-1.2}"
 # The other half of what makes one draw differ from the next: draw N uses seed START + N.
 # A clip's attempt count restarts when it is requeued, so a retry over already-drawn clips
 # (RETRY_EXHAUSTED=1) with this left at its default asks the server for the SAME five
@@ -403,7 +408,8 @@ run_pass() {  # $1 = stt|tts ; runs on the CUR_* dataset; returns the pass's exi
         --stt-endpoint "${WDOC_WHISPER_ENDPOINT%/}/v1/audio/transcriptions" \
         --stt-api-token "${WDOC_WHISPER_API_KEY:-}" --stt-model "${WDOC_WHISPER_MODEL:-}" \
         --tts-voice "${TTS_VOICE}" \
-        --cfg-alpha-start "${CFG_ALPHA_START}" --cfg-alpha-step "${CFG_ALPHA_STEP}" \
+        --cfg-alpha-start "${CFG_ALPHA_START}" --cfg-alpha-step="${CFG_ALPHA_STEP}" \
+        --cfg-alpha-floor "${CFG_ALPHA_FLOOR}" \
         --start-seed "${START_SEED}" \
         --n-improv "${N_IMPROV}" --cer-threshold "${CER_THRESHOLD}" \
         --tail-cer-threshold "${TAIL_CER_THRESHOLD}" \

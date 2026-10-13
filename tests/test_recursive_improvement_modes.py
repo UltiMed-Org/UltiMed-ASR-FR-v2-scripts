@@ -90,6 +90,7 @@ def make_cfg(mode, audio_root, n_improv=3, stt_recheck_temperature=None):
         mode=mode, n_improv=n_improv, cer_threshold=0.4, tail_cer_threshold=0.3,
         min_improvement=0.0,
         start_seed=43, speed_jitter=0.0, cfg_alpha_start=1.3, cfg_alpha_step=0.1,
+        cfg_alpha_floor=None,
         original_cfg_alpha=1.3,
         refresh_duration=True, force=False, retry_exhausted=False,
         rescore=False, rescore_only=False,

@@ -69,7 +69,7 @@ def _capture_bodies(n_improv: int, **overrides) -> list[dict]:
 
     cfg = SimpleNamespace(
         start_seed=43, tts_speed=None, speed_jitter=0.0,
-        cfg_alpha_start=1.0, cfg_alpha_step=1.0, n_improv=n_improv,
+        cfg_alpha_start=1.0, cfg_alpha_step=1.0, cfg_alpha_floor=None, n_improv=n_improv,
         tts_url="http://localhost:8003", tts_format="flac", tts_voice="fr_female",
         tts_model=None, tts_timeout=30.0, tts_max_retries=1,
         max_audio_seconds=327.68, tts_sem=threading.Semaphore(1),
@@ -96,13 +96,16 @@ def _capture_bodies(n_improv: int, **overrides) -> list[dict]:
 # driver changed. Parsed, fed to the client, and the rendered ladder is what is pinned.
 def _driver_default(name: str) -> float:
     text = DRIVER_PATH.read_text(encoding="utf-8")
-    m = re.search(rf'^{name}="\$\{{{name}:-([0-9.]+)\}}"', text, re.MULTILINE)
+    # The leading `-?` is load-bearing: CFG_ALPHA_STEP is negative now (the ladder
+    # descends), and a pattern that only matched digits would silently find nothing.
+    m = re.search(rf'^{name}="\$\{{{name}:-(-?[0-9.]+)\}}"', text, re.MULTILINE)
     assert m, f"{name} default not found in driver.sh"
     return float(m.group(1))
 
 
 bodies = _capture_bodies(5, cfg_alpha_start=_driver_default("CFG_ALPHA_START"),
-                         cfg_alpha_step=_driver_default("CFG_ALPHA_STEP"))
+                         cfg_alpha_step=_driver_default("CFG_ALPHA_STEP"),
+                         cfg_alpha_floor=_driver_default("CFG_ALPHA_FLOOR"))
 eq("one request per draw", len(bodies), 5)
 
 
@@ -111,10 +114,13 @@ def _alpha(body: dict):
     return (body.get("extra_params") or {}).get("cfg_alpha")
 
 
-# Around the server's tuned value (the CrispASR voxtral-tts service boots at
-# cfg_alpha 2.0, measured band 1.2-2.0), not a wide sweep: the draws have to land where
-# the model is usable, and the winner is picked on CER anyway.
-eq("cfg_alpha ladder", [_alpha(b) for b in bodies], [1.5, 1.75, 2.0, 2.25, 2.5])
+# DESCENDING, from the value the corpus was generated at (the CrispASR voxtral-tts
+# service boots at cfg_alpha 2.0) down to the measured floor of the usable band. Not a
+# wide sweep: the draws have to land where the model is usable, and the winner is
+# picked on CER anyway. The direction is the assertion: a clip that derailed at 2.0 is
+# over-guided, and above the generation value takes distort and stop terminating.
+eq("cfg_alpha ladder descends to the floor",
+   [_alpha(b) for b in bodies], [2.0, 1.8, 1.6, 1.4, 1.2])
 eq("seed ladder", [b.get("seed") for b in bodies], [43, 44, 45, 46, 47])
 
 # --- where the server actually reads them -------------------------------------------
@@ -123,7 +129,7 @@ eq("seed ladder", [b.get("seed") for b in bodies], [43, 44, 45, 46, 47])
 # the failure that made the ramp inert, and it is invisible from the client side (200,
 # no log, audio at the startup default).
 first = bodies[0]
-eq("cfg_alpha rides inside extra_params", _alpha(first), 1.5)
+eq("cfg_alpha rides inside extra_params", _alpha(first), 2.0)
 eq("cfg_alpha is not sent flat", "cfg_alpha" in first, False)
 eq("the noise seed rides inside extra_params too",
    (first.get("extra_params") or {}).get("voxtral_noise_seed"), 43)
@@ -144,6 +150,16 @@ eq("cfg_alpha omitted when disabled", [_alpha(b) for b in off], [None, None])
 # vanish with cfg_alpha: it is the dict that carries voxtral_noise_seed.
 eq("the noise seed survives cfg_alpha being off",
    [(b.get("extra_params") or {}).get("voxtral_noise_seed") for b in off], [43, 44])
+
+# --- the floor is a clamp, not a suggestion -----------------------------------------
+# --n-improv is free, so a descending ladder runs off the bottom of the usable band on a
+# long run: ten draws at -0.2 from 2.0 would reach 0.2, and 1.0 is already CFG off,
+# where the decoder stops following the text. The clamp is what keeps a long redo from
+# spending its last draws there.
+deep = _capture_bodies(10, cfg_alpha_start=2.0, cfg_alpha_step=-0.2, cfg_alpha_floor=1.2)
+eq("the ladder stops at the floor", [_alpha(b) for b in deep],
+   [2.0, 1.8, 1.6, 1.4, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2])
+eq("no draw is ever at or below CFG-off", [a for a in (_alpha(b) for b in deep) if a <= 1.0], [])
 
 # --- speed jitter, if someone turns it on -------------------------------------------
 # It cycles around the base, but note it is NOT a second source of variation on this
