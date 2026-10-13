@@ -220,6 +220,17 @@ Prints a Markdown report over the manifests: character / word / duration
 min/mean/median/max, file and duration counts, and a duration histogram, broken
 down per split, per dataset, and per dataset x split.
 
+When the rows carry a `voice` (v2 audio), three more sections appear: **By voice**
+(clips, hours and text stats per voice, with the spread as `max - min` over the mean),
+**Voice balance per dataset** (groups, voices used and the spread of groups / clips /
+hours per voice) and **By voice x split** (each voice's share inside train, val and
+test). They are the measured answer to a question the hash assignment leaves open: it
+trades exact balance for edit and resume stability, so "how unbalanced, and where" is
+not predictable from the code, only countable afterwards. Expect the small datasets to
+be the skewed ones: a few hundred groups cannot divide evenly over ten voices. A v1
+report (no `voice` field anywhere) omits all three rather than printing a table about
+one unnamed voice.
+
 ```bash
 uv run scripts/get_statistics.py                    # per-dataset splits, to stdout
 uv run scripts/get_statistics.py --source combined  # the release-wide re-split

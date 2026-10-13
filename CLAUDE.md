@@ -105,14 +105,16 @@ quota until `--squash-history` collapses the history.
 preview approach was retired (`build_tarred.py` / `build_preview_parquet.py`
 deleted). The dataset is published (NOTICE + card shipped) at
 `Olicorne/UltiMed-ASR-FR-v1`, and the pipeline scripts at
-`github.com/thiswillbeyourgithub/UltiMed-ASR-FR-v1-scripts`. The `-v1`
-suffix names the PUBLISHED dataset, which stays as it is (single-voice
-`fr_female` throughout): the v1 Hub repo is frozen, these scripts are not. v2
-re-synthesizes the same corpus with ten voices and is being built HERE, in this
-repo, on top of the same text corpus and stages; only the audio and the
-`voice` column differ. Plan for a v2 Hub repo of its own when it ships, and keep
-the pipeline scripts version-agnostic (that is why the GitHub link below is
-unsuffixed). The repo name is hardcoded as `REPO_ID` in both
+`github.com/thiswillbeyourgithub/UltiMed-ASR-FR-v1-scripts`. v2 re-synthesizes the
+same corpus with ten voices and is being built HERE, in this repo, on top of the
+same text corpus and stages; only the audio and the `voice` column differ. **v2
+will be pushed over `-v1`**, i.e. into the existing Hub repo rather than a new
+one, with the rename handled later (user's call, 2026-10-13). So treat the
+published v1 audio as replaceable, not frozen: what must not drift is the card,
+which has to be updated in the same operation as the upload (see the v2 TODO
+under "Release obligations") because the moment the audio lands it describes ten
+voices at cfg_alpha 2.0, not one at 1.3. Keep the pipeline scripts
+version-agnostic (that is why the GitHub link below is unsuffixed). The repo name is hardcoded as `REPO_ID` in both
 `scripts/upload_to_hf.py` and `scripts/remove_arxiv_tag.py`, and appears in the
 dataset card (title, `pretty_name`, the `load_dataset` examples, the BibTeX) and
 in `NOTICE.md`; the GitHub link stays unsuffixed because the pipeline repo builds
