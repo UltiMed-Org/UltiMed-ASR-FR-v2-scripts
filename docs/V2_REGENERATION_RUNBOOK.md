@@ -44,19 +44,35 @@ One run per stage, each resumable (existing files are skipped, so a crash costs 
 
 ```bash
 cd 05_generate_audio
-for s in 01_dictionnary 02_drugs 03_PARHAF 04_PARROT 07_acronyms; do
+
+# Term stages: one voice PER CLIP, so a term is heard in several accents.
+for s in 01_dictionnary 02_drugs 07_acronyms; do
   uv run 01_generate_audio.py \
     --input  "../$s/generated_dataset.jsonl" \
     --output "../$s/generated_audios" \
+    --voice-mode row \
+    --cfg-alpha 2.0 \
+    --concurrency 10
+done
+
+# Document stages: one voice PER DOCUMENT, so a report keeps one reader.
+for s in 03_PARHAF 04_PARROT; do
+  uv run 01_generate_audio.py \
+    --input  "../$s/generated_dataset.jsonl" \
+    --output "../$s/generated_audios" \
+    --voice-mode group \
     --cfg-alpha 2.0 \
     --concurrency 10
 done
 ```
 
-- `--voice-mode group` is the default and is what v2 wants: one speaker per term (or per document), assigned by hashing the group key so adding or removing a row never moves another group to another voice.
+- **The voice mode is per stage, decided 2026-10-14**, and it has to be right before launching because the voice is baked into the audio. Both modes hash (never count), so edit and resume stability is the same either way: adding or removing a row never moves another clip to another voice.
 - `cfg_alpha` **2.0** is the top of the band measured on 2026-10-13 (16 voices x 10 values, 160 takes): usable 1.2-2.0, and 1.5-2.0 for the hybrid voices. It is deliberately the top, not the middle: below 1.2 the flow-matching decoder stops following the text and degrades fast, while above 2.0 distortion grows and takes increasingly fail to terminate at all. Stage 06's retry ladder therefore walks **down** from it (step -0.2, floor 1.2) rather than up.
 - `--concurrency 10` is what v1 ran (`docs/BUILD_LOG.md` line 55) and what the throughput below was measured at. CrispASR's own notes say the acoustic stage is `codec-bs=1` and saturates around 4-8 concurrent clients; 10 did not hurt, so there is no reason to lower it.
-- **Voice mode is a decision to make before launching**, because the voice is baked into the audio. `--voice-mode group` (the default) gives each term exactly ONE voice, so a drug name exists in the corpus in a single accent and a bad voice-term pairing costs all ~8 variants of that term. `--voice-mode row` hashes `group:variant_index` instead, giving the dictionary 5.74 distinct voices per term, drugs 4.99, acronyms 2.68, and a flatter per-voice balance (dictionary spread 2.8% -> 1.2%, acronyms 45% -> 16%). Edit stability is unaffected: row mode is still a hash, not a counter. Group mode is right where the group is a DOCUMENT (PARHAF, PARROT: consecutive chunks of one clinical report should share a reader), which is why the recommendation is per stage: `row` for dictionary / drugs / acronyms (92.5% of the clips), `group` for PARHAF / PARROT. Note row mode is currently a silent no-op on the document stages anyway: their rows carry `variant_index: 0` with the real index in `chunk_index`, and `voice_for_row` prefers `variant_index`.
+- **Why `row` on the term stages** (dictionary, drugs, acronyms: 92.5% of the clips). A group there is one TERM and its ~8 written variants, which are independent sentences, so the default `group` mode would make a given drug name exist in the corpus in exactly ONE accent, and a bad voice/term pairing would cost all of that term's clips at once. Row mode hashes `group:index` instead: measured on the real inputs it gives 5.74 distinct voices per term on the dictionary, 4.99 on drugs, 2.68 on acronyms, and a flatter per-voice balance as a side effect (dictionary spread 2.8% -> 1.2%, acronyms 45% -> 16%).
+- **Why `group` on the document stages** (PARHAF, PARROT). A group there is one DOCUMENT and the clips are consecutive chunks of it, so one reader per report is the only natural choice: a clinical report that changes speaker mid-sentence is an artifact no real dictation has.
+- Row mode on a document stage was a silent no-op until commit `98f79b3` (those rows carry `variant_index: 0` with the real position in `chunk_index`, and the key preferred `variant_index`, collapsing to the group key). Fixed, with tests, so the two modes are now genuinely different there. It does not change what v2 runs, since the document stages use `group` anyway.
+- **No `--seed`.** Omitted on purpose, so the run matches v1's behaviour. The flat `seed` field cannot reach this model at all, and the nested `voxtral_noise_seed` that can would pin every clip in the corpus to the SAME noise draw, which works against the acoustic variety v2 exists for. The dataset card says so under "On seeds". A per-clip seed derived from the clip key (the way the voice is) would be the way to get reproducibility without that, but it is a code change plus a new column, so it is not part of this run.
 - Each run writes `voice_assignment.json` beside the audio. **Stage 99 labels the `voice` column from that file**, so do not re-order `utils/voice_assignment.py`'s roster afterwards: the file order is part of the mapping and every clip already on disk would become mislabelled.
 
 
