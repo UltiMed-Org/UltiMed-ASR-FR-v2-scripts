@@ -55,7 +55,7 @@ def _stage05_args(**overrides) -> SimpleNamespace:
     """Only the fields build_body reads."""
     base = dict(
         format="flac", model=None, instruction=None, voice=None, seed=None, speed=None,
-        temperature=None, top_p=None, top_k=None, repetition_penalty=None, do_sample=None,
+        cfg_alpha=None, temperature=None, top_p=None, top_k=None, repetition_penalty=None, do_sample=None,
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -76,7 +76,11 @@ def test_stage05_nests_the_seed() -> None:
     assert "extra_params" not in plain, (
         "an empty extra_params would override nothing but still change the request"
     )
-    print("OK stage 05 build_body nests voxtral_noise_seed")
+
+    tuned = tts.build_body("bonjour", _stage05_args(seed=43, cfg_alpha=2.0))
+    assert tuned["extra_params"] == {"cfg_alpha": 2.0, "voxtral_noise_seed": 43}
+    assert "cfg_alpha" not in tuned, "a flat cfg_alpha is dropped by a stock server"
+    print("OK stage 05 build_body nests voxtral_noise_seed and cfg_alpha")
 
 
 def test_stage06_nests_seed_and_cfg_alpha() -> None:

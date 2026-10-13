@@ -81,7 +81,7 @@ def _tts_args(tmp: Path, cap: float) -> SimpleNamespace:
     """Stage-05 argparse namespace with every knob synthesize()/build_body() reads."""
     return SimpleNamespace(
         format="flac", timeout=30.0, model=None, instruction=None, voice=None,
-        seed=None, speed=None, temperature=None, top_p=None, top_k=None,
+        seed=None, speed=None, cfg_alpha=None, temperature=None, top_p=None, top_k=None,
         repetition_penalty=None, do_sample=None, max_audio_seconds=cap,
     )
 

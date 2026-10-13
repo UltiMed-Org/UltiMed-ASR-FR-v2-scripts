@@ -186,8 +186,11 @@ def build_body(text: str, args: argparse.Namespace) -> dict:
     # field (TADA, qwen3-tts) keep working, and a server with no reader for the
     # nested key merges and ignores it, so sending both is always safe. Same wire
     # format as CrispASR/tts.py and stage 06's tts_synthesize.
-    if args.seed is not None:
-        body["extra_params"] = {"voxtral_noise_seed": args.seed}
+    # cfg_alpha rides the same nested route: stock vllm-omni drops a flat one silently.
+    extra = {"cfg_alpha": args.cfg_alpha, "voxtral_noise_seed": args.seed}
+    extra = {k: v for k, v in extra.items() if v is not None}
+    if extra:
+        body["extra_params"] = extra
     return body
 
 
@@ -418,6 +421,10 @@ def main() -> int:
     p.add_argument("--speed", type=float, default=None,
                    help="Speech speed, 0.25 to 4.0 (default: not sent, server default "
                         "applies). Honoured per request by both TADA and Voxtral.")
+    p.add_argument("--cfg-alpha", type=float, default=None,
+                   help="Voxtral classifier-free guidance, sent as extra_params.cfg_alpha (default: "
+                        "not sent, the server's VOXTRAL_CFG_ALPHA applies, 1.3 in the CrispASR "
+                        "compose). Higher follows the text more closely.")
     p.add_argument("--format", default="flac",
                    choices=("wav", "pcm", "f32", "flac", "mp3", "aac", "opus"),
                    help="Audio response format and file extension (default: flac, "
