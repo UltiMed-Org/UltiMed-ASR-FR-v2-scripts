@@ -818,6 +818,9 @@ _SPELLING_RULES = (
     (re.compile(r"\b([Ss])hampoing"), r"\1hampooing"),
     (re.compile(r"\b(paquets?)[- ]années?\b"), r"\1-année"),
     (re.compile(r"(?<![\d,])((?:[2-9]|\d{2,})(?:,\d+)? )gray\b"), r"\1grays"),
+    # 2026-10-13, author's choice: the unaccented ``Elodie`` drawn from the INSEE first-name
+    # pool becomes ``Hélodie`` (``Élodie`` stays).
+    (re.compile(r"\bElodie\b"), "Hélodie"),
 )
 
 
