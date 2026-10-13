@@ -6,10 +6,15 @@ clip whose text repeats a training text (up to punctuation and case) is dropped 
 every manifest that references its audio, whatever directory that manifest lives in,
 that a label holding an ellipsis (truncated LLM output, anonymized date) is dropped,
 and that leaked LLM reasoning and a label too long for its clip are dropped.
+Also that the ASR-flagged list is recognized as stale once the audio it was measured
+on has been replaced (the list keys on file names, which a regenerated corpus reuses).
 
 Run: python tests/test_drop_bad_rows.py
 """
+import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -115,9 +120,42 @@ def test_asr_flagged() -> None:
     print("test_asr_flagged: OK")
 
 
+def test_asr_flagged_stale() -> None:
+    """The list names clip keys, so it keeps matching after the audio was replaced.
+    Each clip written after the list is one verdict measured on bytes that are gone."""
+    mod = load_sync_module(script=SCRIPT)
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "data" / "dictionary").mkdir(parents=True)
+        old_clip = root / "data" / "dictionary" / "a.flac"
+        new_clip = root / "data" / "dictionary" / "b.flac"
+        for clip in (old_clip, new_clip):
+            clip.write_bytes(b"x")
+        listed = root / "asr_flagged_clips.jsonl"
+        listed.write_text(json.dumps({"clip": "dictionary/a.flac"}) + "\n"
+                          + json.dumps({"clip": "dictionary/b.flac"}) + "\n"
+                          + json.dumps({"clip": "drugs/gone.flac"}) + "\n")
+        flagged = mod.load_asr_flagged(listed)
+        assert flagged == {"dictionary/a.flac", "dictionary/b.flac", "drugs/gone.flac"}
+
+        # a.flac predates the list (it is what was measured), b.flac was regenerated
+        # after it, drugs/gone.flac is not under data/ at all.
+        stamp = listed.stat().st_mtime_ns
+        os.utime(old_clip, ns=(stamp - 10**9, stamp - 10**9))
+        os.utime(new_clip, ns=(stamp + 10**9, stamp + 10**9))
+        assert mod.asr_flagged_stale(flagged, root, listed) == (1, 1), \
+            mod.asr_flagged_stale(flagged, root, listed)
+
+        # No list, or no flagged clips: nothing to be stale about.
+        assert mod.asr_flagged_stale(flagged, root, root / "absent.jsonl") == (0, 0)
+        assert mod.asr_flagged_stale(set(), root, listed) == (0, 0)
+    print("test_asr_flagged_stale: OK")
+
+
 if __name__ == "__main__":
     test_filter_exhausted()
     test_eval_duplicates()
     test_ellipsis()
     test_llm_leak_and_too_fast()
     test_asr_flagged()
+    test_asr_flagged_stale()

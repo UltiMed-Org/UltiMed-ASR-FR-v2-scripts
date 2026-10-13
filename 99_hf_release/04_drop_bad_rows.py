@@ -60,6 +60,12 @@ Six kinds of rows are dropped:
    words before the sentence, which Whisper QC skipped) or a phrase both Parakeet and
    Whisper agree the audio lacks. See that script for the rules. Matched on
    ``nemo_manifest.clip_key`` (``<source>/<file>``). A missing list drops nothing.
+   Because the key is a name and not the audio, the list only means something for the
+   audio it was measured on: regenerate the corpus (v2 reuses v1's file names) and it
+   would drop good clips for defects that no longer exist. So the run warns when the
+   list is older than the clips it flags, and ``--no-asr-flagged`` turns it off until
+   ``06_hotfixes/04_flag_asr_defects.py`` has re-run on the new audio
+   (``--asr-flagged-list PATH`` points at another one).
 
 A dropped clip is dropped from EVERY manifest (matched on its resolved audio path),
 including the per-source ``<source>/*.jsonl`` partitions and the down-sampled
@@ -161,6 +167,48 @@ def load_asr_flagged(path: Path = ASR_FLAGGED_LIST) -> set[str]:
     return {r["clip"] for r in read_jsonl(path)} if path.is_file() else set()
 
 
+def asr_flagged_stale(flagged: Collection[str], root_path: Path,
+                      list_path: Path = ASR_FLAGGED_LIST) -> tuple[int, int]:
+    """How many flagged clips the list can no longer be speaking about.
+
+    The list names clip keys, not audio, so it keeps "matching" after the audio
+    under those names has been replaced: a regenerated clip, or a whole new
+    generation of the dataset synthesized under v1's file names, would be dropped
+    for a defect that was measured on bytes that are gone. The check is the same
+    one ``probe_durations`` makes for durations: compare each clip's mtime with the
+    list's.
+
+    Parameters
+    ----------
+    flagged : Collection[str]
+        Clip keys from ``load_asr_flagged``.
+    root_path : Path
+        Release stage root; clip keys resolve under ``<root>/data/``.
+    list_path : Path
+        The list itself, whose mtime is the reference.
+
+    Returns
+    -------
+    n_newer : int
+        Clips whose audio was written after the list, so its verdict is stale.
+    n_missing : int
+        Clips whose audio is not under ``<root>/data`` at all, so nothing can be
+        checked (an unmounted symlink, or a list from another corpus).
+    """
+    if not flagged or not list_path.is_file():
+        return 0, 0
+    listed_at = list_path.stat().st_mtime_ns
+    n_newer = n_missing = 0
+    for clip in flagged:
+        audio = root_path / "data" / clip
+        try:
+            if audio.stat().st_mtime_ns > listed_at:
+                n_newer += 1
+        except OSError:
+            n_missing += 1
+    return n_newer, n_missing
+
+
 def filter_rows(rows: list[dict], manifest_dir: Path, drop_audio: Collection[str] = (),
                 asr_flagged: Collection[str] = ()) -> tuple[list[dict], list[tuple[dict, str]], int]:
     """Split manifest rows into kept and dropped ones.
@@ -216,7 +264,15 @@ def filter_rows(rows: list[dict], manifest_dir: Path, drop_audio: Collection[str
 @click.option("--root", default=str(_HERE), show_default="99_hf_release/",
               help="Release stage root, holding the `data` symlink.")
 @click.option("--apply", is_flag=True, help="Write. Without it this is a dry run.")
-def main(manifests: tuple[Path, ...], root: str, apply: bool) -> None:
+@click.option("--asr-flagged-list", "asr_flagged_list", default=str(ASR_FLAGGED_LIST),
+              show_default="99_hf_release/asr_flagged_clips.jsonl", type=click.Path(path_type=Path),
+              help="List of ASR-flagged clip keys to drop (from 06_hotfixes/04_flag_asr_defects.py). "
+                   "A list built on an earlier generation of the audio must be rebuilt or disabled.")
+@click.option("--no-asr-flagged", is_flag=True,
+              help="Ignore the ASR-flagged list entirely. What to pass on a freshly "
+                   "regenerated corpus until 04_flag_asr_defects.py has re-run on it.")
+def main(manifests: tuple[Path, ...], root: str, apply: bool,
+         asr_flagged_list: Path, no_asr_flagged: bool) -> None:
     """Remove exhausted clips, eval duplicates of training texts, ellipsis labels, leaked LLM
     reasoning, impossibly fast labels and ASR-flagged clips from the release manifests (or the
     given ones)."""
@@ -235,8 +291,22 @@ def main(manifests: tuple[Path, ...], root: str, apply: bool) -> None:
     for audio, text in duplicates.items():
         logger.info(f"eval clip repeats a training text: {audio} ({text[:80]!r})")
 
-    asr_flagged = load_asr_flagged()
-    logger.info(f"{len(asr_flagged)} ASR-flagged clips listed in {ASR_FLAGGED_LIST.name}")
+    list_path = Path(asr_flagged_list)
+    asr_flagged = set() if no_asr_flagged else load_asr_flagged(list_path)
+    if no_asr_flagged:
+        logger.warning("--no-asr-flagged: the ASR-flagged list is ignored, no clip is dropped for it")
+    else:
+        logger.info(f"{len(asr_flagged)} ASR-flagged clips listed in {list_path.name}")
+        n_newer, n_missing = asr_flagged_stale(asr_flagged, root_path, list_path)
+        if n_newer or n_missing:
+            # Loud rather than fatal: on a mixed corpus a few regenerated clips are
+            # expected, while "all of them" means the list belongs to a previous
+            # generation of the audio and would drop good clips for old defects.
+            logger.warning(
+                f"{list_path.name} is OLDER than the audio of {n_newer} of the {len(asr_flagged)} "
+                f"clips it flags ({n_missing} not found under {root_path / 'data'}): those verdicts "
+                "were measured on audio that is gone. Rebuild the list with "
+                "06_hotfixes/04_flag_asr_defects.py, or pass --no-asr-flagged.")
 
     total_dropped = 0
     for path in targets:
