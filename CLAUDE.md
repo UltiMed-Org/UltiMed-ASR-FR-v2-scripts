@@ -81,7 +81,12 @@ generators now apply all these label rewrites at parse time
 manifests, generated before that. Order: 03, 04, 05, then the parquet build. The audio lives under the `data/` symlink
 (`data/{dictionary,drugs,PARHAF,PARROT}/`, an external SSD) and manifests are
 written to `data/NeMO_files/`; neither the symlink nor the generated manifests are
-committed (the SSD path embeds the username).
+committed (the SSD path embeds the username). Since 2026-10-13 `data/` and every
+stage's `generated_audios` symlink point at the v2 audio root (`audio_datasets/v2/` on
+the SSD, starting empty); the v1 audio and the v1 manifests (`NeMO_files/`, holding the
+v2 texts) stay in the parent `audio_datasets/`. `07_write_back_texts.py` copied those
+v2 texts into every `generated_dataset.jsonl` (stage 05's input), so v2 audio is
+synthesized from them.
 
 The **release format is Parquet, not tar**: `scripts/build_parquet.py` packages the
 whole corpus into sharded Parquet with the FLAC bytes embedded (one subset per
