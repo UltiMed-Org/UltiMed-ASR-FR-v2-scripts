@@ -30,12 +30,15 @@ produce a `voice` column that does not match the audio. Tested by
 The group key, not the row, is what gets hashed, so every clip of a group shares a
 voice. For PARHAF and PARROT a group is one source document cut into chunks, which
 should sound like one person reading it; elsewhere it is one term's variants. The key
-field mirrors `nemo_manifest.detect_grouping` (`source_id` when the rows carry one,
-else `term_index`) so that both stages group identically.
+field mirrors `detect_grouping` in 99_hf_release/01_build_nemo_manifest.py
+(`source_id` when the rows carry one, else `term_index`) so that both stages group
+identically.
 """
 from __future__ import annotations
 
 import hashlib
+import json
+from pathlib import Path
 
 # The ten French voices cleared for v2, in roster order. Chosen by ear over two
 # audition rounds, the second on medical text: FLEURS-clean prose did not predict
@@ -78,8 +81,9 @@ def group_field(sample: dict) -> str:
         `"source_id"` if the rows carry one (PARHAF and PARROT: document chunks),
         else `"term_index"` (term variants).
 
-    Mirrors `nemo_manifest.detect_grouping`'s auto choice on purpose. If these two
-    ever disagree, a clip's `group_id` and its `voice` would be grouped on different
+    Mirrors the auto choice of `detect_grouping` in
+    99_hf_release/01_build_nemo_manifest.py on purpose. If these two ever disagree, a
+    clip's `group_id` and its `voice` would be grouped on different
     fields, so a document could be split across voices while still claiming to be one
     group.
     """
@@ -182,8 +186,6 @@ def load_voices(path) -> tuple[str, ...]:
     tuple of str
         The names, in file order, which is part of the mapping.
     """
-    from pathlib import Path
-
     lines = Path(path).read_text(encoding="utf-8").splitlines()
     voices = tuple(s for line in lines if (s := line.strip()) and not s.startswith("#"))
     if not voices:
@@ -191,3 +193,110 @@ def load_voices(path) -> tuple[str, ...]:
     if len(set(voices)) != len(voices):
         raise ValueError(f"duplicate voice names in {path}: {voices}")
     return voices
+
+
+# The file stage 05 drops next to the audio and stage 99 reads back. It is the only
+# record of WHICH roster a directory of clips was generated with: the voice is not
+# stored per clip (602k rows of a value re-derivable from the key would be dead
+# weight), so the release side re-runs the hash, and that is only sound while the
+# roster, the mode and the group field are the ones synthesis used. Both sides go
+# through the two functions below so the format cannot drift between them.
+PROVENANCE_FILENAME = "voice_assignment.json"
+
+
+def provenance_key(input_path) -> str:
+    """Return the key one stage's entry is stored under in the provenance file.
+
+    Parameters
+    ----------
+    input_path
+        The stage's `generated_dataset.jsonl`.
+
+    Returns
+    -------
+    str
+        `"<stage folder>/<filename>"`, e.g. `"01_dictionnary/generated_dataset.jsonl"`.
+
+    Not the filename alone, because every stage's input is called
+    `generated_dataset.jsonl` and several stages can be generated into one output
+    directory, and not the absolute path, because that bakes a home path into a file
+    that sits beside the published audio.
+    """
+    p = Path(input_path)
+    return f"{p.parent.name}/{p.name}"
+
+
+def write_provenance(out_dir, input_path, *, voices, mode: str, field: str | None,
+                     counts: dict) -> Path:
+    """Record which roster this audio was generated with, beside the audio.
+
+    Parameters
+    ----------
+    out_dir
+        The directory the clips are written to.
+    input_path
+        The stage's `generated_dataset.jsonl`, used for the key.
+    voices
+        The roster, in order, or None for a single-voice run.
+    mode
+        `"group"`, `"row"` or `"single"`.
+    field
+        The group field actually used, or None in single mode.
+    counts
+        Rows per voice, over every planned row of the input (not just the rows
+        generated in this run), so the entry describes the corpus and not the tail
+        of a resume.
+
+    Returns
+    -------
+    Path
+        The file written.
+
+    Merged into any existing file rather than overwriting it: the five stages share
+    one `data/` parent in some layouts, and a second stage must not erase the first
+    stage's entry.
+    """
+    path = Path(out_dir) / PROVENANCE_FILENAME
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        doc = {}
+    key = provenance_key(input_path)
+    doc[key] = {
+        "input": key,
+        "voices": list(voices) if voices else None,
+        "mode": mode,
+        "group_field": field,
+        "rows_per_voice": dict(sorted(counts.items())),
+    }
+    path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
+    return path
+
+
+def read_provenance(audio_dir, input_path) -> dict | None:
+    """Return the provenance entry for one stage's audio, or None if there is none.
+
+    Parameters
+    ----------
+    audio_dir
+        The directory holding that stage's clips.
+    input_path
+        The stage's `generated_dataset.jsonl`.
+
+    Returns
+    -------
+    dict or None
+        The entry written by `write_provenance` (`voices`, `mode`, `group_field`,
+        `rows_per_voice`), or None when the file or the entry is absent, which is
+        what v1 audio looks like: generated before this existed, single voice.
+
+    A missing file is not an error. The caller decides what to do with it (stage 99
+    leaves the `voice` column out rather than guessing a name).
+    """
+    path = Path(audio_dir) / PROVENANCE_FILENAME
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    entry = doc.get(provenance_key(input_path))
+    return entry if isinstance(entry, dict) else None

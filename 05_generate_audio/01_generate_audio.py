@@ -35,6 +35,18 @@ Two modes, selected by what --input is:
   remaining work; per-row failures are logged and skipped, and the run
   exits non-zero if any row failed.
 
+Voices in batch mode: v1 read the whole corpus with one voice (fr_female),
+v2 spreads it over the ten French voices in utils/voice_assignment.py, which
+is also what stage 99 re-derives the manifest's `voice` column from. The
+default is --voice-mode group: the voice is a hash of the row's group key, so
+all variants of a term (and all chunks of a PARHAF/PARROT document) are read
+by one speaker, and a given group keeps its voice when the corpus is edited
+or a run resumes. The roster, the mode and the group field are recorded in
+voice_assignment.json in the output folder for stage 99 to check. Because the
+voice is a per-request field, one run covers all ten with no restart. Pass
+--voice X (or --voice-mode single) for the v1 single-voice behaviour, and
+--voices-file to use a different roster.
+
 Every knob (--speed, the talker sampling flags, --instruction, --voice,
 --seed, --model) is sent only when set, so the server keeps its startup
 defaults otherwise (same per-request contract as the full CrispASR client
@@ -82,6 +94,7 @@ from voice_assignment import (  # noqa: E402
     group_field,
     load_voices,
     voice_for_row,
+    write_provenance,
 )
 
 DEFAULT_URL = "http://127.0.0.1:8003"
@@ -333,32 +346,6 @@ def resolve_roster(args: argparse.Namespace) -> tuple[tuple[str, ...] | None, st
     return voices, args.voice_mode
 
 
-def write_voice_provenance(out_dir: Path, jsonl_path: Path, voices: tuple[str, ...] | None,
-                           mode: str, field: str | None, counts: Counter) -> None:
-    """Record which roster this audio was generated with, next to the audio.
-
-    Stage 99 re-derives each clip's voice from the same hash rather than reading a
-    per-clip record (602k rows would be a pointless file), which is only sound while
-    the roster and the mode are the ones used here. This file is what lets it check
-    that instead of assuming it: a roster edited between synthesis and release would
-    otherwise relabel every clip silently. Keyed by input file, so several stages can
-    share one output directory.
-    """
-    path = out_dir / "voice_assignment.json"
-    try:
-        doc = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        doc = {}
-    doc[jsonl_path.name] = {
-        "input": str(jsonl_path),
-        "voices": list(voices) if voices else None,
-        "mode": mode,
-        "group_field": field,
-        "rows_per_voice": dict(sorted(counts.items())),
-    }
-    path.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
-
-
 def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -418,7 +405,11 @@ def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
         spread = ", ".join(f"{v}={per_voice.get(v, 0)}" for v in voices)
         logger.info("voices: {} of them, by {} ({} mode): {}",
                     len(voices), field, voice_mode, spread)
-        write_voice_provenance(out_dir, jsonl_path, voices, voice_mode, field, per_voice)
+        # Beside the audio, not in this stage's code: stage 99 re-derives each clip's
+        # voice from the same hash and needs to know which roster/mode/field produced
+        # the clips it is reading. utils/voice_assignment owns the format for both.
+        write_provenance(out_dir, jsonl_path, voices=voices, mode=voice_mode,
+                         field=field, counts=per_voice)
     else:
         logger.info("voices: single ({})", args.voice or "server default")
 

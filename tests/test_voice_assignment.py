@@ -10,7 +10,7 @@ column that does not describe the audio:
    string hashing per process, so a builtin `hash()` here would mislabel every clip.
    The test re-derives in subprocesses under two different `PYTHONHASHSEED` values.
 2. **Group cohesion and the key field.** All clips of a group must share a voice, and
-   the group field must be the same one `nemo_manifest.detect_grouping` picks
+   the group field must be the same one `01_build_nemo_manifest.detect_grouping` picks
    (`source_id` when present, else `term_index`), or a PARHAF document could be split
    across speakers while still claiming to be one group.
 3. **Balance.** Not exact (the assignment is a hash, see the module docstring), but
@@ -18,7 +18,15 @@ column that does not describe the audio:
    band. A mapping that silently used one voice would still pass tests 1 and 2.
 4. **Roster order is part of the mapping**, and `load_voices` round-trips the roster
    file format shared with the CrispASR repo.
+5. **The provenance file round-trips between the two stages.** Stage 05 writes it,
+   stage 99 reads it to check that the roster it is about to hash with is the one
+   the audio was generated with. Both go through the same two functions, so what is
+   tested is that a write is readable, that a second stage written into the same
+   directory does not erase the first (all five stages' inputs are called
+   `generated_dataset.jsonl`, so the key cannot be the filename), and that a missing
+   file reads as None rather than raising.
 """
+import json
 import subprocess
 import sys
 import tempfile
@@ -114,6 +122,45 @@ with tempfile.TemporaryDirectory() as tmp:
         check("load_voices rejects duplicates", False, "no error raised")
     except ValueError:
         check("load_voices rejects duplicates", True)
+
+# ------------------------------------------------------- 5. provenance round-trip
+with tempfile.TemporaryDirectory() as tmp:
+    audio = Path(tmp) / "dictionary"
+    audio.mkdir()
+    dict_in = Path(tmp) / "01_dictionnary" / "generated_dataset.jsonl"
+    drugs_in = Path(tmp) / "02_drugs" / "generated_dataset.jsonl"
+
+    check("the key names the stage, not just the shared filename",
+          va.provenance_key(dict_in) == "01_dictionnary/generated_dataset.jsonl",
+          va.provenance_key(dict_in))
+    check("two stages do not collide on their key",
+          va.provenance_key(dict_in) != va.provenance_key(drugs_in))
+
+    check("a missing provenance file reads as None",
+          va.read_provenance(audio, dict_in) is None)
+
+    va.write_provenance(audio, dict_in, voices=va.VOICES_FR_V2, mode="group",
+                        field="term_index", counts=Counter({"fr_male": 3}))
+    entry = va.read_provenance(audio, dict_in)
+    check("a written entry reads back whole",
+          entry == {"input": "01_dictionnary/generated_dataset.jsonl",
+                    "voices": list(va.VOICES_FR_V2), "mode": "group",
+                    "group_field": "term_index", "rows_per_voice": {"fr_male": 3}},
+          json.dumps(entry))
+
+    # The second stage must not erase the first: in some layouts both generate into
+    # one audio folder, and stage 99 then reads the wrong roster (or none).
+    va.write_provenance(audio, drugs_in, voices=("fr_female",), mode="single",
+                        field=None, counts=Counter())
+    doc = json.loads((audio / va.PROVENANCE_FILENAME).read_text())
+    check("a second stage is merged in, not written over", len(doc) == 2, str(sorted(doc)))
+    check("the first stage's entry survived",
+          va.read_provenance(audio, dict_in) == entry)
+    # An unknown stage in a file that exists is the same answer as no file: None, so
+    # stage 99 takes the same "generated before this existed" path either way.
+    check("an entry for another stage is not returned",
+          va.read_provenance(audio, Path(tmp) / "07_acronyms" / "generated_dataset.jsonl")
+          is None)
 
 print(f"\n{len(failures)} failed" if failures else "\nall checks passed")
 sys.exit(1 if failures else 0)
