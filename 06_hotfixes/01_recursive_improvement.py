@@ -382,9 +382,11 @@ def tts_synthesize(
     """POST one synthesis request and return the raw audio bytes. Unset knobs are
     omitted so the server keeps its startup defaults (same contract as stage 05).
 
-    REQUIRES the forked vllm-omni that the CrispASR ``voxtral-tts`` image is built from
-    (``CrispASR/voxtral/vllm-omni``). Both per-draw knobs are sent flat, which is a
-    contract of that fork, not of upstream:
+    The per-draw knobs are sent nested in ``extra_params`` (``cfg_alpha``,
+    ``voxtral_noise_seed``), the route both upstream and the forked vllm-omni of the
+    CrispASR ``voxtral-tts`` image read; the seed is also sent flat for TADA /
+    qwen3-tts. Same wire format as stage 05's ``build_body`` (pinned by
+    ``tests/test_tts_wire_format.py``). Why flat alone is not enough upstream:
 
     * ``cfg_alpha`` is a top-level field there, promoted precisely so a request that
       sets it cannot silently do nothing. Upstream has no such field and its request
@@ -398,9 +400,9 @@ def tts_synthesize(
 
     So against a STOCK vllm-omni both knobs are silently ignored and the draws differ
     only by global-RNG drift, which is what this stage used to do without knowing it.
-    ``extra_params`` remains the escape hatch and wins on conflict, so nothing here
-    needs to nest. One more server-side requirement: stage 0's deploy YAML must keep a
-    default ``cfg_alpha`` under ``default_sampling_params.extra_args``, or vllm-omni
+    The fork reads the flat fields too, but nesting works on both. One more
+    server-side requirement: stage 0's deploy YAML must keep a default
+    ``cfg_alpha`` under ``default_sampling_params.extra_args``, or vllm-omni
     sets ``has_sampling_extra_args=False`` and drops every per-request extra.
 
     Retries transient failures (connection errors, 429, 5xx) with exponential
@@ -409,9 +411,13 @@ def tts_synthesize(
     silently skipping the clip."""
     body: dict = {"input": text, "response_format": response_format}
     for key, value in (("seed", seed), ("voice", voice), ("speed", speed),
-                       ("model", model), ("cfg_alpha", cfg_alpha)):
+                       ("model", model)):
         if value is not None:
             body[key] = value
+    extra = {k: v for k, v in (("cfg_alpha", cfg_alpha), ("voxtral_noise_seed", seed))
+             if v is not None}
+    if extra:
+        body["extra_params"] = extra
 
     last: Exception | None = None
     for attempt in range(max_retries):
