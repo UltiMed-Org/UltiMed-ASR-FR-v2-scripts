@@ -452,7 +452,10 @@ def write_splits(
         # release) ship both. NeMo training ignores it.
         if "asr_training_source" in row:
             out["asr_training_source"] = row["asr_training_source"]
-        for k in ("category", "group_id", "group_mode", "item_index"):
+        # `voice` is which of the ten v2 voices read the clip (absent on v1 audio,
+        # which is single-voice): passed through like the other provenance fields, so
+        # the per-dataset manifests, the combined ones and the Parquet all carry it.
+        for k in ("category", "group_id", "group_mode", "item_index", "voice"):
             if k in row:
                 out[k] = row[k]
         return out

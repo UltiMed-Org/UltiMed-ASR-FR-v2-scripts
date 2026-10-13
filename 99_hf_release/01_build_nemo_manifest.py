@@ -20,6 +20,15 @@ Each output row is a NeMo manifest line: ``text`` is the written label
 absolute home path). Rows whose clip is missing (skipped/failed in stage 05) are
 dropped rather than pointing at a non-existent file.
 
+The ``voice`` field (v2) says which of the ten French voices read the clip. It is
+not stored per clip by stage 05, it is re-derived here with the same hash, over the
+roster / mode / group field that stage 05 recorded in its ``voice_assignment.json``
+next to the audio. That file, not this repo's current ``VOICES_FR_V2``, is the
+authority: editing the roster in code must not relabel audio already on disk, and a
+drift between the two is logged. Audio with no such record (v1, single-voice, or a
+run that used the server's default voice) gets no ``voice`` field rather than a
+guessed one.
+
 Clips are matched to rows by the stage-05 filename prefix
 ``{term_index:06d}_{variant_index:04d}`` (reusing that naming, not re-deriving the
 term slug), so this stays correct whatever the slug did.
@@ -56,6 +65,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 import click
@@ -71,6 +81,13 @@ from nemo_manifest import (  # noqa: E402
     summarize,
     write_splits,
     _stem_key,
+)
+from voice_assignment import (  # noqa: E402
+    MODES,
+    PROVENANCE_FILENAME,
+    VOICES_FR_V2,
+    read_provenance,
+    voice_for_row,
 )
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -107,6 +124,64 @@ def detect_grouping(sample: dict, group_by: str | None, group_mode: str | None) 
     return field, mode
 
 
+def resolve_voices(audio_dir: Path, input_path: Path,
+                   name: str) -> tuple[tuple[str, ...] | None, str, str | None]:
+    """Return (roster, mode, group_field) to label this stage's clips with, or None.
+
+    Parameters
+    ----------
+    audio_dir
+        The folder of clips being turned into a manifest.
+    input_path
+        That stage's `generated_dataset.jsonl`.
+    name
+        Stage name, for the log lines.
+
+    Returns
+    -------
+    tuple of (tuple of str or None, str, str or None)
+        The roster to hash against, the assignment mode, and the group field. The
+        roster is None when this audio carries no voice record, and then no `voice`
+        field is written at all.
+
+    The voice is NOT stored per clip by stage 05 (602k rows of a value that is a pure
+    function of the group key would be dead weight), so it is re-derived here. That is
+    only correct against the roster, mode and field synthesis actually used, which is
+    why the answer comes from the file stage 05 left in `audio_dir` and not from this
+    repo's current `VOICES_FR_V2`: editing the roster in code must not silently
+    relabel audio already on disk. A mismatch between the two is logged, loudly,
+    because it means one of them is stale.
+
+    A missing record is v1 audio (one voice, generated before the column existed) or
+    a run whose voice came from the server default, which this process cannot name.
+    Either way guessing would put a wrong name on every row, so the field is omitted.
+    """
+    prov = read_provenance(audio_dir, input_path)
+    if prov is None:
+        logger.warning("[{}] no {} entry in {}: no 'voice' field written "
+                       "(v1 audio, or a run that used the server's default voice)",
+                       name, PROVENANCE_FILENAME, audio_dir)
+        return None, "single", None
+    voices = tuple(prov.get("voices") or ())
+    if not voices:
+        logger.warning("[{}] {} records no roster: no 'voice' field written",
+                       name, PROVENANCE_FILENAME)
+        return None, "single", None
+    mode = prov.get("mode") or "group"
+    if mode not in (*MODES, "single"):
+        logger.error("[{}] {} records mode {!r}, which this version cannot reproduce: "
+                     "no 'voice' field written", name, PROVENANCE_FILENAME, mode)
+        return None, "single", None
+    field = prov.get("group_field")
+    if list(voices) != list(VOICES_FR_V2) and mode != "single":
+        logger.warning("[{}] roster drift: the audio was generated with {} but this "
+                       "repo's VOICES_FR_V2 is {}. Labelling with the RECORDED "
+                       "roster, the one that actually read the clips; one of the two "
+                       "is stale.", name, list(voices), list(VOICES_FR_V2))
+    logger.info("[{}] voices: {} ({} mode, by {})", name, len(voices), mode, field)
+    return voices, mode, field
+
+
 def build_dataset(
     name: str,
     input_path: Path,
@@ -133,9 +208,11 @@ def build_dataset(
     logger.info("[{}] indexing audio in {}", name, audio_dir)
     index = audio_index(audio_dir)
     logger.info("[{}] {} audio clips found", name, len(index))
+    voices, voice_mode, voice_field = resolve_voices(audio_dir, input_path, name)
 
     rows: list[dict] = []
     missing_audio = bad_rows = 0
+    per_voice: Counter = Counter()
     field = mode = None
     with input_path.open() as f:
         for lineno, line in enumerate(f, 1):
@@ -164,7 +241,7 @@ def build_dataset(
             source = (src.get("asr_training_source") or "").strip()
             raw_group = src.get(field, src.get("term_index"))
             category = src.get("category", name)
-            rows.append({
+            row = {
                 "_audio_abs": path,
                 "text": text,
                 "asr_training_source": source,
@@ -174,7 +251,20 @@ def build_dataset(
                 "group_id": f"{name}:{raw_group}",
                 "group_mode": mode,
                 "item_index": src.get("chunk_index", src.get("variant_index")),
-            })
+            }
+            if voices:
+                # Re-derived, not read from the clip: the same hash stage 05 used, over
+                # the roster/field IT recorded (voice_field, which may differ from the
+                # manifest's own `field` when --group-by overrode it: the voice must
+                # follow the audio, not this run's splitting choice). "single" is not a
+                # hashing mode, but a one-name roster returns that name whatever the
+                # key, so group mode reproduces it exactly.
+                row["voice"] = voice_for_row(
+                    src, field=voice_field or field,
+                    mode="group" if voice_mode == "single" else voice_mode,
+                    voices=voices)
+                per_voice[row["voice"]] += 1
+            rows.append(row)
             if limit and len(rows) >= limit:
                 break
 
@@ -184,6 +274,12 @@ def build_dataset(
 
     logger.info("[{}] {} rows matched audio ({} missing audio, {} bad rows); probing durations",
                 name, len(rows), missing_audio, bad_rows)
+    if per_voice:
+        # Printed because an implausible spread here (one voice holding everything, or
+        # a voice missing) is the visible symptom of a roster/field mismatch that the
+        # labels themselves would hide.
+        logger.info("[{}] voice spread: {}", name,
+                    ", ".join(f"{v}={n}" for v, n in sorted(per_voice.items())))
     durations = probe_durations(
         [r["_audio_abs"] for r in rows],
         cache_path=out_dir / ".duration_cache.json",
