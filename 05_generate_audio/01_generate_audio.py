@@ -78,6 +78,7 @@ client). Written with Claude Code.
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import io
 import json
 import re
@@ -151,6 +152,11 @@ VOXTRAL_VOICES = [
 VOXTRAL_FRAME_RATE_HZ = 12.5
 VOXTRAL_DEFAULT_MAX_NEW_TOKENS = 4096  # -> 327.68 s of audio
 TRUNCATION_TOLERANCE_S = 0.5
+# How often the run writes a progress line (with an absolute ETA) to the log, in
+# clips. The tqdm bar is for the terminal; this is for a run measured in days,
+# where the bar is gone after a tmux detach or a scrollback wipe and the only
+# durable answer to "when does this finish" has to be in the log file.
+PROGRESS_LOG_EVERY = 500
 
 
 class TruncatedAudioError(RuntimeError):
@@ -441,8 +447,19 @@ def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
     pool = ThreadPoolExecutor(max_workers=max(1, args.concurrency))
     futures = {pool.submit(synthesize, base_url, text, out, args, voice): out
                for out, text, voice in todo}
+    t_start = time.monotonic()
+    # smoothing=0 makes tqdm report the CUMULATIVE average rate instead of its
+    # default EMA (smoothing=0.3, which weights the last few clips heavily). That
+    # default is unreadable here: clip duration spans 12.5 s (p5) to 24.1 s (p95) on
+    # the dictionary stage, so the instantaneous rate swings by a third between
+    # refreshes and the ETA jumps by hours. The cumulative rate converges within a
+    # few hundred clips and is also the honest basis for an ETA over a multi-day run.
+    # mininterval raises the refresh floor to 2 s: at ~1 clip/s the bar otherwise
+    # redraws on every single completion for days.
+    bar = tqdm(as_completed(futures), total=len(futures), unit="clip", desc="TTS",
+               smoothing=0, mininterval=2.0)
     try:
-        for fut in tqdm(as_completed(futures), total=len(futures), unit="clip", desc="TTS"):
+        for fut in bar:
             out = futures[fut]
             try:
                 elapsed, dur = fut.result()
@@ -459,6 +476,24 @@ def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
                 total_audio += dur
             logger.debug("{} ({}{:.2f}s backend)", out.name,
                          f"{dur:.2f}s audio, " if dur is not None else "", elapsed)
+            # Two cumulative figures the bar's own rate cannot give. "xRT" is audio
+            # seconds produced per wall second: it is the only number comparable
+            # across stages and across server settings (concurrency, cfg_alpha,
+            # euler steps), because clips/h depends on how long the stage's clips
+            # happen to be (dictionary median 18.3 s vs acronyms 8.7 s).
+            elapsed_run = max(1e-9, time.monotonic() - t_start)
+            rate = (generated + failed) / elapsed_run
+            bar.set_postfix_str(f"{rate * 3600:5.0f} clips/h, "
+                                f"{total_audio / elapsed_run:4.1f}x RT", refresh=False)
+            if generated % PROGRESS_LOG_EVERY == 0:
+                left = len(futures) - generated - failed
+                logger.info(
+                    "progress: {}/{} ({:.1f}%), {:.0f} clips/h, {:.1f}x realtime, "
+                    "{:.1f} h of audio written; {} left, ETA {:%Y-%m-%d %H:%M}",
+                    generated + failed, len(futures),
+                    100.0 * (generated + failed) / max(1, len(futures)),
+                    rate * 3600, total_audio / elapsed_run, total_audio / 3600, left,
+                    dt.datetime.now() + dt.timedelta(seconds=left / rate))
     except KeyboardInterrupt:
         # Ctrl-C has to stop the run in seconds, and without this it does not. Every
         # row is submitted up front, so the plain shutdown(cancel_futures=False) below
@@ -477,6 +512,9 @@ def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
         # left to finish (wait=True) because they are seconds away and atomic. On
         # success, wait for the pool normally.
         pool.shutdown(wait=not aborted, cancel_futures=aborted or interrupted)
+        # break/KeyboardInterrupt leave the iterator unexhausted, so tqdm never
+        # closes itself and the last bar line stays stuck on the terminal.
+        bar.close()
     if aborted:
         # Everything not written counts as failed so the run exits non-zero; a
         # re-run resumes cheaply via the skip-existing logic above.
