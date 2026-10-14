@@ -118,6 +118,7 @@ from cfg_sidecar import (  # noqa: E402
     CFG_ALPHA_STEP,
     SIDECAR_FILENAME,
     ladder_cfg_alpha,
+    load_cfg_alphas,
     record_cfg_alpha,
     sidecar_path,
 )
@@ -482,13 +483,23 @@ def synthesize_with_retries(
                                dur if dur is not None else float("nan"),
                                f", cfg_alpha {cfg_alpha}" if _off_base(cfg_alpha, base)
                                else "")
-            if _off_base(cfg_alpha, base):
+            # A stem that ALREADY has a row gets a new one even when this take
+            # landed on the run's own value, because the readers take the last row
+            # for a stem: 02_audit_durations.py deletes a clip (that is how it
+            # repairs one) and the next resume re-draws it, so without this an
+            # ex-1.6 clip now drawn at 2.0 would keep publishing 1.6. The lookup is
+            # the PRE-RUN snapshot of the sidecar (load_cfg_alphas caches per
+            # directory and this run's own appends never enter that cache), which is
+            # exactly the question being asked: did someone else record this clip?
+            stale = base is not None and out.stem in load_cfg_alphas(out.parent)
+            if _off_base(cfg_alpha, base) or stale:
                 # Append BEFORE returning, so a clip on disk always has its row: a
                 # crash between the two would publish a 1.6 clip as a 2.0 one.
                 try:
                     record_cfg_alpha(out.parent, stem=out.stem, cfg_alpha=cfg_alpha,
                                      voice=voice or args.voice, attempt=attempt,
-                                     attempts=attempts, reason=reason)
+                                     attempts=attempts,
+                                     reason=reason or "re-drawn at the run's cfg_alpha")
                 except OSError as e:  # noqa: BLE001 - provenance must not fail a clip
                     logger.error("{}: drawn at cfg_alpha {} but the sidecar could not "
                                  "be written ({}); the manifest will call it {}",

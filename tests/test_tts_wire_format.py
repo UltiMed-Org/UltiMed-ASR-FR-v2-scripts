@@ -358,6 +358,26 @@ def test_stage05_retries_a_duration_rejection_down_the_cfg_ladder() -> None:
         assert attempts2 == 3 and cfg_used2 is None, (attempts2, cfg_used2)
         assert seen_cfg == [None, None, None], seen_cfg
 
+        # A clip that ALREADY has a sidecar row and is now re-drawn at the run's own
+        # value must append a fresh row saying so: 02_audit_durations.py repairs a bad
+        # clip by DELETING it, stage 05's resume regenerates it, and the readers take
+        # the last row, so a stale 1.6 would otherwise outlive the 1.6 audio.
+        # The pre-run snapshot is cached per directory, and stage 05 imported
+        # utils/cfg_sidecar BY NAME, so that instance (not the by-path copy loaded
+        # above for the ladder assertions) owns the cache this lookup reads.
+        sys.modules["cfg_sidecar"].clear_cache()
+        out3 = Path(td) / "clip3.flac"
+        cfg_sidecar.record_cfg_alpha(out3.parent, stem=out3.stem, cfg_alpha=1.6)
+        args.cfg_alpha = 2.0
+        calls["n"] = 100  # every take is now a plausible 4 s, accepted first try
+        _, _, attempts3, cfg_used3 = tts.synthesize_with_retries(
+            "http://stub", text, out3, args)
+        assert attempts3 == 1 and cfg_used3 == 2.0, (attempts3, cfg_used3)
+        rows3 = [json.loads(ln) for ln in
+                 (out3.parent / "cfg_alpha_sidecar.jsonl").read_text().splitlines()]
+        last = [r for r in rows3 if r["stem"] == "clip3"][-1]
+        assert last["cfg_alpha"] == 2.0, rows3
+
         # The ladder is also floored: five retries from 2.0 at -0.2 reach 1.2 and stop
         # there, never CFG off.
         assert [cfg_sidecar.ladder_cfg_alpha(start=2.0, attempt=i) for i in range(6)] \
