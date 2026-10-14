@@ -101,7 +101,18 @@ done
 
   (4) **A clip can also be too SHORT**, and that failure is just as silent: the backend emits a stop token early and answers 200 with audio that sounds complete on its own. `--floor-chars-per-second` (default 30, i.e. `chars/30` seconds) rejects it, with the budget on or off. It flags none of the 602,813 v1 clips nor any of the 29,141 v2 ones, so it only ever fires on a gross failure; stage 06's STT QC remains the real quality gate.
 
-  (5) **Rejections are retried in place**, `--retries` (default 2, so three attempts), at the **same cfg_alpha**. The only randomness in Voxtral's pipeline is the fresh Gaussian each frame's flow-matching ODE starts from, so re-sending the same text is a genuinely new take; a rambling one is usually a sampling accident. Not a cfg ladder like stage 06's: a per-clip cfg_alpha would contradict the flat `cfg_alpha` column stage 06 writes into the manifest, which needs a sidecar first. Each attempt logs `attempt N/3 rejected, retrying: over budget: ...` (or `implausibly short: ...`), a clip that exhausts its attempts logs `giving up after 3 attempts`, and the run ends with `duration rejections: N over budget, M implausibly short, K saved by a retry` beside the `done:` line.
+  (5) **Rejections are retried in place**, `--retries` (default 2, so three attempts), and each retry goes **one rung down the cfg_alpha ladder**: 2.0, 1.8, 1.6, clamped at `--cfg-alpha-floor` 1.2 (`--cfg-alpha-step 0` pins them all at `--cfg-alpha`, which was the behaviour before 2026-10-14). Two things are being exploited. The only randomness in Voxtral's pipeline is the fresh Gaussian each frame's flow-matching ODE starts from, so re-sending the same text is already a genuinely new take, and a rambling one is usually a sampling accident: 13 rejected attempts in a live run became 10 clips saved by a retry. But a text can derail **reproducibly**, and a new sample of the same draw never saves it: `000863_0005_acineux` (339 chars, h_frm_chf) ran over budget on all three attempts of two separate runs. 2.0 is the **top** of the measured band (1.2-2.0), so a clip that rambled there is over-guided and the room is below it.
+
+  Each attempt logs `attempt N/3 rejected, retrying at cfg_alpha 1.8: over budget: ...` (or `implausibly short: ...`), a clip that exhausts its attempts logs `giving up after 3 attempts`, and the run ends with `duration rejections: N over budget, M implausibly short, K saved by a retry` plus, when any clip descended, `cfg_alpha ladder: N clip(s) accepted below 2.0 (3 at 1.8, 1 at 1.6), recorded in .../cfg_alpha_sidecar.jsonl`, both beside the `done:` line.
+
+  (6) **A clip drawn below the run's cfg_alpha is recorded per clip**, in `cfg_alpha_sidecar.jsonl` **beside the audio** (`utils/cfg_sidecar.py`, shared with stage 06). This is what unblocked the ladder: the dataset publishes one `cfg_alpha` per row, so a clip quietly drawn at 1.6 would ship as a 2.0 clip, and a provenance lie is worse than a missing clip. One JSON line per such take (stem, cfg_alpha, voice, attempt, reason), append-only, **last row for a stem wins**; stage 06's `original_cfg_alpha_for` reads it and falls back to `--original-cfg-alpha` for the >99% of clips with no row. A clip that already has a row gets a fresh one even when it is re-drawn at the run's value, so a clip deleted by `02_audit_durations.py` (that is how the audit repairs one) and regenerated at 2.0 cannot keep publishing 1.6. Check it with:
+
+  ```bash
+  wc -l /media/.../v2/dictionary/cfg_alpha_sidecar.jsonl        # how many clips descended
+  jq -r '.cfg_alpha' .../cfg_alpha_sidecar.jsonl | sort | uniq -c   # and onto which rungs
+  ```
+
+  Hundreds of clips sitting on the floor (1.2) is the signal to look at the **texts** (respelling, `respell_for_tts`) rather than to draw again.
 
   Clips that fail every attempt stay missing, so **finish every stage with a plain re-run of the same command** to fill the gaps.
 
@@ -131,7 +142,7 @@ CFG_ALPHA_START=2.0 CFG_ALPHA_STEP=-0.2 CFG_ALPHA_FLOOR=1.2 ./driver.sh
 
 Those three are already the defaults; they are spelled out because the ladder's direction is the thing to not get wrong (see `README_alternating_improvement.md` for the mode alternation, which switches the docker server between the STT and TTS passes).
 
-The clips that keep their original audio get `--original-cfg-alpha`, which is **2.0** since commit `8faef7d`. That value is written into the `cfg_alpha` column of every non-regenerated row, i.e. the large majority of 600k rows, so running over **v1** audio needs `--original-cfg-alpha 1.3` passed explicitly.
+The clips that keep their original audio get `--original-cfg-alpha`, which is **2.0** since commit `8faef7d`. That value is written into the `cfg_alpha` column of every non-regenerated row, i.e. the large majority of 600k rows, so running over **v1** audio needs `--original-cfg-alpha 1.3` passed explicitly. The exception is a clip stage 05 drew lower: `original_cfg_alpha_for` resolves the clip, reads `cfg_alpha_sidecar.jsonl` beside it (step 1 item 6) and publishes that rung instead, so the column stays true for the handful of clips that descended the ladder.
 
 
 ## 3. Manifests (stage 99), and the four stale-QC rules

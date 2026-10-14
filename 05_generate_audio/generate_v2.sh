@@ -56,8 +56,13 @@ URL="${URL:-http://127.0.0.1:8003}"
 TOKEN_BUDGET="${TOKEN_BUDGET:-1}"
 # Extra attempts for a clip whose duration is rejected. Each attempt is a genuinely
 # new take (Voxtral's only randomness is the fresh Gaussian each frame's flow-matching
-# ODE starts from), at the same cfg_alpha, so one retry usually fixes a rambling take.
-# RETRIES=0 reverts to "one attempt, then leave it for the next re-run".
+# ODE starts from) AND one rung lower on the cfg_alpha ladder (2.0, 1.8, 1.6..., floor
+# 1.2), so a rambling take is usually fixed by one retry and a reproducibly bad text
+# gets a genuinely different draw. Any clip that lands below $CFG_ALPHA is recorded in
+# cfg_alpha_sidecar.jsonl beside the audio, which is what stage 06 publishes as that
+# row's cfg_alpha. Pass --cfg-alpha-step 0 to the script to pin every retry at
+# $CFG_ALPHA instead. RETRIES=0 reverts to "one attempt, then leave it for the next
+# re-run".
 RETRIES="${RETRIES:-2}"
 # An `if/else` rather than `[ ... ] && ...`: the script runs under `set -e`, where a
 # trailing test that FAILS is the last command of the line and kills the run. The

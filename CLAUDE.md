@@ -492,19 +492,42 @@ p1 rate and its floor 1.45x its fastest observed clip; see
 `utils/frame_budget.py`'s docstring for the table and the derivation, and
 `docs/V2_REGENERATION_RUNBOOK.md` step 1.
 
-A rejection is retried in place, `--retries` (default 2), **at the same
-cfg_alpha**: re-sending the same text is a genuinely new take (Voxtral's only
+A rejection is retried in place, `--retries` (default 2), and each retry walks
+**one rung down the cfg_alpha ladder** (`utils/cfg_sidecar.py`, since
+2026-10-14): 2.0, then 1.8, then 1.6, clamped at 1.2. Two different effects are
+at work. Re-sending the same text is already a genuinely new take (Voxtral's only
 randomness is the fresh Gaussian each frame's flow-matching ODE starts from), and
-a per-attempt cfg would contradict the flat `cfg_alpha` column stage 06 writes
-into the manifest. A clip that fails every attempt stays missing for the next
+that alone saves most rejected clips: measured live, 13 rejected attempts became
+10 clips saved by a retry. It cannot save a text that derails **reproducibly**
+(`000863_0005_acineux`, 339 chars, h_frm_chf, ran over budget on all three
+attempts of two separate runs), and that is what the lower rung is for: 2.0 is
+the **top** of the measured band, so a clip that rambled there is over-guided and
+the room is below it.
+
+The ladder was blocked until 2026-10-14 on provenance, because the dataset ships
+one flat `cfg_alpha` per row and a clip quietly drawn at 1.6 would have been
+published as a 2.0 clip. So every accepted take that lands off the run's value
+appends a row to `cfg_alpha_sidecar.jsonl` **beside the audio** (stem, value,
+voice, attempt, reason), and stage 06's `original_cfg_alpha_for` reads it when it
+writes that column, falling back to `--original-cfg-alpha` for the >99% of clips
+with no row. The file is append-only (stage 05 writes it from a thread pool), the
+**last** row for a stem wins, and a clip that already has a row gets a new one
+even when it is re-drawn at the run's own value, so a clip deleted by
+`02_audit_durations.py` and regenerated at 2.0 cannot keep publishing 1.6. A run
+without `--cfg-alpha` has no rung to start from (the server's startup value may
+already be below 2.0) and keeps the old same-request retries. `utils/cfg_sidecar.py`
+owns the ladder arithmetic and the file format for **both** stages, and stage 06's
+`--cfg-alpha-start/-step/-floor/--original-cfg-alpha` defaults come from its
+constants. A clip that fails every attempt stays missing for the next
 re-run, which is why each stage ends with a plain re-run of the same command.
 `02_audit_durations.py` applies the same bounds to clips ALREADY on disk and
 deletes the offenders (dry run by default), resolving the per-voice rates exactly
 as the generator does so its verdicts are identical. That is how the clips
 generated before any of this existed were cleaned: 51 over budget of 29,141
 under the first global band, then 12 more of 32,605 once the bounds became per
-voice. Covered by `tests/test_audio_truncation.py` and the three duration
-checks in `tests/test_tts_wire_format.py`.
+voice. Covered by `tests/test_audio_truncation.py`, the duration and ladder
+checks in `tests/test_tts_wire_format.py`, and `tests/test_cfg_sidecar.py` (the
+rungs, the sidecar round trip and stage 06 publishing the per-clip value).
 
 **Voices (v2).** Batch mode spreads the corpus over the ten French voices of
 `utils/voice_assignment.py` instead of reading all of it with one: the voice is a
@@ -523,10 +546,13 @@ resume stability is identical either way. The run logs the spread and writes
 were chosen by ear in the CrispASR repo; see the roster entry under "known
 duplication" and the `utils/voice_assignment.py` entry above for why the assignment
 is a hash. v2 is generated at Voxtral `cfg_alpha` **2.0** (the CrispASR compose
-default since the 2026-10-13 sweep), and stage 06's retry ladder walks **down** from
-it (2.0, 1.8, 1.6, 1.4, floor 1.2, commit `bd062a0`): below ~1.2 the decoder stops
-following the text, and at 3.0+ runs distort and increasingly fail to terminate at
-all. `tests/test_voice_column.py`
+default since the 2026-10-13 sweep), and **both** stages' retry ladders walk **down**
+from it (2.0, 1.8, 1.6, 1.4, floor 1.2; stage 06 since commit `bd062a0`, stage 05
+since 2026-10-14, arithmetic shared in `utils/cfg_sidecar.py`): below ~1.2 the decoder
+stops following the text, and at 3.0+ runs distort and increasingly fail to terminate
+at all. A clip stage 05 ends up drawing below 2.0 is recorded per clip in
+`cfg_alpha_sidecar.jsonl` beside the audio, which is what keeps the published
+`cfg_alpha` column honest (see the stage 05 entry). `tests/test_voice_column.py`
 (`uv run tests/...`) pins that the voice stage 05 sent is the voice stage 99 writes.
 
 ### `06_hotfixes/` (active)

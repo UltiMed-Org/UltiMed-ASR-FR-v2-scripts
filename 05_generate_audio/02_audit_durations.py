@@ -18,6 +18,12 @@ generator's resume already skips every clip whose stem exists and regenerates ev
 stem that does not, so removing a bad clip is the whole fix and this script needs no
 TTS client, no server and no voice logic of its own. Run it, then re-run stage 05.
 
+The deleted clip's row in `cfg_alpha_sidecar.jsonl` (the per-clip cfg_alpha stage 05
+records for a clip it had to draw below the run's value) is left alone on purpose:
+nothing here can know what the replacement will be drawn at, and stage 05 appends a
+fresh row for any stem that already has one, whatever rung it lands on. Since the
+readers take the LAST row for a stem, the regenerated clip's value always wins.
+
     uv run 05_generate_audio/02_audit_durations.py                    # dry run, all stages
     uv run 05_generate_audio/02_audit_durations.py --stage 01_dictionnary
     uv run 05_generate_audio/02_audit_durations.py --apply            # actually delete
