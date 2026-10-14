@@ -97,6 +97,26 @@ The scoring is stage 06's (`06_hotfixes/01_compute_stt.py::normalize_for_scoring
 and `compute_metrics`), imported rather than reimplemented, so "over the gate"
 means the same thing here and in the real QC loop.
 
+A flagged row also carries `defect`, the SHAPE of the failure, from the two
+texts alone and at no extra cost: `loop` (a word n-gram repeats far more than
+the label's own repetition does, i.e. the model derailed into saying the same
+thing over and over), `overrun` (materially more words, new material rather
+than a repeat), `truncated` (materially fewer), `wrong_words` (the same amount
+of speech at a normal rate, saying something else). `--defect-mix` reports the
+mix over the rows already on disk without transcribing anything, so it needs
+neither the model nor the audio and can run while the real QC holds the CPU:
+
+```bash
+./03_qc_cpu_stt.py --stage 01_dictionnary --defect-mix --log-file ""
+```
+
+The split matters because it bounds what a cheaper detector could ever replace.
+Of the first 51 flagged dictionary clips (2026-10-15), 73% were `wrong_words`,
+which is fluent speech with no acoustic signature at all, so only STT can see
+it. Among the severe ones (CER >= 0.25) it becomes 42% `wrong_words` against
+50% `loop` or `overrun`, which a waveform-only detector can find. Every loop
+and overrun in that batch belonged to one voice, `h_frm_chf`.
+
 **This is not a quality gate.** The default model is fine-tuned on v1 of this
 very dataset, so it has been taught this corpus's vocabulary and will agree
 with audio a neutral listener would reject. Read it as a gross-error detector

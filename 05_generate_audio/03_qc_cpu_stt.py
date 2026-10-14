@@ -172,6 +172,112 @@ DEFAULT_CER_GATE = 0.08
 DEFAULT_TAIL_CER_GATE = 0.12
 
 
+#: Defect shapes a flagged clip can have, cheapest-to-act-on first. See
+#: `classify_defect` for what separates them and why the split is worth recording.
+DEFECT_SHAPES = ("loop", "overrun", "truncated", "wrong_words")
+
+#: Immediately-repeating n-gram sizes the loop test looks for. A derailed take
+#: repeats whole words, so word n-grams find it; 2 to 5 covers "de la" through a
+#: short clause, and anything longer is already caught by the shorter windows.
+_LOOP_NGRAMS = (2, 3, 4, 5)
+
+#: How many times an n-gram must occur before it is a loop rather than ordinary
+#: French repetition, and how far it must beat the LABEL's own repetition. Both
+#: are needed: clinical passages legitimately repeat "de la" or a drug name, so an
+#: absolute count alone flags healthy clips.
+_LOOP_MIN_COUNT = 3
+_LOOP_MARGIN = 1
+
+#: Transcript-to-label word-count ratios that mean the take did not end where the
+#: text did. Wide on purpose: STT word counts drift a few percent on their own.
+_SHORT_RATIO = 0.75
+_LONG_RATIO = 1.30
+
+
+def classify_defect(reference: str, transcript: str) -> str:
+    """Name the SHAPE of a flagged clip's failure, from the two texts alone.
+
+    The CER gate answers "is this clip wrong"; this answers "wrong how", which is a
+    different and cheaper question, and the two disagree about what is worth building
+    next. Four shapes, and only the first two leave a trace in the waveform:
+
+    ``loop``
+        A word n-gram repeats more than the label does: the model derailed into
+        saying the same thing over and over. Audible as the repetitive mumbling, and
+        the one shape a self-similarity detector can find without transcribing.
+    ``overrun``
+        Materially more words than the label, with no single n-gram dominating: the
+        model kept talking, inventing new material rather than repeating.
+    ``truncated``
+        Materially fewer words: the take stopped early or skipped a span.
+    ``wrong_words``
+        The same amount of speech, at a normal rate, saying something else. This has
+        no acoustic signature by construction, so STT is the only thing that can see
+        it.
+
+    Measured on the first 51 flagged dictionary clips (2026-10-15, `--defect-mix`):
+    73% wrong_words, 16% loop, 8% overrun, 4% truncated. Restricted to the severe ones
+    (CER >= 0.25) it becomes 42% wrong_words against 50% loop or overrun. Every loop
+    and overrun in that first batch belonged to one voice, `h_frm_chf`. That is the
+    whole reason this field exists: it bounds how much of the QC catch a cheap
+    acoustic pre-filter could ever cover, the bound depends on severity, and it points
+    at a voice rather than at the corpus, so the mix has to be watched over time
+    rather than measured once.
+
+    Parameters
+    ----------
+    reference
+        The label the clip was generated from.
+    transcript
+        What the STT model heard.
+
+    Returns
+    -------
+    str
+        One of `DEFECT_SHAPES`.
+
+    Examples
+    --------
+    >>> classify_defect("le patient tousse", "le patient tousse tousse tousse tousse")
+    'loop'
+    >>> classify_defect("le patient tousse", "le patient")
+    'truncated'
+    >>> classify_defect("le patient tousse", "la patiente touche")
+    'wrong_words'
+    """
+    # The same normaliser the CER gate scores with, so a shape is judged on exactly
+    # the token stream that produced the number that flagged the clip.
+    ref = _stt.normalize_for_scoring(reference or "").split()
+    hyp = _stt.normalize_for_scoring(transcript or "").split()
+    if not hyp:
+        return "truncated"
+    ratio = len(hyp) / max(len(ref), 1)
+    hyp_rep, ref_rep = _max_ngram_count(hyp), _max_ngram_count(ref)
+    if hyp_rep >= _LOOP_MIN_COUNT and hyp_rep > ref_rep + _LOOP_MARGIN:
+        return "loop"
+    if ratio < _SHORT_RATIO:
+        return "truncated"
+    if ratio > _LONG_RATIO:
+        return "overrun"
+    return "wrong_words"
+
+
+def _max_ngram_count(tokens: list[str]) -> int:
+    """How often the most repeated word n-gram occurs, over `_LOOP_NGRAMS` sizes.
+
+    Returns the plain count rather than a rate: a loop is three or more occurrences
+    whether the clip is 30 s or 70 s, while a rate would shrink as the clip grows and
+    hide exactly the long derailments that matter most.
+    """
+    best = 0
+    for n in _LOOP_NGRAMS:
+        if len(tokens) < n:
+            break
+        counts = Counter(tuple(tokens[i:i + n]) for i in range(len(tokens) - n + 1))
+        best = max(best, counts.most_common(1)[0][1])
+    return best
+
+
 def is_sampled(stem: str, *, percent: float, salt: str = QC_SAMPLE_SALT) -> bool:
     """Whether a clip belongs to the deterministic sample.
 
@@ -387,10 +493,12 @@ class Stats:
     started: float = field(default_factory=time.monotonic)
     cer_by_voice: dict[str, list[float]] = field(default_factory=dict)
     over_by_voice: Counter = field(default_factory=Counter)
+    defects: Counter = field(default_factory=Counter)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def add(self, *, reason: str, voice: str | None, cer: float | None,
-            over: bool, duration: float, stt_s: float) -> int:
+            over: bool, duration: float, stt_s: float,
+            defect: str | None = None) -> int:
         """Fold one finished check in, and return the new total.
 
         Locked because every worker writes here and ``+=`` on an attribute is a
@@ -407,6 +515,8 @@ class Stats:
             if over:
                 self.over_gate += 1
                 self.over_by_voice[voice or "?"] += 1
+            if defect:
+                self.defects[defect] += 1
             if cer is not None:
                 self.cer_by_voice.setdefault(voice or "?", []).append(cer)
             return self.checked
@@ -437,6 +547,14 @@ class Stats:
             f"{100 * self.stt_s / (wall * max(workers, 1)):.0f}% duty cycle over "
             f"{wall / 3600:.2f} h",
         ]
+        if self.defects:
+            total = sum(self.defects.values())
+            shapes = ", ".join(
+                f"{self.defects[s]} {s} ({100 * self.defects[s] / total:.0f}%)"
+                for s in DEFECT_SHAPES if self.defects.get(s))
+            # Reported because only loop/overrun are visible to a cheap acoustic
+            # detector; see `classify_defect`.
+            out.append(f"qc defect mix ({total} flagged): {shapes}")
         for voice, cers in sorted(self.cer_by_voice.items()):
             ordered = sorted(cers)
             p90 = ordered[min(len(ordered) - 1, int(0.9 * len(ordered)))]
@@ -685,19 +803,99 @@ def check_clip(job: Job, model, watch: StageWatch, ctx: Context) -> None:
     if over or cfg.keep_transcripts:
         out_row["transcript"] = transcript
         out_row["reference"] = reference
+    # Free: pure string work on text already in hand, and it is what turns a pile of
+    # CER numbers into "how many of these are the mumbling, how many are fluent and
+    # wrong". Only stored where it means something, i.e. on a flagged clip.
+    defect = classify_defect(reference, transcript) if over else None
+    if defect:
+        out_row["defect"] = defect
     ctx.write(watch.audio / cfg.out_name, out_row)
 
     total = ctx.stats.add(reason=job.reason, voice=voice, cer=cer, over=over,
-                          duration=duration, stt_s=stt_s)
+                          duration=duration, stt_s=stt_s, defect=defect)
     if cfg.summary_every and total % cfg.summary_every == 0:
         for line in ctx.stats.lines(workers=cfg.workers):
             logger.info(line)
     if over:
-        logger.warning("{} [{}, {}]: CER {} tail {} ({:.1f}s) -> {}",
-                       job.stem, job.reason, voice,
+        logger.warning("{} [{}, {}, {}]: CER {} tail {} ({:.1f}s) -> {}",
+                       job.stem, job.reason, voice, defect,
                        "n/a" if cer is None else f"{cer:.3f}",
                        "n/a" if tail is None else f"{tail:.3f}",
                        duration, transcript[:160])
+
+
+def report_defect_mix(paths: dict[str, Path], *, severe_cer: float = 0.25) -> int:
+    """Print the defect mix of sidecar rows ALREADY on disk, and return the row count.
+
+    A pure re-read: it classifies from the `transcript`/`reference` the rows already
+    carry, so it needs neither the ONNX model nor the audio, and it costs milliseconds
+    over tens of thousands of rows. That is what makes it the right tool for rows
+    written before `classify_defect` existed, and for asking the mix question of a
+    finished stage without re-transcribing anything.
+
+    The split at `severe_cer` is the point of the report rather than a detail: the mix
+    is dominated by `wrong_words` overall but by `loop`/`overrun` among the severe
+    clips, so one global percentage would answer the question wrongly in both
+    directions.
+
+    Parameters
+    ----------
+    paths
+        Stage name -> sidecar file. Missing files are reported and skipped.
+    severe_cer
+        CER at or above which a flagged clip counts as a derailment rather than a
+        wording miss.
+
+    Returns
+    -------
+    int
+        How many flagged rows carried enough text to classify.
+    """
+    total = 0
+    for name, path in sorted(paths.items()):
+        if not path.is_file():
+            logger.warning("{}: no {}", name, path.name)
+            continue
+        mix_all: Counter = Counter()
+        mix_severe: Counter = Counter()
+        by_voice: dict[str, Counter] = {}
+        rows = flagged = 0
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue              # a torn final line, same as everywhere else here
+            rows += 1
+            if not row.get("over_gate"):
+                continue
+            flagged += 1
+            if not row.get("transcript") or not row.get("reference"):
+                continue
+            shape = row.get("defect") or classify_defect(row["reference"],
+                                                         row["transcript"])
+            mix_all[shape] += 1
+            if (row.get("cer") or 0.0) >= severe_cer:
+                mix_severe[shape] += 1
+            by_voice.setdefault(row.get("voice") or "?", Counter())[shape] += 1
+            total += 1
+
+        def fmt(mix: Counter) -> str:
+            n = sum(mix.values())
+            if not n:
+                return "none"
+            return ", ".join(f"{mix[s]} {s} ({100 * mix[s] / n:.0f}%)"
+                             for s in DEFECT_SHAPES if mix.get(s))
+
+        logger.info("{}: {} row(s), {} flagged, {} classified", name, rows, flagged,
+                    sum(mix_all.values()))
+        logger.info("  all flagged     : {}", fmt(mix_all))
+        logger.info("  CER >= {:.2f} only: {}", severe_cer, fmt(mix_severe))
+        for voice, mix in sorted(by_voice.items()):
+            logger.info("  {:<12} {}", voice, fmt(mix))
+    return total
 
 
 def worker_loop(model, ctx: Context) -> None:
@@ -773,6 +971,11 @@ def worker_loop(model, ctx: Context) -> None:
 @click.option("--keep-transcripts", is_flag=True,
               help="Store the transcript of every checked clip, not just the flagged "
                    "ones (~8 MB per 25k clips).")
+@click.option("--defect-mix", is_flag=True,
+              help="Do not transcribe anything: re-read the sidecar rows already on "
+                   "disk and report what SHAPE their failures have (loop, overrun, "
+                   "truncated, wrong_words), overall and among the severe ones. Needs "
+                   "neither the model nor the audio.")
 @click.option("--out-name", default=QC_FILENAME, show_default=True,
               help="Output filename, written in each stage's audio directory.")
 @click.option("--log-file", default="qc_cpu_stt.log", show_default=True,
@@ -782,7 +985,7 @@ def main(stages: tuple[str, ...], model_dir: Path, quantization: str,
          sample_percent: float, do_retries: bool, threads: int, workers: int,
          nice_level: int, poll_seconds: float, max_queue: int, cer_threshold: float,
          tail_cer_threshold: float, reference_key: str, backfill: bool, once: bool,
-         summary_every: int, keep_transcripts: bool, out_name: str,
+         summary_every: int, keep_transcripts: bool, defect_mix: bool, out_name: str,
          log_file: str) -> None:
     """STT-check a sample of a running stage-05 generation on the spare CPU cores."""
     logger.remove()
@@ -825,6 +1028,12 @@ def main(stages: tuple[str, ...], model_dir: Path, quantization: str,
                                    audio=audio.resolve())
     if not watches:
         raise click.ClickException("no stage to follow")
+
+    if defect_mix:
+        n = report_defect_mix({w.name: w.audio / out_name for w in watches.values()})
+        if not n:
+            logger.warning("no flagged row carried a transcript to classify")
+        return
 
     ctx = Context(cfg, watches)
 

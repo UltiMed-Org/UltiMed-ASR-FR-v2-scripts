@@ -268,6 +268,62 @@ def test_manifest_row_is_found_by_the_clip_name() -> None:
         assert watch.handle is handle
 
 
+def test_classify_defect_shapes() -> None:
+    """Each failure shape is named from the two texts, and a clean-ish clip is not a
+    loop just because clinical French repeats itself."""
+    ref = ("Le patient presente une douleur thoracique. Le patient a recu "
+           "du paracetamol et de la morphine.")
+    # A derailed take says the same clause over and over.
+    assert qc.classify_defect(ref, ref + " et de la morphine et de la morphine "
+                              "et de la morphine") == "loop"
+    # The LABEL's own repetition must not count: here both texts repeat "de la"
+    # exactly as often, so the difference is wording, not a loop.
+    assert qc.classify_defect("de la fievre de la toux de la douleur",
+                              "de la fievre de la tour de la douceur") == "wrong_words"
+    # Stopped early / kept going, with no single clause dominating.
+    assert qc.classify_defect(ref, "Le patient presente une douleur") == "truncated"
+    assert qc.classify_defect(
+        ref, ref + " Il a egalement signale des nausees, une asthenie marquee, "
+        "une anorexie et des sueurs nocturnes abondantes depuis plusieurs jours "
+        "sans fievre associee ni perte de poids documentee.") == "overrun"
+    # Same length, different words: the shape that no acoustic detector can see.
+    assert qc.classify_defect("le patient tousse", "la patiente touche") == "wrong_words"
+    # An empty transcript is a truncation, not a crash.
+    assert qc.classify_defect(ref, "") == "truncated"
+    assert qc.classify_defect(ref, None) == "truncated"
+    # Every answer is one of the documented shapes.
+    assert set(qc.DEFECT_SHAPES) >= {
+        qc.classify_defect(ref, h) for h in (ref, "", "a a a a a a", ref * 3)}
+
+
+def test_defect_mix_report_reads_existing_rows() -> None:
+    """The report classifies rows written before the `defect` field existed, keeps the
+    stored shape when there is one, and survives a torn final line."""
+    rows = [
+        # Clean rows are counted but never classified.
+        {"stem": "a", "over_gate": False, "cer": 0.01, "voice": "v1"},
+        # Flagged, no text: counted as flagged, not classifiable.
+        {"stem": "b", "over_gate": True, "cer": 0.4, "voice": "v1"},
+        # Flagged with text, no stored shape: classified on the fly.
+        {"stem": "c", "over_gate": True, "cer": 0.4, "voice": "v1",
+         "reference": "le patient tousse",
+         "transcript": "le patient tousse tousse tousse tousse"},
+        # A stored shape is trusted rather than recomputed.
+        {"stem": "d", "over_gate": True, "cer": 0.3, "voice": "v2",
+         "defect": "overrun", "reference": "x y z", "transcript": "x y z"},
+        # Below the severity split, so it lands in the overall mix only.
+        {"stem": "e", "over_gate": True, "cer": 0.09, "voice": "v2",
+         "reference": "le patient tousse", "transcript": "la patiente touche"},
+    ]
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "qc_stt_sidecar.jsonl"
+        path.write_text("".join(json.dumps(r) + "\n" for r in rows)
+                        + '{"stem": "torn", "over_g')
+        assert qc.report_defect_mix({"st": path}) == 3
+        # A missing file is reported, not fatal.
+        assert qc.report_defect_mix({"st": Path(td) / "nope.jsonl"}) == 0
+
+
 def main() -> None:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

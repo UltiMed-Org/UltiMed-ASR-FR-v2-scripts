@@ -550,10 +550,20 @@ too), without which the per-voice table would be reporting sampling bias.
 **Not a quality gate:** the default checkpoint is fine-tuned on v1 of this very
 dataset, so it is circular and only trustworthy for gross errors (dropped text,
 looping, wrong text, truncation); `--model-dir` at the base export is the
-impartial read. Covered by `tests/test_qc_cpu_stt.py` (the sample draw and its
-independence from the voice assignment, the sidecar tail including a torn line
-and a re-drawn stem, the resume, and the queue policy that drops stale samples
-but never a retried take).
+impartial read. A flagged row also carries `defect`, the shape of the failure
+derived from the two texts at no cost (`loop`, `overrun`, `truncated`,
+`wrong_words`), and `--defect-mix` reports that mix over the rows already on
+disk without transcribing anything (no model, no audio, so it runs while the
+real QC holds the CPU). The mix is what bounds any cheaper detector: on the
+first 51 flagged dictionary clips (2026-10-15) 73% were `wrong_words`, fluent
+speech with no acoustic signature, but among the severe ones (CER >= 0.25) 50%
+were `loop` or `overrun`, which a waveform-only detector can find. All of them
+came from one voice, `h_frm_chf`. Covered by `tests/test_qc_cpu_stt.py` (the
+sample draw and its independence from the voice assignment, the sidecar tail
+including a torn line and a re-drawn stem, the resume, the queue policy that
+drops stale samples but never a retried take, the four defect shapes including
+a label that repeats itself, and the report re-reading rows written before the
+field existed).
 
 **Voices (v2).** Batch mode spreads the corpus over the ten French voices of
 `utils/voice_assignment.py` instead of reading all of it with one: the voice is a
