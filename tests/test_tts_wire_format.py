@@ -36,6 +36,7 @@ This file was written with Claude Code.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -274,19 +275,24 @@ def test_stage05_rejects_an_implausibly_short_clip() -> None:
     print("OK stage 05 rejects a clip too short to hold its own text")
 
 
-def test_stage05_retries_a_duration_rejection_at_the_same_cfg() -> None:
-    """A rejected take is retried in place, and the retry is a genuinely new take.
+def test_stage05_retries_a_duration_rejection_down_the_cfg_ladder() -> None:
+    """A rejected take is retried in place, one rung lower, and the rung is recorded.
 
     The retry is worth GPU time only because the flow-matching noise is fresh per
     request, so re-sending the same text is a new sample rather than a replay. The
-    cfg_alpha must NOT change between attempts: the dataset's cfg_alpha column is
-    written as one flat value, and nothing records a per-clip one.
+    ladder is what saves the texts that derail *reproducibly*: cfg_alpha walks
+    2.0 -> 1.8 -> 1.6 (clamped at 1.2), and because the dataset publishes one
+    cfg_alpha per row, the take that lands off the run's value MUST leave a sidecar
+    row beside the audio, or the clip would ship under the wrong value.
     """
     import io
     import tempfile
     import wave
 
     tts = load_module(TTS_PATH, "tts_budget_retry")
+    # The ladder itself lives in utils/ because stage 06 walks the same one; loading
+    # it by path here keeps the test honest about WHERE the numbers come from.
+    cfg_sidecar = load_module(HERE.parent / "utils" / "cfg_sidecar.py", "cfg_sidecar_t")
 
     def wav_of(seconds: float) -> bytes:
         buf = io.BytesIO()
@@ -314,10 +320,19 @@ def test_stage05_retries_a_duration_rejection_at_the_same_cfg() -> None:
                              budget_chars_per_second=5.0, floor_chars_per_second=30.0,
                              timeout=600.0, max_audio_seconds=327.68, retries=2,
                              cfg_alpha=2.0)
-        elapsed, dur, attempts = tts.synthesize_with_retries("http://stub", text, out, args)
+        elapsed, dur, attempts, cfg_used = tts.synthesize_with_retries(
+            "http://stub", text, out, args)
         assert attempts == 3, f"expected 3 attempts, got {attempts}"
         assert out.exists() and abs(dur - 4.0) < 0.1
-        assert seen_cfg == [2.0, 2.0, 2.0], f"cfg_alpha must not move: {seen_cfg}"
+        assert seen_cfg == [2.0, 1.8, 1.6], f"cfg_alpha must descend: {seen_cfg}"
+        assert cfg_used == 1.6, f"the accepted take was drawn at {cfg_used}"
+        # The sidecar is the whole reason the ladder is allowed to exist: without this
+        # row, 99_hf_release would publish a 1.6 clip as a 2.0 one.
+        rows = [json.loads(ln) for ln in
+                (out.parent / "cfg_alpha_sidecar.jsonl").read_text().splitlines()]
+        assert len(rows) == 1 and rows[0]["stem"] == "clip", rows
+        assert rows[0]["cfg_alpha"] == 1.6 and rows[0]["attempt"] == 3, rows
+        assert rows[0]["reason"] == "over budget", rows
 
         # Out of retries: the exception reaches the caller, which counts the clip as
         # failed so the next resume picks it up.
@@ -329,7 +344,25 @@ def test_stage05_retries_a_duration_rejection_at_the_same_cfg() -> None:
             raise AssertionError("a clip that fails every attempt must raise")
         except tts.TruncatedAudioError:
             assert not out.exists()
-    print("OK stage 05 retries a duration rejection at an unchanged cfg_alpha")
+
+        # A run without --cfg-alpha has no rung to start from: the retries must then
+        # send nothing at all rather than guess the server's startup value (which may
+        # already be below 2.0, so a "descent" could be a climb).
+        seen_cfg.clear()
+        calls["n"] = 0
+        out2 = Path(td) / "clip2.flac"
+        args.cfg_alpha = None
+        args.retries = 2
+        _, _, attempts2, cfg_used2 = tts.synthesize_with_retries(
+            "http://stub", text, out2, args)
+        assert attempts2 == 3 and cfg_used2 is None, (attempts2, cfg_used2)
+        assert seen_cfg == [None, None, None], seen_cfg
+
+        # The ladder is also floored: five retries from 2.0 at -0.2 reach 1.2 and stop
+        # there, never CFG off.
+        assert [cfg_sidecar.ladder_cfg_alpha(start=2.0, attempt=i) for i in range(6)] \
+            == [2.0, 1.8, 1.6, 1.4, 1.2, 1.2]
+    print("OK stage 05 retries a duration rejection one rung down, and records it")
 
 
 def test_the_bounds_are_per_voice_and_overridable() -> None:
@@ -442,7 +475,7 @@ if __name__ == "__main__":
     test_stage05_token_budget_is_on_by_default_and_sized_from_the_text()
     test_stage05_judges_truncation_against_the_budget()
     test_stage05_rejects_an_implausibly_short_clip()
-    test_stage05_retries_a_duration_rejection_at_the_same_cfg()
+    test_stage05_retries_a_duration_rejection_down_the_cfg_ladder()
     test_the_band_covers_the_slowest_and_the_fastest_voice()
     test_the_bounds_are_per_voice_and_overridable()
     print("OK all")

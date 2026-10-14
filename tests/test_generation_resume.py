@@ -70,7 +70,10 @@ def _corpus(path: Path, n: int) -> None:
 
 def _slow_writer(delay: float):
     """Stand-in for synthesize(): writes the clip through the same .tmp rename."""
-    def synthesize(base_url, text, out, args, voice=None):
+    # `cfg_alpha` is keyword-only here on purpose: synthesize_with_retries passes the
+    # ladder rung it drew, and a stand-in that cannot accept it would pass this test
+    # while the real call signature had drifted.
+    def synthesize(base_url, text, out, args, voice=None, cfg_alpha=None):
         time.sleep(delay)
         tmp = out.with_suffix(out.suffix + ".tmp")
         tmp.write_bytes(b"audio")
@@ -140,7 +143,7 @@ def test_a_failed_clip_does_not_look_like_an_interrupt() -> None:
         out_dir.mkdir()
         _corpus(corpus, 6)
 
-        def flaky(base_url, text, out, args, voice=None):
+        def flaky(base_url, text, out, args, voice=None, cfg_alpha=None):
             if text.endswith("3"):
                 raise RuntimeError("server returned 500")
             tmp_f = out.with_suffix(out.suffix + ".tmp")
@@ -176,7 +179,7 @@ def test_a_timeout_is_one_failed_clip_not_a_dead_run() -> None:
         out_dir.mkdir()
         _corpus(corpus, 6)
 
-        def times_out(base_url, text, out, args, voice=None):
+        def times_out(base_url, text, out, args, voice=None, cfg_alpha=None):
             if text.endswith("1"):          # an early row, so the rest follows it
                 raise TimeoutError("the read operation timed out")
             tmp_f = out.with_suffix(out.suffix + ".tmp")
@@ -213,7 +216,7 @@ def test_an_unexpected_exception_stops_the_run_instead_of_silencing_it() -> None
         out_dir.mkdir()
         _corpus(corpus, n)
 
-        def boom(base_url, text, out, args, voice=None):
+        def boom(base_url, text, out, args, voice=None, cfg_alpha=None):
             if text.endswith("2"):
                 raise ValueError("something nobody enumerated")
             time.sleep(0.02)

@@ -109,6 +109,18 @@ from voice_assignment import (  # noqa: E402
 # numbers: this script (which sends the budget as max_new_tokens and rejects a take
 # that comes back outside it), 02_audit_durations.py (which re-checks clips already on
 # disk) and eventually 06_hotfixes. Re-exported under the names the tests use.
+# Same reason, for the cfg_alpha ladder a duration rejection walks down and the
+# sidecar that records where each clip landed: stage 06 walks the SAME ladder for its
+# STT-QC failures and READS this sidecar when it writes the manifest's cfg_alpha
+# column, so the numbers and the file format cannot live in either stage.
+from cfg_sidecar import (  # noqa: E402
+    CFG_ALPHA_FLOOR,
+    CFG_ALPHA_STEP,
+    SIDECAR_FILENAME,
+    ladder_cfg_alpha,
+    record_cfg_alpha,
+    sidecar_path,
+)
 from frame_budget import (  # noqa: E402
     BUDGET_FIXED_S,
     FAST_CHARS_PER_S,
@@ -261,7 +273,8 @@ def post_json(url: str, body: dict, timeout: float) -> tuple[int, bytes, float]:
         return e.code, e.read(), time.perf_counter() - t0
 
 
-def build_body(text: str, args: argparse.Namespace, voice: str | None = None) -> dict:
+def build_body(text: str, args: argparse.Namespace, voice: str | None = None,
+               cfg_alpha: float | None = None) -> dict:
     """Request body for /v1/audio/speech; unset knobs are omitted so the
     server falls back to its startup defaults.
 
@@ -269,6 +282,11 @@ def build_body(text: str, args: argparse.Namespace, voice: str | None = None) ->
     voices, assigned per group by utils/voice_assignment, and the voice is a
     per-request field on every backend we use, so one run covers all ten with no
     restart: see run_batch.
+
+    `cfg_alpha` overrides `args.cfg_alpha` for this one request, which is how
+    synthesize_with_retries walks a rejected clip down the ladder (2.0 -> 1.8 -> ...)
+    without a restart. None means "use the run's value", NOT "send nothing": a run
+    without --cfg-alpha sends nothing either way.
     """
     body: dict = {"input": text, "response_format": args.format}
     # A per-clip frame budget turns a runaway take into a cheap, detected failure: the
@@ -308,7 +326,8 @@ def build_body(text: str, args: argparse.Namespace, voice: str | None = None) ->
     # nested key merges and ignores it, so sending both is always safe. Same wire
     # format as CrispASR/tts.py and stage 06's tts_synthesize.
     # cfg_alpha rides the same nested route: stock vllm-omni drops a flat one silently.
-    extra = {"cfg_alpha": args.cfg_alpha, "voxtral_noise_seed": args.seed}
+    extra = {"cfg_alpha": args.cfg_alpha if cfg_alpha is None else cfg_alpha,
+             "voxtral_noise_seed": args.seed}
     extra = {k: v for k, v in extra.items() if v is not None}
     if extra:
         body["extra_params"] = extra
@@ -335,7 +354,8 @@ def payload_duration(payload: bytes) -> float | None:
 
 
 def synthesize(base_url: str, text: str, out: Path,
-               args: argparse.Namespace, voice: str | None = None) -> tuple[float, float | None]:
+               args: argparse.Namespace, voice: str | None = None,
+               cfg_alpha: float | None = None) -> tuple[float, float | None]:
     """Synthesize `text` into `out`; return (backend elapsed seconds,
     clip duration seconds or None when unparseable).
 
@@ -351,7 +371,8 @@ def synthesize(base_url: str, text: str, out: Path,
     generate" for the in-run retry and for the next resume.
     """
     code, payload, elapsed = post_json(f"{base_url}/v1/audio/speech",
-                                       build_body(text, args, voice), args.timeout)
+                                       build_body(text, args, voice, cfg_alpha),
+                                       args.timeout)
     if code != 200:
         raise RuntimeError(f"server returned {code} after {elapsed:.2f}s: "
                            f"{payload[:500].decode('utf-8', 'replace')}")
@@ -399,11 +420,19 @@ def synthesize(base_url: str, text: str, out: Path,
     return elapsed, dur
 
 
-def synthesize_with_retries(base_url: str, text: str, out: Path,
-                            args: argparse.Namespace,
-                            voice: str | None = None) -> tuple[float, float | None, int]:
+def _off_base(cfg_alpha: float | None, base: float | None) -> bool:
+    """Whether a take was drawn at a cfg_alpha other than the run's own value, i.e.
+    whether it needs a sidecar row. False when either is None: no --cfg-alpha means no
+    ladder and nothing to record (the server kept its startup default)."""
+    return cfg_alpha is not None and base is not None and cfg_alpha != base
+
+
+def synthesize_with_retries(
+        base_url: str, text: str, out: Path, args: argparse.Namespace,
+        voice: str | None = None) -> tuple[float, float | None, int, float | None]:
     """`synthesize` plus in-run retries on a duration rejection; returns
-    (backend elapsed seconds of the ACCEPTED take, its duration, attempts used).
+    (backend elapsed seconds of the ACCEPTED take, its duration, attempts used,
+    cfg_alpha that take was drawn at or None when the knob was never sent).
 
     Why retrying at all helps: the only randomness in Voxtral's pipeline is the fresh
     Gaussian each frame's flow-matching ODE starts from, so an unseeded re-request on
@@ -412,33 +441,75 @@ def synthesize_with_retries(base_url: str, text: str, out: Path,
     (0.52% over budget at cfg_alpha 2.0, 0.001% under the floor on real v1 clips) say
     independent attempts rarely fail twice.
 
-    Deliberately at the SAME cfg_alpha every time. Lowering it per attempt would
-    improve the odds (the stage 06 ladder walks 2.0 -> 1.8 -> 1.6 -> 1.4 for its own
-    QC failures), but then the clip on disk no longer matches the flat `cfg_alpha`
-    column stage 06 writes into the manifest, and nothing here records a per-clip
-    value. Add a sidecar first if that trade ever looks worth it.
+    Each retry also walks cfg_alpha DOWN one rung of the shared ladder
+    (`utils/cfg_sidecar.ladder_cfg_alpha`): with the defaults, 2.0 then 1.8 then 1.6,
+    clamped at 1.2. Needed because a new sample of the same draw cannot save a text
+    that derails *reproducibly*: `000863_0005_acineux` (339 chars, h_frm_chf) ran over
+    budget on all three attempts of two separate runs. 2.0 is the top of the measured
+    usable band, so the room is below it, and a clip that rambled at the top is
+    over-guided rather than under-guided.
+
+    The ladder was blocked until 2026-10-14 on having somewhere to record the truth:
+    the dataset publishes one flat `cfg_alpha` per row, so a clip quietly drawn at 1.6
+    would ship as a 2.0 clip, and a provenance lie is worse than a missing clip. Hence
+    every accepted take that landed OFF the run's value appends a row to the sidecar
+    beside the audio, which stage 06 reads when it writes that column. A run without
+    --cfg-alpha has no rung to start from (the server's own default is whatever it
+    booted with, which may be below 2.0), so there the retries stay as they were: same
+    request, new noise.
 
     Only duration rejections are retried. A non-200, a timeout or an unreachable
     server are not sampling accidents: they are handled by the caller, which can
     abort the whole run rather than hammer a sick server row by row.
     """
     attempts = attempt_budget(args)
+    base = getattr(args, "cfg_alpha", None)
+    step = getattr(args, "cfg_alpha_step", CFG_ALPHA_STEP)
+    floor = getattr(args, "cfg_alpha_floor", CFG_ALPHA_FLOOR)
+    reason = None
     for attempt in range(1, attempts + 1):
+        # Attempt 1 is the run's own value, so the ladder index is attempt - 1 and a
+        # first attempt is never off-ladder. getattr defaults above keep a synthetic
+        # namespace (tests, stage 06 reusing build_body) working without the fields.
+        cfg_alpha = ladder_cfg_alpha(start=base, attempt=attempt - 1,
+                                     step=step, floor=floor)
         try:
-            elapsed, dur = synthesize(base_url, text, out, args, voice)
+            elapsed, dur = synthesize(base_url, text, out, args, voice,
+                                      cfg_alpha=cfg_alpha)
             if attempt > 1:
-                logger.warning("{}: attempt {}/{} accepted ({:.2f}s of audio)",
+                logger.warning("{}: attempt {}/{} accepted ({:.2f}s of audio{})",
                                out.name, attempt, attempts,
-                               dur if dur is not None else float("nan"))
-            return elapsed, dur, attempt
+                               dur if dur is not None else float("nan"),
+                               f", cfg_alpha {cfg_alpha}" if _off_base(cfg_alpha, base)
+                               else "")
+            if _off_base(cfg_alpha, base):
+                # Append BEFORE returning, so a clip on disk always has its row: a
+                # crash between the two would publish a 1.6 clip as a 2.0 one.
+                try:
+                    record_cfg_alpha(out.parent, stem=out.stem, cfg_alpha=cfg_alpha,
+                                     voice=voice or args.voice, attempt=attempt,
+                                     attempts=attempts, reason=reason)
+                except OSError as e:  # noqa: BLE001 - provenance must not fail a clip
+                    logger.error("{}: drawn at cfg_alpha {} but the sidecar could not "
+                                 "be written ({}); the manifest will call it {}",
+                                 out.name, cfg_alpha, e, base)
+            return elapsed, dur, attempt, cfg_alpha
         except (TruncatedAudioError, ImplausiblyShortError) as e:
             # Logged per attempt, at warning while there is still a retry left and
             # left to the caller to log as an error once there is not, so a grep for
             # ERROR counts clips actually lost and a grep for the reason counts takes.
             if attempt >= attempts:
                 raise
-            logger.warning("{}: attempt {}/{} rejected, retrying: {}",
-                           out.name, attempt, attempts, e)
+            # Carried into the sidecar row of the take that eventually lands, so the
+            # file says WHY that clip is off the run's cfg_alpha.
+            reason = ("over budget" if isinstance(e, TruncatedAudioError)
+                      else "implausibly short")
+            next_cfg = ladder_cfg_alpha(start=base, attempt=attempt,
+                                        step=step, floor=floor)
+            logger.warning("{}: attempt {}/{} rejected, retrying{}: {}",
+                           out.name, attempt, attempts,
+                           f" at cfg_alpha {next_cfg}" if _off_base(next_cfg, base)
+                           else "", e)
     raise AssertionError("unreachable")  # pragma: no cover
 
 
@@ -593,6 +664,12 @@ def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
     # respelling). `retried_ok` is what says whether the in-run retries are worth
     # their GPU time: it counts clips that failed at least once and still landed.
     over_budget = too_short = retried_ok = 0
+    # cfg_alpha the accepted takes landed on, counted only for the clips that left the
+    # run's own value, i.e. exactly the clips that have a sidecar row. Reported at the
+    # end because the shape of this histogram is the signal: a few dozen clips one
+    # rung down is the ladder working, hundreds sitting on the floor (1.2) means the
+    # texts themselves need looking at (respelling) rather than another draw.
+    cfg_landed: Counter = Counter()
     total_audio = 0.0
     aborted = False
     interrupted = False
@@ -620,7 +697,7 @@ def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
         for fut in bar:
             out = futures[fut]
             try:
-                elapsed, dur, attempts = fut.result()
+                elapsed, dur, attempts, cfg_alpha = fut.result()
             except urllib.error.URLError as e:
                 logger.error("server unreachable ({}), aborting; re-run to resume", e)
                 aborted = True
@@ -659,6 +736,8 @@ def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
             generated += 1
             if attempts > 1:
                 retried_ok += 1
+            if _off_base(cfg_alpha, getattr(args, "cfg_alpha", None)):
+                cfg_landed[cfg_alpha] += 1
             if dur is not None:
                 total_audio += dur
             logger.debug("{} ({}{:.2f}s backend)", out.name,
@@ -726,6 +805,15 @@ def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
     logger.info("duration rejections: {} over budget, {} implausibly short, "
                 "{} saved by a retry (up to {} attempts each)",
                 over_budget, too_short, retried_ok, attempt_budget(args))
+    # Same reasoning: the one line that says which clips are NOT at the run's
+    # cfg_alpha, and therefore which ones the sidecar (not --cfg-alpha) describes.
+    if cfg_landed:
+        logger.info("cfg_alpha ladder: {} clip(s) accepted below {} ({}), recorded in "
+                    "{}",
+                    sum(cfg_landed.values()), args.cfg_alpha,
+                    ", ".join(f"{v} at {k}" for k, v in sorted(cfg_landed.items(),
+                                                               reverse=True)),
+                    sidecar_path(out_dir))
     # 130 is the shell's conventional "killed by SIGINT", and generate_v2.sh keys on it
     # to stop the whole run instead of moving to the next stage (a stage exiting 1 for a
     # handful of failed clips must NOT stop it, since a re-run retries exactly those).
@@ -868,9 +956,31 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Extra attempts for a clip whose DURATION is rejected (over "
                         "budget or implausibly short), default 2, i.e. 3 attempts. "
                         "Each attempt is a genuinely new take (the flow-matching noise "
-                        "is fresh per request), at the same cfg_alpha, so a rambling "
-                        "take is usually fixed by one retry. Does not retry non-200s, "
-                        "timeouts or an unreachable server.")
+                        "is fresh per request) AND one rung further down the cfg_alpha "
+                        "ladder below, so a rambling take is usually fixed by one "
+                        "retry and a reproducibly bad text gets a different draw. Does "
+                        "not retry non-200s, timeouts or an unreachable server.")
+    p.add_argument("--cfg-alpha-step", type=float, default=CFG_ALPHA_STEP,
+                   help=f"Added to --cfg-alpha on each retry (default "
+                        f"{CFG_ALPHA_STEP}), so with --cfg-alpha 2.0 the attempts "
+                        f"are drawn at 2.0, 1.8, 1.6... NEGATIVE on purpose: 2.0 is "
+                        "the TOP of the measured usable band (1.2-2.0), so a clip "
+                        "that rambled there is over-guided and the room is below. "
+                        "Every accepted take off --cfg-alpha is recorded per clip in "
+                        f"{SIDECAR_FILENAME} beside the audio, which is what lets "
+                        "stage 06 publish the TRUE cfg_alpha of each row instead of "
+                        "one flat value. 0 keeps every retry at --cfg-alpha (the "
+                        "pre-2026-10-14 behaviour); so does leaving --cfg-alpha "
+                        "unset, since the ladder then has no rung to start from. "
+                        "Prefer the equals form for a negative value "
+                        "(--cfg-alpha-step=-0.3).")
+    p.add_argument("--cfg-alpha-floor", type=float, default=CFG_ALPHA_FLOOR,
+                   help=f"Hard clamp on that ladder (default {CFG_ALPHA_FLOOR}, the "
+                        "measured floor of the usable band). A clamp rather than a "
+                        "hint because --retries is free: ten retries at the default "
+                        "step would otherwise reach CFG off, where the decoder stops "
+                        "following the text and invents phonetically plausible words, "
+                        "which is the very defect these retries repair.")
     p.add_argument("--log-file", default=str(DEFAULT_LOG_FILE),
                    help=f"Loguru log file, appended to (default: {DEFAULT_LOG_FILE}).")
 
