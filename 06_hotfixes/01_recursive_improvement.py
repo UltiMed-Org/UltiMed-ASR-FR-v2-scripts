@@ -84,8 +84,11 @@ IMPROVED / EXHAUSTED lines). Per-clip stt_seconds / stt_rtf are also stored in t
 output jsonl. Every row also carries a top-level ``cfg_alpha`` recording the TTS
 cfg_alpha behind its CURRENT audio: a regenerated clip stores its winning draw's
 cfg_alpha, while a clip that keeps its original audio (passed under the threshold, or
-exhausted) stores ``--original-cfg-alpha`` (2.0 by default, the value v2 audio is
-generated at; v1 audio was drawn at 1.3, so pass it when running over v1). Audio is
+exhausted) stores the value stage 05 drew it at: the per-clip rung recorded in
+``cfg_alpha_sidecar.jsonl`` beside the audio when there is one (stage 05 walks the
+same ladder down when a take is rejected for its duration), else
+``--original-cfg-alpha`` (2.0 by default, the value v2 audio is generated at; v1 audio
+was drawn at 1.3, so pass it when running over v1). Audio is
 replaced through atomic writes (temp + fsync + os.replace)
 for both the ``.bak`` backup and the new clip, so an interrupted run can never
 corrupt a clip.
@@ -273,6 +276,17 @@ _tts = _load_module(
 # (stdlib-only import, so it costs nothing here).
 sys.path.insert(0, str(_HERE.parent / "utils"))
 from nemo_manifest import parse_clip_name  # noqa: E402
+# The cfg_alpha ladder and the per-clip sidecar are shared with stage 05 (which walks
+# the same rungs when a take is rejected for its duration): one copy of the numbers, one
+# file format, so the `cfg_alpha` column this stage writes can tell the truth about a
+# clip stage 05 happened to draw below the run's value.
+from cfg_sidecar import (  # noqa: E402
+    CFG_ALPHA_FLOOR,
+    CFG_ALPHA_START,
+    CFG_ALPHA_STEP,
+    cfg_alpha_for_clip,
+    ladder_cfg_alpha,
+)
 
 
 # How many independent STT readings a bad-CER clip gets before its CER is trusted: the
@@ -482,12 +496,18 @@ def _synthesize_draft(
     # i.e. CFG off, where the flow-matching decoder stops following the text and
     # invents phonetically plausible words. That is the defect this stage repairs, so
     # it must never be a draw. None start -> knob omitted (server keeps its default).
-    cfg_alpha = (
-        None if cfg.cfg_alpha_start is None
-        else round(cfg.cfg_alpha_start + cfg.cfg_alpha_step * attempt, 4)
-    )
-    if cfg_alpha is not None and cfg.cfg_alpha_floor is not None:
-        cfg_alpha = max(cfg_alpha, cfg.cfg_alpha_floor)
+    # utils/cfg_sidecar owns the arithmetic: stage 05 walks the same rungs for its
+    # duration rejections, and two copies of "round(start + step * attempt)" would
+    # drift the moment one of them learned about, say, a per-voice floor.
+    # getattr with the shared defaults rather than cfg.<field>, because the synthetic
+    # namespaces the tests build (and any caller reusing this function outside main())
+    # carry only the knobs they care about; before the ladder moved to utils/, the
+    # conditional expression here read those fields lazily and so tolerated their
+    # absence by accident.
+    cfg_alpha = ladder_cfg_alpha(
+        start=getattr(cfg, "cfg_alpha_start", CFG_ALPHA_START), attempt=attempt,
+        step=getattr(cfg, "cfg_alpha_step", CFG_ALPHA_STEP),
+        floor=getattr(cfg, "cfg_alpha_floor", CFG_ALPHA_FLOOR))
     with cfg.tts_sem:
         payload = tts_synthesize(
             cfg.tts_url, text,
@@ -1245,7 +1265,29 @@ def backfill_audit_identity(improved_file: Path, improved_records: dict) -> int:
     return repaired
 
 
-def backfill_cfg_alpha(out_file: Path, improved_records: dict, cfg: SimpleNamespace) -> int:
+def original_cfg_alpha_for(rec: dict, cfg: SimpleNamespace, input_file: Path) -> float:
+    """cfg_alpha the clip's CURRENT (not regenerated) audio was drawn at.
+
+    ``--original-cfg-alpha`` is the run-wide answer (2.0 for v2), but stage 05 may have
+    drawn an individual clip lower: since 2026-10-14 a take rejected for its duration
+    is re-drawn one rung down the shared ladder (2.0 -> 1.8 -> 1.6 ...), and the rung
+    it landed on is recorded per clip in ``cfg_alpha_sidecar.jsonl`` beside the audio.
+    Reading that here is what keeps the published ``cfg_alpha`` column true for those
+    clips instead of flattening every un-regenerated row to one value.
+
+    Falls back to ``cfg.original_cfg_alpha`` when the clip has no sidecar row (the
+    overwhelmingly common case: well under 1% of clips descend) and when the clip
+    cannot be located on disk at all, which is exactly what the column said before
+    the sidecar existed.
+    """
+    path = _stt.resolve_audio(rec, input_file, cfg.audio_key, cfg.audio_root)
+    if path is None:
+        return cfg.original_cfg_alpha
+    return cfg_alpha_for_clip(path, default=cfg.original_cfg_alpha)
+
+
+def backfill_cfg_alpha(out_file: Path, improved_records: dict, cfg: SimpleNamespace,
+                       input_file: Path) -> int:
     """Add the top-level ``cfg_alpha`` to any row in a prior ``.stt.jsonl`` written before
     the field existed, so a plain re-run populates it without needing ``--force``. Returns
     the number of rows backfilled (0 if the file is absent or every row already has it).
@@ -1287,7 +1329,7 @@ def backfill_cfg_alpha(out_file: Path, improved_records: dict, cfg: SimpleNamesp
             elif audit is not None:
                 rec["cfg_alpha"] = audit.get("cfg_alpha")
             else:
-                rec["cfg_alpha"] = cfg.original_cfg_alpha
+                rec["cfg_alpha"] = original_cfg_alpha_for(rec, cfg, input_file)
             changed += 1
     if changed:
         _stt.atomic_write_jsonl(out_file, rows)
@@ -1403,8 +1445,12 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
         # exhaust, then delete every candidate file (win or lose).
         if action == "picked":
             # Kept-original fallback: unless a candidate wins (below), the clip still
-            # carries the audio the original dataset synthesized at --original-cfg-alpha.
-            row.setdefault("cfg_alpha", cfg.original_cfg_alpha)
+            # carries the audio the original dataset synthesized, which is
+            # --original-cfg-alpha unless stage 05's sidecar recorded a lower rung for
+            # this very clip. Guarded by `not in` rather than setdefault so the lookup
+            # (which touches the filesystem) only runs for a row that needs it.
+            if "cfg_alpha" not in row:
+                row["cfg_alpha"] = original_cfg_alpha_for(row, cfg, input_file)
             if imp.get("payload") is not None:
                 _apply_improvement(row, result, imp, model_key, improved_records, cfg)
                 stats["improved"] += 1
@@ -1430,10 +1476,13 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
             stats["transcribed"] += 1
         # Every clip records the cfg_alpha behind its CURRENT audio. A clip that keeps
         # its original audio (passed with low CER, exhausted, or flagged pending_tts)
-        # carries the dataset's original synthesis cfg_alpha (--original-cfg-alpha, 2.0
-        # for v2 and 1.3 for v1); a win overwrites this with the draw's cfg_alpha in
-        # _apply_improvement. setdefault so a prior improved value is never clobbered.
-        row.setdefault("cfg_alpha", cfg.original_cfg_alpha)
+        # carries the dataset's original synthesis cfg_alpha: --original-cfg-alpha (2.0
+        # for v2, 1.3 for v1) unless stage 05's sidecar recorded a lower rung for this
+        # clip; a win overwrites this with the draw's cfg_alpha in _apply_improvement.
+        # `not in` rather than setdefault, so a prior improved value is never clobbered
+        # AND the filesystem lookup is skipped for the rows that already have a value.
+        if "cfg_alpha" not in row:
+            row["cfg_alpha"] = original_cfg_alpha_for(row, cfg, input_file)
 
         # A regeneration queue built under the OLD scoring rules is stale: this row was
         # flagged pending_tts by a threshold or a normalization that no longer applies,
@@ -1661,10 +1710,10 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
 @click.option("--min-improvement", default=0.02, type=float, help="When no draw reaches --cer-threshold, keep the lowest-CER draw only if it beats the original CER by at least this. A draw below the threshold is always kept. Non-zero matters once the gate is low: a clip flagged at 0.09 whose best draw lands at 0.088 was not repaired, it was fitted to the judge, and a clean clip's CER moves that much on Whisper's own spelling choices. Pass 0 to accept any gain.")
 @click.option("--start-seed", default=43, type=int, help="First seed; each attempt uses start-seed + attempt. Always sent (Voxtral respects the request seed).")
 @click.option("--speed-jitter", default=0.0, type=float, help="Optional: also vary speed by +/- this each attempt (e.g. 0.03). Not needed when the seed works.")
-@click.option("--cfg-alpha-start", default=2.0, type=float, help="TTS cfg_alpha sent on the first re-attempt. Default 2.0, the value the dataset itself is generated at and the TOP of the measured usable band (1.2-2.0); --cfg-alpha-step then walks the later draws DOWN from it. Pass a negative value to omit cfg_alpha entirely.")
-@click.option("--cfg-alpha-step", default=-0.2, type=float, help="Added to cfg_alpha on each successive re-attempt, normally NEGATIVE so the ladder descends. With the defaults, five draws walk 2.0, 1.8, 1.6, 1.4, 1.2. Prefer the equals form for a negative value (--cfg-alpha-step=-0.2): this click version accepts the bare form too, but the equals form cannot be read as another option whatever the version.")
-@click.option("--cfg-alpha-floor", default=1.2, type=float, help="Hard lower clamp on the ladder (default 1.2, the measured floor of the usable band). It matters because --n-improv is free: without it, ten draws at the default step would reach 0.2, i.e. CFG off, where the decoder stops following the text. Pass a negative value to remove the clamp.")
-@click.option("--original-cfg-alpha", default=2.0, type=float, help="cfg_alpha the ORIGINAL dataset audio was synthesized with. Default 2.0, the value v2 is generated at (VOXTRAL_CFG_ALPHA in the CrispASR compose since the 2026-10-13 sweep); pass 1.3 when running over v1 audio, which was drawn at that. Written as each clip's `cfg_alpha` when it keeps its original audio (passed / exhausted); a regenerated clip records its winning draw's cfg_alpha instead.")
+@click.option("--cfg-alpha-start", default=CFG_ALPHA_START, type=float, help="TTS cfg_alpha sent on the first re-attempt. Default 2.0, the value the dataset itself is generated at and the TOP of the measured usable band (1.2-2.0); --cfg-alpha-step then walks the later draws DOWN from it. Pass a negative value to omit cfg_alpha entirely.")
+@click.option("--cfg-alpha-step", default=CFG_ALPHA_STEP, type=float, help="Added to cfg_alpha on each successive re-attempt, normally NEGATIVE so the ladder descends. With the defaults, five draws walk 2.0, 1.8, 1.6, 1.4, 1.2. Prefer the equals form for a negative value (--cfg-alpha-step=-0.2): this click version accepts the bare form too, but the equals form cannot be read as another option whatever the version.")
+@click.option("--cfg-alpha-floor", default=CFG_ALPHA_FLOOR, type=float, help="Hard lower clamp on the ladder (default 1.2, the measured floor of the usable band). It matters because --n-improv is free: without it, ten draws at the default step would reach 0.2, i.e. CFG off, where the decoder stops following the text. Pass a negative value to remove the clamp.")
+@click.option("--original-cfg-alpha", default=CFG_ALPHA_START, type=float, help="cfg_alpha the ORIGINAL dataset audio was synthesized with, for every clip stage 05 did NOT record a per-clip value for (a clip whose rung is in cfg_alpha_sidecar.jsonl beside the audio uses that instead, since stage 05 re-draws a duration rejection one rung lower). Default 2.0, the value v2 is generated at (VOXTRAL_CFG_ALPHA in the CrispASR compose since the 2026-10-13 sweep); pass 1.3 when running over v1 audio, which was drawn at that. Written as each clip's `cfg_alpha` when it keeps its original audio (passed / exhausted); a regenerated clip records its winning draw's cfg_alpha instead.")
 @click.option("--refresh-duration/--no-refresh-duration", default=True, help="Re-probe and update each row's `duration` when its audio is replaced (keeps stage-99 splits correct).")
 @click.option("--force", is_flag=True, help="Re-process clips already marked improved/exhausted in a previous run.")
 @click.option("--retry-exhausted", is_flag=True, help="Give the clips marked `exhausted` (flagged bad, no draw good enough) another run: they are treated as if they carried no marker, so a rescore can clear them and an stt pass can send the ones that still read bad back through the tts queue. Unlike --force this leaves the clips that already passed and the ones already improved alone, so a retry costs only the known-weak tail (173 clips after the 0.08 sweep) instead of re-transcribing the corpus. Use it after a scoring-rule change or with a different seed / cfg_alpha ladder.")
@@ -1783,7 +1832,7 @@ def main(
         # Backfill cfg_alpha onto any rows an earlier (pre-field) run resolved, so a plain
         # re-run populates them without --force. Runs before process_file on the same file,
         # so load_existing carries the values forward onto the skipped rows.
-        n_backfilled = backfill_cfg_alpha(out_file, improved_records, cfg)
+        n_backfilled = backfill_cfg_alpha(out_file, improved_records, cfg, input_file)
         if n_backfilled:
             logger.info(f"{out_file.name}: backfilled cfg_alpha on {n_backfilled} pre-existing row(s)")
         n_named = backfill_audit_identity(improved_file, improved_records)
