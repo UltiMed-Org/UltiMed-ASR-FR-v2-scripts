@@ -159,7 +159,82 @@ def test_a_failed_clip_does_not_look_like_an_interrupt() -> None:
         print("OK a failed clip exits 1, stays missing, and is retried by the next run")
 
 
+def test_a_timeout_is_one_failed_clip_not_a_dead_run() -> None:
+    """A read timeout must be counted and stepped over, not allowed to escape.
+
+    Regression, observed on the real v2 run on 2026-10-14: TimeoutError is not a
+    URLError, so it propagated out of the progress loop, which killed the bar and
+    every log line while `finally: shutdown(wait=True)` kept the pool generating.
+    The run looked dead and was in fact 22k clips further along six hours later.
+    One slow clip must cost one clip.
+    """
+    mod = load_module(STAGE05, "stage05_timeout")
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        corpus = tmp / "generated_dataset.jsonl"
+        out_dir = tmp / "audio"
+        out_dir.mkdir()
+        _corpus(corpus, 6)
+
+        def times_out(base_url, text, out, args, voice=None):
+            if text.endswith("1"):          # an early row, so the rest follows it
+                raise TimeoutError("the read operation timed out")
+            tmp_f = out.with_suffix(out.suffix + ".tmp")
+            tmp_f.write_bytes(b"audio")
+            tmp_f.replace(out)
+            return 0.01, 2.0
+
+        mod.synthesize = times_out
+        rc = mod.run_batch("http://stub", corpus, _args(out_dir, concurrency=2))
+        assert rc == 1, f"a timed-out clip must exit 1 like any failure, got {rc}"
+        assert len(list(out_dir.glob("*.flac"))) == 5, (
+            "the five other clips must still be generated: the loop has to survive "
+            "the timeout instead of propagating out of it")
+        mod.synthesize = _slow_writer(0.0)
+        rc = mod.run_batch("http://stub", corpus, _args(out_dir, concurrency=2))
+        assert rc == 0 and len(list(out_dir.glob("*.flac"))) == 6
+        print("OK a timeout costs one clip and the resume retries just it")
+
+
+def test_an_unexpected_exception_stops_the_run_instead_of_silencing_it() -> None:
+    """Whatever the exception, the queued work is dropped, not executed in silence.
+
+    Same root cause as the test above, but for the exceptions nobody enumerated: the
+    loop now has a catch-all that sets `aborted`, which is what makes the shutdown
+    cancel the queued futures. With 400 rows and a worker raising on row 2, a run
+    that kept going would leave hundreds of clips on disk; the fix leaves a handful.
+    """
+    mod = load_module(STAGE05, "stage05_unexpected")
+    n = 400
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        corpus = tmp / "generated_dataset.jsonl"
+        out_dir = tmp / "audio"
+        out_dir.mkdir()
+        _corpus(corpus, n)
+
+        def boom(base_url, text, out, args, voice=None):
+            if text.endswith("2"):
+                raise ValueError("something nobody enumerated")
+            time.sleep(0.02)
+            tmp_f = out.with_suffix(out.suffix + ".tmp")
+            tmp_f.write_bytes(b"audio")
+            tmp_f.replace(out)
+            return 0.01, 2.0
+
+        mod.synthesize = boom
+        rc = mod.run_batch("http://stub", corpus, _args(out_dir, concurrency=2))
+        written = len(list(out_dir.glob("*.flac")))
+        assert rc == 1, f"an aborted run must exit non-zero, got {rc}"
+        assert written < n // 4, (
+            f"{written}/{n} clips written: the queue was drained after the exception "
+            "instead of being cancelled (the regression this test exists for)")
+        print(f"OK an unexpected exception aborts after {written}/{n} clips, queue cancelled")
+
+
 if __name__ == "__main__":
     test_interrupt_stops_promptly_and_resume_finishes()
     test_a_failed_clip_does_not_look_like_an_interrupt()
+    test_a_timeout_is_one_failed_clip_not_a_dead_run()
+    test_an_unexpected_exception_stops_the_run_instead_of_silencing_it()
     print("all OK")

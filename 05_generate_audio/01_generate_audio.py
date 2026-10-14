@@ -467,6 +467,19 @@ def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
                 logger.error("server unreachable ({}), aborting; re-run to resume", e)
                 aborted = True
                 break
+            except TimeoutError as e:
+                # ONE slow clip, not a dead server, so it must not abort the batch and
+                # above all must not escape this loop: TimeoutError is not a URLError,
+                # so before this branch existed it propagated out of the `for`, killed
+                # the progress bar and ALL logging, and the `finally` below then let the
+                # pool work through the entire remaining queue in silence (observed
+                # 2026-10-14: logging died at 01:26 and the run was still writing clips
+                # at 07:00, 22k clips later, with nothing in the log). The clip stays
+                # "to generate", so a resume retries it.
+                logger.error("{}: no response within {:.0f}s ({}), counted as failed; "
+                             "a resume retries it", out.name, args.timeout, e)
+                failed += 1
+                continue
             except RuntimeError as e:
                 logger.error("{}: {}", out.name, e)
                 failed += 1
@@ -506,6 +519,15 @@ def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
         interrupted = True
         logger.warning("interrupted: {} clips written, dropping the queued ones; "
                        "re-run the same command to resume", generated)
+    except Exception as e:  # noqa: BLE001
+        # Belt and braces for the failure mode described in the TimeoutError branch
+        # above: whatever the exception, stop the run loudly instead of letting
+        # shutdown(wait=True) churn through the queue with no bar and no log lines.
+        # `aborted` is what makes the shutdown below cancel the queued futures.
+        aborted = True
+        logger.opt(exception=True).error(
+            "unexpected {} after {} clips, aborting; re-run the same command to resume",
+            type(e).__name__, generated)
     finally:
         # On abort or interrupt, drop queued-but-unstarted work so the run stops
         # instead of grinding through every remaining row; in-flight requests are
@@ -604,8 +626,14 @@ def main() -> int:
                         "CrispASR accepts wav/pcm/f32; Voxtral (vLLM) accepts "
                         "wav/flac/mp3/aac/opus/pcm, so against a wav-only backend "
                         "generate wav and convert afterwards.")
-    p.add_argument("--timeout", type=float, default=300.0,
-                   help="HTTP timeout in seconds (default: 300).")
+    # 600 s, not 300: the server's frame cap is 327.68 s of AUDIO
+    # (VOXTRAL_MAX_TOKENS 4096 / 12.5 Hz), and a clip that runs to that cap costs
+    # ~48 ms/frame at 16 requests in flight (~200 s) but ~89 ms/frame at 32
+    # (~365 s, measured 2026-10-14), so 300 s times out on the longest clips at
+    # high concurrency and reports a working server as a failure.
+    p.add_argument("--timeout", type=float, default=600.0,
+                   help="HTTP timeout in seconds (default: 600, which clears the "
+                        "server's 327.68s frame cap even at 32 requests in flight).")
     p.add_argument("--max-audio-seconds", type=float, default=frame_cap_seconds(),
                    help="Backend frame cap in seconds: a clip landing within "
                         f"{TRUNCATION_TOLERANCE_S}s of it stopped for length (truncated "
