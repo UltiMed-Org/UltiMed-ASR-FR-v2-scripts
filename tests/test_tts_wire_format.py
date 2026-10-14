@@ -332,6 +332,76 @@ def test_stage05_retries_a_duration_rejection_at_the_same_cfg() -> None:
     print("OK stage 05 retries a duration rejection at an unchanged cfg_alpha")
 
 
+def test_the_bounds_are_per_voice_and_overridable() -> None:
+    """Each voice is judged by ITS measured pace, and an explicit flag still wins.
+
+    The point of per-voice bounds is that the same clip gets a different verdict
+    depending on who read it: 60 characters in 30 s is 2 chars/s, a third of
+    fr_female's natural pace (median 16.4) and therefore a runaway, while h_frm_chf
+    (median 10.7) is given more room by its own slower bound. Without this, a bound
+    loose enough for the slow voice lets a fast voice ramble for twice as long before
+    anything notices.
+    """
+    import io
+    import tempfile
+    import wave
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "utils"))
+    import frame_budget as fb
+
+    tts = load_module(TTS_PATH, "tts_per_voice")
+
+    # The table itself: every voice's upper bound must sit below its own slow tail and
+    # its floor above its own fastest clip, and the fast voices must be bounded more
+    # tightly than the slow ones (that is the whole gain over one global band).
+    assert fb.rates_for_voice("fr_female")[0] > fb.rates_for_voice("h_frm_chf")[0], (
+        "the fastest voice must get the tighter upper bound"
+    )
+    assert fb.rates_for_voice("not_a_voice") == (fb.SLOW_CHARS_PER_S,
+                                                fb.FAST_CHARS_PER_S), (
+        "an unlisted voice must fall back to the widest band, never be rejected for "
+        "being unlisted"
+    )
+    assert fb.rates_for_voice("h_frm_chf", slow=8.0)[0] == 8.0, (
+        "an explicit --budget-chars-per-second must override the table"
+    )
+
+    def wav_of(seconds: float) -> bytes:
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(24000)
+            w.writeframes(b"\x00\x00" * int(24000 * seconds))
+        return buf.getvalue()
+
+    text = "a" * 60  # fr_female: 3 + 60/9.9 = 9.1 s; h_frm_chf: 3 + 60/5.3 = 14.3 s
+    tts.post_json = lambda url, body, timeout: (200, wav_of(11.0), 1.0)
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "clip.flac"
+        # The rate flags are None by default precisely so the table applies; a
+        # namespace that sets them to numbers would pin every voice to one band.
+        args = _stage05_args(auto_token_budget=True, budget_fixed_seconds=3.0,
+                             budget_chars_per_second=None, floor_chars_per_second=None,
+                             timeout=600.0, max_audio_seconds=327.68, retries=0)
+        try:
+            tts.synthesize("http://stub", text, out, args, "fr_female")
+            raise AssertionError("11 s for 60 chars is a runaway for fr_female")
+        except tts.TruncatedAudioError as e:
+            assert "fr_female at 9.9 chars/s" in str(e), f"message must name it: {e}"
+
+        # Same text, same audio, slower voice: inside ITS bound, so it is written.
+        tts.synthesize("http://stub", text, out, args, "h_frm_chf")
+        assert out.exists()
+
+        # The budget actually asked for also follows the voice, or the server would
+        # keep generating long after the client would reject the result.
+        fast = tts.build_body(text, args, "fr_female")["max_new_tokens"]
+        slow = tts.build_body(text, args, "h_frm_chf")["max_new_tokens"]
+        assert fast < slow, f"max_new_tokens must follow the voice: {fast} vs {slow}"
+    print("OK the bounds are per voice, and a flag still overrides them")
+
+
 def test_the_band_covers_the_slowest_and_the_fastest_voice() -> None:
     """The bounds must sit outside every VOICE, not outside the corpus average.
 
@@ -374,4 +444,5 @@ if __name__ == "__main__":
     test_stage05_rejects_an_implausibly_short_clip()
     test_stage05_retries_a_duration_rejection_at_the_same_cfg()
     test_the_band_covers_the_slowest_and_the_fastest_voice()
+    test_the_bounds_are_per_voice_and_overridable()
     print("OK all")

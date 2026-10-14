@@ -77,6 +77,39 @@ FAST_CHARS_PER_S = 30.0
 #: Below this, a clip is near-silence whatever the text (no v1 clip is under 1.0 s).
 MIN_SECONDS = 0.5
 
+#: Per-voice bounds: voice -> (slowest, fastest) plausible reading speed in characters
+#: per second of audio. A voice that is not listed (a single-voice run, a roster the
+#: table has not been measured on) falls back to the global SLOW/FAST above, which is
+#: the widest band, so an unknown voice is never rejected for being unknown.
+#:
+#: Derivation, from the same 32,189 v2 dictionary clips (2026-10-14):
+#:   slowest = 0.75 x the voice's legit p1 rate (p1 after excluding the clips below
+#:             median/2.5, i.e. its actual runaways). 0.75 is where every voice's
+#:             rejection share stops exceeding its genuine-runaway share: measured
+#:             0.00% to 0.13% rejected per voice, of which 0.00-0.03% genuine.
+#:   fastest = 1.45 x the voice's fastest observed clip. The margin is wide on purpose:
+#:             each voice has only ~3.2k clips here, and the single-voice v1 corpus of
+#:             602,813 clips reached 28.5 chars/s against a p99.9 of 20.5, so the true
+#:             tail is wider than a 3.2k sample shows.
+#:
+#: Being per voice is worth much more on the slow side than on the fast one: the slow
+#: tails span 7.00 to 13.22 chars/s (1.9x), while every voice's fastest clip sits in
+#: 18.2-21.3 (1.2x), so the floors below are all near the global 30. The gain is on the
+#: upper bound, where a runaway by fr_female is now caught at 9.9 chars/s instead of
+#: 5.0, i.e. in half the GPU time.
+VOICE_RATES: dict[str, tuple[float, float]] = {
+    "fr_female": (9.9, 29.7),   # median 16.38, legit p1 13.22, fastest 20.49
+    "fr_male": (8.9, 28.2),     # median 15.27, legit p1 11.87, fastest 19.42
+    "h_itf_arm": (6.9, 30.9),   # median 13.30, legit p1  9.22, fastest 21.28
+    "h_frf_esm": (8.3, 28.5),   # median 14.09, legit p1 11.07, fastest 19.66
+    "h_frm_nlf": (8.5, 28.4),   # median 15.20, legit p1 11.34, fastest 19.62
+    "h_itf_def": (8.6, 29.7),   # median 15.64, legit p1 11.44, fastest 20.50
+    "h_frf_itm": (7.7, 28.6),   # median 14.36, legit p1 10.28, fastest 19.75
+    "h_frm_ptf": (7.3, 27.2),   # median 13.67, legit p1  9.67, fastest 18.75
+    "h_frf_ptm": (6.6, 27.1),   # median 13.03, legit p1  8.84, fastest 18.72
+    "h_frm_chf": (5.3, 26.4),   # median 10.75, legit p1  7.00, fastest 18.22
+}
+
 #: Stage 0 emits one frame per decode step at this rate, so seconds * rate = frames.
 FRAME_RATE_HZ = 12.5
 
@@ -86,6 +119,41 @@ MAX_NEW_TOKENS = 4096
 #: Floor for the requested frame count: 64 frames is 5.12 s, below which a short text
 #: plus an unlucky lead-in silence could be cut legitimately.
 MIN_NEW_TOKENS = 64
+
+
+def rates_for_voice(voice: str | None = None, slow: float | None = None,
+                    fast: float | None = None) -> tuple[float, float]:
+    """The (slowest, fastest) plausible reading speed to judge one clip by.
+
+    Parameters
+    ----------
+    voice
+        The voice that read the clip, as named in VOICE_RATES. None or unknown falls
+        back to the global band, which is the widest one.
+    slow, fast
+        Explicit overrides (a CLI flag the user actually passed). They win over the
+        per-voice table, because a human asking for a specific rate means it; this is
+        why the corresponding flags default to None rather than to a number.
+
+    Returns
+    -------
+    tuple of float
+        E.g. `(9.9, 29.7)` for fr_female, `(5.3, 26.4)` for h_frm_chf, `(5.0, 30.0)`
+        for an unlisted voice.
+
+    Examples
+    --------
+    >>> rates_for_voice("h_frm_chf")
+    (5.3, 26.4)
+    >>> rates_for_voice("h_frm_chf", slow=8.0)   # an explicit flag wins
+    (8.0, 26.4)
+    >>> rates_for_voice("a_voice_we_never_measured")
+    (5.0, 30.0)
+    """
+    table_slow, table_fast = VOICE_RATES.get(voice or "", (SLOW_CHARS_PER_S,
+                                                           FAST_CHARS_PER_S))
+    return (table_slow if slow is None else slow,
+            table_fast if fast is None else fast)
 
 
 def budget_seconds(text: str, fixed: float = BUDGET_FIXED_S,

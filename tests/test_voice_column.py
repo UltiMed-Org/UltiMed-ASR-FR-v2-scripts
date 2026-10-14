@@ -105,11 +105,16 @@ def flac_seconds(seconds: float) -> bytes:
     return buf.getvalue()
 
 
-FLAC = flac_seconds(1.0)
+# 2.0 s, not 1.0: the texts below are ~29 characters, and stage 05 now rejects a clip
+# that is implausibly SHORT for its text (below chars / the voice's fastest measured
+# reading speed, 27-31 chars/s). A 1 s clip for 29 characters is 29 chars/s, which the
+# per-voice floor flags for the slower voices, so the old stub made this test fail on a
+# guard it is not about. 2.0 s is 14.5 chars/s, the roster's median pace.
+FLAC = flac_seconds(2.0)
 # A second, different payload for stage 06's regeneration: a draw byte-identical to
 # the original clip raises SeedDeterminismError there (the seed had no effect), which
 # is a guard worth not tripping over in a test about voices.
-FLAC_REDO = flac_seconds(1.2)
+FLAC_REDO = flac_seconds(2.4)
 
 
 def tts_args(out_dir: Path, **over) -> SimpleNamespace:

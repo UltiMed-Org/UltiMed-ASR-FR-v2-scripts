@@ -113,10 +113,12 @@ from frame_budget import (  # noqa: E402
     BUDGET_FIXED_S,
     FAST_CHARS_PER_S,
     SLOW_CHARS_PER_S as BUDGET_CHARS_PER_S,
+    VOICE_RATES,
     budget_seconds,
     budget_tokens,
     classify_duration,
     floor_seconds,
+    rates_for_voice,
 )
 
 DEFAULT_URL = "http://127.0.0.1:8003"
@@ -199,20 +201,27 @@ class ImplausiblyShortError(RuntimeError):
     every clip and not just on budgeted runs."""
 
 
-def floor_rate(args: argparse.Namespace) -> float:
-    """`--floor-chars-per-second` off a namespace that may not define it."""
-    return getattr(args, "floor_chars_per_second", FAST_CHARS_PER_S)
+def budget_terms(args: argparse.Namespace,
+                 voice: str | None = None) -> tuple[float, float, float]:
+    """The three numbers that bound one clip: (fixed seconds, slow rate, fast rate).
 
+    The two rates come from the VOICE's measured reading speed when the voice is
+    known, because the ten v2 voices differ by 1.9x on the slow side: at the global
+    band a runaway by fr_female (median 16.4 chars/s) is only caught once it passes
+    5.0 chars/s, i.e. after three times its natural duration, while the same bound
+    rejects h_frm_chf (median 10.7) for merely being slow.
 
-def budget_terms(args: argparse.Namespace) -> tuple[float, float]:
-    """The upper bound's two terms off a namespace that may not define them.
-
-    Needed even when the budget is OFF, because the floor check runs either way and
-    goes through the same classifier: a caller that never asked for a budget (a test,
-    stage 06's synthetic namespace) must not have to carry its fields.
+    `--budget-chars-per-second` / `--floor-chars-per-second` default to None exactly
+    so that this table applies; passing either one explicitly overrides it for every
+    voice. getattr throughout, same reason the module does it for auto_token_budget: a
+    caller that never asked for a budget (a test, stage 06's synthetic namespace) must
+    not have to carry its fields, and the floor check runs with the budget off too.
     """
-    return (getattr(args, "budget_fixed_seconds", BUDGET_FIXED_S),
-            getattr(args, "budget_chars_per_second", BUDGET_CHARS_PER_S))
+    slow, fast = rates_for_voice(
+        voice,
+        slow=getattr(args, "budget_chars_per_second", None),
+        fast=getattr(args, "floor_chars_per_second", None))
+    return getattr(args, "budget_fixed_seconds", BUDGET_FIXED_S), slow, fast
 
 
 def attempt_budget(args: argparse.Namespace) -> int:
@@ -274,7 +283,8 @@ def build_body(text: str, args: argparse.Namespace, voice: str | None = None) ->
     # 41.2 s). getattr rather than args.auto_token_budget so a synthetic namespace
     # that does not define the field still builds a valid body.
     if getattr(args, "auto_token_budget", False):
-        body["max_new_tokens"] = budget_tokens(text, *budget_terms(args))
+        fixed, slow, _ = budget_terms(args, voice or args.voice)
+        body["max_new_tokens"] = budget_tokens(text, fixed, slow)
     optional = {
         "model": args.model,
         "instructions": args.instruction,
@@ -350,35 +360,38 @@ def synthesize(base_url: str, text: str, out: Path,
     # server's global one: the whole point is to catch the clip that ran long for its
     # text, which the 327.68 s cap only catches in the worst case.
     budget_on = getattr(args, "auto_token_budget", False)
-    fixed, slow = budget_terms(args)
+    fixed, slow, fast = budget_terms(args, voice or args.voice)
     cap = (budget_seconds(text, fixed, slow) if budget_on else args.max_audio_seconds)
     # max() only to keep the ratio in the message below finite when the floor is
     # disabled with --floor-chars-per-second 0 (no clip can then be "short").
-    floor = max(1e-9, floor_seconds(text, floor_rate(args)))
+    floor = max(1e-9, floor_seconds(text, fast))
     # One classifier for both bounds, shared with 02_audit_durations.py so a clip
     # rejected here is exactly a clip that script would delete from disk, and vice
     # versa. `budget=None` lets it recompute the per-clip bound from the text.
     verdict = classify_duration(
         text, dur, budget=None if budget_on else args.max_audio_seconds,
         fixed=fixed, slow_chars_per_second=slow,
-        fast_chars_per_second=floor_rate(args),
+        fast_chars_per_second=fast,
         tolerance=TRUNCATION_TOLERANCE_S)
     if verdict == "over":
         # Spelled out because this line is what a grep over a multi-day log has to
         # answer with: how far over, against which bound, and for how much text. The
         # ratio is the honest severity measure (2.0x is a loop, 1.05x is a long take).
         raise TruncatedAudioError(
-            f"over budget: {dur:.2f}s of audio for {len(text)} chars, "
+            f"over budget: {dur:.2f}s of audio for {len(text)} chars "
+            f"({voice or args.voice or 'server default voice'} at {slow:.1f} chars/s), "
             f"{'budget' if budget_on else 'server frame cap'} {cap:.2f}s "
             f"({dur / cap:.2f}x), {'ran out of frames while still talking' if budget_on else 'stopped for length'}, "
             f"so the take was looping rather than reading. Not written."
         )
     if verdict == "short":
         raise ImplausiblyShortError(
-            f"implausibly short: {dur:.2f}s of audio for {len(text)} chars, "
+            f"implausibly short: {dur:.2f}s of audio for {len(text)} chars "
+            f"({voice or args.voice or 'server default voice'} at {fast:.1f} chars/s), "
             f"floor {floor:.2f}s ({dur / floor:.2f}x), i.e. "
-            f"{len(text) / max(dur, 1e-9):.0f} chars/s where the model reads at 16.6, "
-            f"so part of the text was not spoken. Not written."
+            f"{len(text) / max(dur, 1e-9):.0f} chars/s where the fastest take ever "
+            f"measured for this voice reaches {fast / 1.45:.1f}, so part of the text "
+            f"was not spoken. Not written."
         )
     tmp = out.with_suffix(out.suffix + ".tmp")
     tmp.write_bytes(payload)
@@ -832,21 +845,25 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--budget-fixed-seconds", type=float, default=BUDGET_FIXED_S,
                    help="Head/tail room term of --auto-token-budget (default: "
                         f"{BUDGET_FIXED_S}).")
-    p.add_argument("--budget-chars-per-second", type=float, default=BUDGET_CHARS_PER_S,
+    p.add_argument("--budget-chars-per-second", type=float, default=None,
                    help="Slowest plausible reading speed in characters per second of "
-                        f"audio, the other term of --auto-token-budget (default: "
-                        f"{BUDGET_CHARS_PER_S}, below the slowest voice h_frm_chf at "
-                        "p0.1 of 5.58; its median is 10.7 and the fastest voice's is "
-                        "16.4).")
-    p.add_argument("--floor-chars-per-second", type=float, default=FAST_CHARS_PER_S,
+                        "audio, the other term of --auto-token-budget. Unset (the "
+                        "default) means PER VOICE, from the measured table in "
+                        f"utils/frame_budget.py: {VOICE_RATES['h_frm_chf'][0]} for the "
+                        f"slowest voice h_frm_chf up to {VOICE_RATES['fr_female'][0]} "
+                        f"for the fastest fr_female, and {BUDGET_CHARS_PER_S} for a "
+                        "voice the table does not list. Passing a value overrides the "
+                        "table for every voice.")
+    p.add_argument("--floor-chars-per-second", type=float, default=None,
                    help="Fastest plausible reading speed in characters per second of "
                         "audio: a clip shorter than chars/this did not speak all of "
-                        f"its text and is rejected (default: {FAST_CHARS_PER_S}, above "
-                        "the fastest clip ever measured: 21.3 chars/s over 28,749 v2 "
-                        "clips and 28.5 over 602,813 v1 ones, so it flags none of "
-                        "them). Checked "
-                        "on every run, budget or not, since it needs nothing from the "
-                        "server. 0 disables it.")
+                        "its text and is rejected. Unset (the default) means PER "
+                        f"VOICE, {VOICE_RATES['h_frm_chf'][1]} to "
+                        f"{VOICE_RATES['h_itf_arm'][1]}, and {FAST_CHARS_PER_S} for an "
+                        "unlisted voice; each is 1.45x the fastest clip ever measured "
+                        "for that voice, so it flags none of the 602,813 v1 clips nor "
+                        "any of the 32,189 v2 ones. Checked on every run, budget or "
+                        "not, since it needs nothing from the server. 0 disables it.")
     p.add_argument("--retries", type=int, default=DEFAULT_RETRIES,
                    help="Extra attempts for a clip whose DURATION is rejected (over "
                         "budget or implausibly short), default 2, i.e. 3 attempts. "

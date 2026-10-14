@@ -44,18 +44,18 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "utils"))
 from frame_budget import (  # noqa: E402
     BUDGET_FIXED_S,
-    FAST_CHARS_PER_S,
-    SLOW_CHARS_PER_S,
     budget_seconds,
     classify_duration,
     floor_seconds,
+    rates_for_voice,
 )
 from voice_assignment import VOICES_FR_V2, group_field, voice_for_row  # noqa: E402
 
 #: Stage directory -> voice-assignment mode, the same pairing `generate_v2.sh` uses.
-#: A clip's voice is not needed to judge its duration (the bounds are global, set by
-#: the extremes of the roster), but reporting per voice is how a systematic problem
-#: with one voice shows up instead of hiding in a corpus-wide percentage.
+#: The voice is needed to judge a clip at all: the bounds are PER VOICE, since the ten
+#: v2 voices read at medians 10.7 to 16.4 chars/s (see utils/frame_budget.py). Getting
+#: the mode wrong here would judge clips against another voice's bounds, which is why
+#: this table mirrors the runner's rather than being a flag.
 STAGES: dict[str, str] = {
     "01_dictionnary": "row",
     "02_drugs": "row",
@@ -95,7 +95,7 @@ def probe(path: Path) -> float | None:
 
 
 def audit_stage(stage: Path, mode: str, normalize_term, *, fixed: float,
-                slow: float, fast: float, workers: int) -> list[dict]:
+                slow: float | None, fast: float | None, workers: int) -> list[dict]:
     """Join every row of one stage to its clip on disk and classify the durations.
 
     Returns
@@ -160,8 +160,14 @@ def audit_stage(stage: Path, mode: str, normalize_term, *, fixed: float,
             # parse may still be a perfectly good clip (libsndfile build differences),
             # and deleting it would cost a regeneration for nothing.
             continue
-        verdict = classify_duration(text, dur, fixed=fixed, slow_chars_per_second=slow,
-                                    fast_chars_per_second=fast)
+        # Per voice, and resolved exactly as 01_generate_audio.py resolves it, so a
+        # clip this script deletes is exactly a clip the generator would have refused
+        # to write (and vice versa): slow/fast are None unless the user overrode them
+        # on the command line, in which case the override wins for every voice.
+        v_slow, v_fast = rates_for_voice(voice, slow=slow, fast=fast)
+        verdict = classify_duration(text, dur, fixed=fixed,
+                                    slow_chars_per_second=v_slow,
+                                    fast_chars_per_second=v_fast)
         verdicts[verdict] += 1
         per_voice[voice][verdict] += 1
         rates[voice].append(len(text) / dur)
@@ -170,8 +176,10 @@ def audit_stage(stage: Path, mode: str, normalize_term, *, fixed: float,
                 "stage": stage.name, "path": str(path), "voice": voice,
                 "verdict": verdict, "duration": round(dur, 2), "chars": len(text),
                 "chars_per_second": round(len(text) / dur, 2),
-                "budget_s": round(budget_seconds(text, fixed, slow), 2),
-                "floor_s": round(floor_seconds(text, fast), 2),
+                "slow_chars_per_second": v_slow,
+                "fast_chars_per_second": v_fast,
+                "budget_s": round(budget_seconds(text, fixed, v_slow), 2),
+                "floor_s": round(floor_seconds(text, v_fast), 2),
                 "text": text[:200],
             })
 
@@ -184,11 +192,14 @@ def audit_stage(stage: Path, mode: str, normalize_term, *, fixed: float,
 
     # Per voice, sorted slowest median first: that is the order in which a voice
     # becomes suspect, and the column that explains an outlier rejection rate.
-    logger.info("{}: per voice (median chars/s, over, short, n)", stage.name)
+    logger.info("{}: per voice (median chars/s, the bounds it was judged by, "
+                "over, short, n)", stage.name)
     for voice in sorted(rates, key=lambda v: float(np.median(rates[v]))):
         c = per_voice[voice]
-        logger.info("  {:12s} {:5.2f} chars/s  over {:4d} ({:5.2f}%)  short {:3d}  n={}",
-                    voice, float(np.median(rates[voice])), c["over"],
+        v_slow, v_fast = rates_for_voice(voice, slow=slow, fast=fast)
+        logger.info("  {:12s} {:5.2f} chars/s  bounds {:4.1f}-{:4.1f}  "
+                    "over {:4d} ({:5.2f}%)  short {:3d}  n={}",
+                    voice, float(np.median(rates[voice])), v_slow, v_fast, c["over"],
                     100.0 * c["over"] / max(1, sum(c.values())), c["short"],
                     sum(c.values()))
 
@@ -221,13 +232,14 @@ def audit_stage(stage: Path, mode: str, normalize_term, *, fixed: float,
                    "bounds, voice, text), so the list survives the deletion.")
 @click.option("--budget-fixed-seconds", default=BUDGET_FIXED_S, show_default=True,
               help="Head/tail room term of the upper bound.")
-@click.option("--budget-chars-per-second", default=SLOW_CHARS_PER_S, show_default=True,
-              help="Slowest plausible reading speed, the other term of the upper bound. "
-                   "The default is the slowest VOICE's slow tail, see "
-                   "utils/frame_budget.py.")
-@click.option("--floor-chars-per-second", default=FAST_CHARS_PER_S, show_default=True,
-              help="Fastest plausible reading speed: a clip shorter than chars/this "
-                   "did not speak all of its text. 0 disables the floor.")
+@click.option("--budget-chars-per-second", default=None, type=float,
+              help="Override the slowest plausible reading speed for EVERY voice. "
+                   "Unset (the default) uses each voice's own measured rate from "
+                   "utils/frame_budget.py, which is what the generator does.")
+@click.option("--floor-chars-per-second", default=None, type=float,
+              help="Override the fastest plausible reading speed for every voice; a "
+                   "clip shorter than chars/this did not speak all of its text. Unset "
+                   "uses the per-voice table, 0 disables the floor.")
 @click.option("--workers", default=16, show_default=True,
               help="Threads probing audio headers (pure I/O).")
 def main(stages: tuple[str, ...], apply_: bool, report: Path | None,
@@ -242,9 +254,13 @@ def main(stages: tuple[str, ...], apply_: bool, report: Path | None,
         raise click.BadParameter(f"unknown stage(s) {unknown}, known: {list(STAGES)}")
 
     generator = _load_generator()
-    logger.info("bounds: over if duration >= {:.0f}s + chars/{:.0f}, short if "
-                "duration < chars/{:.0f}",
-                budget_fixed_seconds, budget_chars_per_second, floor_chars_per_second)
+    logger.info("bounds: over if duration >= {:.0f}s + chars/slow, short if duration "
+                "< chars/fast, with (slow, fast) {}",
+                budget_fixed_seconds,
+                "per voice from utils/frame_budget.py"
+                if budget_chars_per_second is None and floor_chars_per_second is None
+                else f"overridden to ({budget_chars_per_second}, "
+                     f"{floor_chars_per_second})")
 
     bad: list[dict] = []
     for name in names:
