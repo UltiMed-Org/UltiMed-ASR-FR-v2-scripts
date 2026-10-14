@@ -102,6 +102,11 @@ curl -fsS -m 5 "$URL/health" >/dev/null \
 echo "v2 run: ${#STAGES[@]} stage(s), cfg_alpha $CFG_ALPHA, concurrency $CONCURRENCY, token budget $TOKEN_BUDGET, retries $RETRIES, log $LOG_FILE"
 echo "stop it any time with Ctrl-C: in-flight clips finish, queued ones are dropped, and"
 echo "re-running this same command resumes on exactly the clips that are missing."
+# The duration bounds are the only check the audio gets in here, and they cannot
+# see a clip of plausible LENGTH whose text is wrong. 03_qc_cpu_stt.py transcribes
+# the retried clips and a 5% sample on the idle CPU cores while this runs, for ~1-2%
+# of throughput; it is a separate process so stopping either leaves the other alone.
+echo "optional, in another tab: ./03_qc_cpu_stt.py tails this run and STT-checks the retried clips plus 5% of the rest on the spare CPU cores."
 run_start=$SECONDS
 with_failures=()
 for s in "${STAGES[@]}"; do

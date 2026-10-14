@@ -126,6 +126,22 @@ done
 
   First run, 2026-10-14 over the 29,141 clips then on disk: **51 over budget (0.175%), 0 implausibly short, 0 unreadable**, 33 of the 51 on h_frm_chf. All 51 deleted. Worth re-running after each stage finishes, as a cheap check that the in-run bounds did their job.
 
+- **While a stage runs, listen to a sample of it on the CPU**, with `05_generate_audio/03_qc_cpu_stt.py`. The duration bounds above are the only thing checking the audio during generation, and they are blind to a clip whose length is plausible but whose text is wrong. This script fills that gap early: it tails the audio directory and the cfg_alpha sidecar and transcribes **every retried clip plus a deterministic 5% sample** with the int8 Parakeet ONNX export on the host's idle cores, scoring them with stage 06's own `normalize_for_scoring` / `compute_metrics` and the same gates (CER 0.08, tail CER 0.12).
+
+  ```bash
+  cd 05_generate_audio
+  ./03_qc_cpu_stt.py                                            # tail the live run, all five stages
+  ./03_qc_cpu_stt.py --backfill                                 # also work through what is already on disk
+  ./03_qc_cpu_stt.py --sample-percent 0 --backfill --once        # one shot: just the retried clips
+  grep "over gate" ../05_generate_audio/qc_cpu_stt.log           # or jq over qc_stt_sidecar.jsonl
+  ```
+
+  Why a sample and not everything: stage 05 writes audio at ~28.9x realtime and the CPU reads it at 7-9x (measured 2026-10-14 under the live run: 7.7x on 4 threads, 9.4x on 3 threads x 2 workers, worse above that, memory-bandwidth bound), so a full inline check would fall ~1,900 hours behind over a 485k-clip stage. The ~5.3% it does check needs ~1.5x realtime, which one worker at `--threads 3 --nice 10` delivers while costing the generator ~1-2%. The four benchmark runs that produced those figures cost 7-10% of generation throughput while they ran (the 500-clip interval containing them did 4,380 clips/h against ~4,860 for the three before it), which is why the defaults are one nice'd worker and not the fastest configuration.
+
+  Output is one JSON line per clip in `qc_stt_sidecar.jsonl` beside the audio, append-only and resumable, carrying `reason` (retry or sample), `voice`, `cfg_alpha`, `cer`, `wer`, `tail_cer`, `duration`, `stt_s`, and the transcript for flagged clips. The per-voice CER table in the log is the point of the 5% sample: it answers "is one voice drifting" within hours rather than at stage 06.
+
+  **It is not a quality gate.** The default model (`parakeet-tdt-0.6b-v3-UltiMed-onnx`) was fine-tuned on **v1 of this dataset**, so it is circular: it knows this corpus's vocabulary, v1's mistakes included, and will agree with audio a listener would reject. Treat a high CER as a gross error (text dropped, syllables looped, wrong text, truncation) and a low one as saying nothing. Point `--model-dir` at `parakeet-tdt-0.6b-v3-redux-onnx` for an impartial read.
+
 - **Why `row` on the term stages** (dictionary, drugs, acronyms: 92.5% of the clips). A group there is one TERM and its ~8 written variants, which are independent sentences, so the default `group` mode would make a given drug name exist in the corpus in exactly ONE accent, and a bad voice/term pairing would cost all of that term's clips at once. Row mode hashes `group:index` instead: measured on the real inputs it gives 5.74 distinct voices per term on the dictionary, 4.99 on drugs, 2.68 on acronyms, and a flatter per-voice balance as a side effect (dictionary spread 2.8% -> 1.2%, acronyms 45% -> 16%).
 - **Why `group` on the document stages** (PARHAF, PARROT). A group there is one DOCUMENT and the clips are consecutive chunks of it, so one reader per report is the only natural choice: a clinical report that changes speaker mid-sentence is an artifact no real dictation has.
 - Row mode on a document stage was a silent no-op until commit `98f79b3` (those rows carry `variant_index: 0` with the real position in `chunk_index`, and the key preferred `variant_index`, collapsing to the group key). Fixed, with tests, so the two modes are now genuinely different there. It does not change what v2 runs, since the document stages use `group` anyway.

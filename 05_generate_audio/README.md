@@ -52,6 +52,58 @@ uv run 01_generate_audio.py \
   --seed 42
 ```
 
+## `03_qc_cpu_stt.py`
+
+A sidecar process that tails a running generation and STT-checks a sample of
+its clips on the host's **spare CPU cores**, so a systematic defect shows up
+within hours instead of at stage 06, after the whole corpus is on disk.
+
+It cannot check everything, and the arithmetic is the whole design. Measured
+on this host (i7-7800X, 6 cores) under the live v2 run, the int8 UltiMed
+Parakeet ONNX export reads audio at 7.7x realtime on 4 threads and 9.4x on
+3 threads x 2 workers, while stage 05 *writes* audio at ~28.9x realtime. So a
+full inline check would fall ~1,900 hours of audio behind over a 485k-clip
+stage. Instead it checks two populations:
+
+- **every clip that needed a retry**, i.e. every clip with a row in
+  `cfg_alpha_sidecar.jsonl` (~0.3% of the stream). Those takes were rejected
+  once for their duration and re-drawn one rung down the cfg_alpha ladder, so
+  they are the only clips nothing has looked at twice.
+- **a deterministic ~5% sample** of the rest (`--sample-percent`), drawn by
+  hashing the clip stem with its own salt so the sample is stable across
+  restarts and uncorrelated with the voice assignment, which is what makes the
+  per-voice CER table it prints comparable.
+
+Together ~5.3% of the stream, about 1.5x realtime of STT, which one worker at
+3 threads delivers with most of its duty cycle to spare and which costs the
+generator ~1-2% of its throughput (the four benchmark runs that measured the
+numbers above cost 7-10% while they ran, so the niceness and the single worker
+are not decoration).
+
+```bash
+./03_qc_cpu_stt.py                                  # tail the live run
+./03_qc_cpu_stt.py --backfill                       # and work through what is on disk
+./03_qc_cpu_stt.py --stage 01_dictionnary \
+    --sample-percent 0 --backfill --once            # one shot, retried clips only
+```
+
+Output is one JSON line per clip in `qc_stt_sidecar.jsonl` beside the audio
+(`reason`, `voice`, `cfg_alpha`, `cer`, `wer`, `tail_cer`, `duration`,
+`stt_s`), append-only, and a restart resumes from it. A clip over either gate
+(`--cer-threshold` 0.08, `--tail-cer-threshold` 0.12, stage 06's own numbers)
+is logged at WARNING and keeps its transcript in the row.
+
+The scoring is stage 06's (`06_hotfixes/01_compute_stt.py::normalize_for_scoring`
+and `compute_metrics`), imported rather than reimplemented, so "over the gate"
+means the same thing here and in the real QC loop.
+
+**This is not a quality gate.** The default model is fine-tuned on v1 of this
+very dataset, so it has been taught this corpus's vocabulary and will agree
+with audio a neutral listener would reject. Read it as a gross-error detector
+(text dropped, syllables looped, the wrong text spoken, the clip truncated).
+For an impartial read, point `--model-dir` at the base export
+(`parakeet-tdt-0.6b-v3-redux-onnx`) or score with Whisper through stage 06.
+
 ## Ten voices (v2)
 
 v1 read the whole corpus with a single voice (`fr_female`). v2 spreads it over

@@ -529,6 +529,32 @@ voice. Covered by `tests/test_audio_truncation.py`, the duration and ladder
 checks in `tests/test_tts_wire_format.py`, and `tests/test_cfg_sidecar.py` (the
 rungs, the sidecar round trip and stage 06 publishing the per-clip value).
 
+**Listening to a run while it runs: `05_generate_audio/03_qc_cpu_stt.py`.** The
+duration bounds are the only check the audio gets during generation, and they
+cannot see a clip whose length is plausible but whose text is wrong. This
+sidecar process tails the audio directory plus the cfg_alpha sidecar and
+transcribes **every retried clip and a deterministic 5% sample** on the host's
+idle CPU cores with the int8 Parakeet ONNX export, scoring them with stage 06's
+own `normalize_for_scoring` / `compute_metrics` and gates (imported, not
+reimplemented, so "over the gate" means one thing in both stages). It writes
+`qc_stt_sidecar.jsonl` beside the audio, append-only and resumable, and logs a
+per-voice CER table. Why a sample: stage 05 writes audio at ~28.9x realtime and
+the CPU reads it at 7-9x (measured under the live run; above ~4 threads it is
+memory-bandwidth bound and fights the generator), so checking everything would
+fall ~1,900 hours behind over a 485k-clip stage, while the ~5.3% it does check
+needs ~1.5x realtime and costs the generator ~1-2%. Hence the defaults
+`--workers 1 --threads 3 --nice 10`: the fastest configuration is not the one
+to run beside a GPU feed. The sample is a salted hash of the clip stem, so it
+is stable across restarts and uncorrelated with the voice draw (which hashes
+too), without which the per-voice table would be reporting sampling bias.
+**Not a quality gate:** the default checkpoint is fine-tuned on v1 of this very
+dataset, so it is circular and only trustworthy for gross errors (dropped text,
+looping, wrong text, truncation); `--model-dir` at the base export is the
+impartial read. Covered by `tests/test_qc_cpu_stt.py` (the sample draw and its
+independence from the voice assignment, the sidecar tail including a torn line
+and a re-drawn stem, the resume, and the queue policy that drops stale samples
+but never a retried take).
+
 **Voices (v2).** Batch mode spreads the corpus over the ten French voices of
 `utils/voice_assignment.py` instead of reading all of it with one: the voice is a
 per-request field, so one run covers all ten with no restart. The flag default is
