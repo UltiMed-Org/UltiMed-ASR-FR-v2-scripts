@@ -1,0 +1,898 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "onnx-asr[cpu]>=0.6",
+#   "soundfile>=0.12",
+#   "jiwer>=3.0",
+#   "requests>=2.31",
+#   "numpy",
+#   "tqdm>=4.66",
+#   "loguru>=0.7",
+#   "click>=8.1",
+# ]
+# ///
+"""Tail a running stage-05 generation and STT-check a SAMPLE of its clips on the CPU.
+
+Why this exists
+---------------
+Stage 06 (`06_hotfixes/driver.sh`) already scores every clip against its label with a
+reference STT model, but it runs AFTER the whole corpus is on disk and it needs the GPU,
+so a systematic defect introduced on day 1 of an 8-day run is only discovered on day 9.
+Meanwhile the generator leaves 4-5 of this host's 12 threads idle (measured under the
+live v2 run: 35-46% CPU idle, the GPU being the bottleneck), and the UltiMed Parakeet
+ONNX export runs on CPU. This script spends those idle threads on an early warning.
+
+Why a SAMPLE and not every clip, which is the whole design constraint
+---------------------------------------------------------------------
+Measured on this host on 2026-10-14, on 12 real v2 dictionary clips (226.6 s of audio),
+WHILE the generator was running, with the int8 UltiMed encoder:
+
+    threads=4 workers=1   7.7x realtime   2.44 s per clip
+    threads=6 workers=1   6.7x realtime           (worse: memory-bandwidth bound)
+    threads=3 workers=2   9.4x realtime   2.01 s per clip   (best)
+
+Stage 05 writes audio at ~28.9x realtime (4,900 clips/h x ~21 s each), so the best CPU
+configuration covers about a THIRD of the stream: checking every clip would fall ~1,900
+hours of audio behind over the remaining 485k clips, and the benchmark runs themselves
+cost 7-10% of generation throughput while they ran (the 500-clip interval that contained
+them did 4,380 clips/h against ~4,860 for the three before it). So this script checks:
+
+  1. every clip that needed a RETRY, i.e. every clip with a row in
+     `cfg_alpha_sidecar.jsonl` (~0.3% of the stream). Highest value per second of CPU:
+     those takes were rejected at least once for their duration and then re-drawn one
+     rung down the cfg_alpha ladder, so they are the only clips in the corpus that
+     nobody, and nothing, has looked at twice.
+  2. a deterministic ~5% SAMPLE of everything else, which is enough to see per-voice CER
+     drift (a voice that starts dropping text, a text class that makes it ramble) within
+     hours instead of at stage 06.
+
+Together that is ~5.3% of the stream, i.e. ~1.5x realtime of STT, which one worker at 3
+threads delivers with ~80% of its duty cycle to spare, and costs the generator ~1-2%.
+Hence the defaults: `--workers 1 --threads 3 --nice 10`. Raising them buys nothing (the
+queue is already empty most of the time) and is taken straight out of the GPU's feed.
+
+What this is NOT
+----------------
+The UltiMed checkpoint was fine-tuned on **v1 of this very dataset**, so it is circular
+as a quality gate: it has been taught this corpus's vocabulary, including whatever v1 got
+wrong, and it will happily agree with audio a neutral listener would reject. Treat a CER
+here as a GROSS-error detector (text dropped, syllables looped, the wrong text spoken,
+the clip truncated) and not as evidence of quality. For an impartial read, point
+`--model-dir` at the base export (`parakeet-tdt-0.6b-v3-redux-onnx`) or score with
+Whisper via stage 06, which talks to an STT endpoint over HTTP.
+
+Output
+------
+One JSON line per checked clip in `qc_stt_sidecar.jsonl`, beside the audio and beside
+`cfg_alpha_sidecar.jsonl` (`--out-name` to rename, the file is append-only and a restart
+resumes from it). A clip over either gate is also logged at WARNING with its transcript,
+which is the line to grep for. The row carries `reason` ("retry" or "sample"), `voice`,
+`cfg_alpha`, `cer`, `wer`, `tail_cer`, `duration` and `stt_s`, so the same file answers
+both "which clips are bad" and "is one voice drifting".
+
+Usage
+-----
+    # tail the live run (all five stages; a stage is picked up when it starts producing)
+    ./03_qc_cpu_stt.py
+
+    # also work through the clips already on disk, then keep tailing
+    ./03_qc_cpu_stt.py --backfill
+
+    # one-shot, manual: check what is on disk now for one stage and exit
+    ./03_qc_cpu_stt.py --stage 01_dictionnary --backfill --once
+
+    # impartial second opinion on the retried clips only, no sample
+    ./03_qc_cpu_stt.py --sample-percent 0 \
+        --model-dir ../../parakeet-tdt-0.6b-v3-redux-onnx
+
+Stopping with Ctrl-C is safe at any moment: the clip in flight finishes, the queue is
+dropped, and the next run re-reads the output file and picks up where this one stopped.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import hashlib
+import importlib.util
+import json
+import os
+import signal
+import statistics
+import sys
+import threading
+import time
+from collections import Counter, deque
+from dataclasses import dataclass, field
+from pathlib import Path
+from types import SimpleNamespace
+
+import click
+import soundfile as sf
+from loguru import logger
+
+_HERE = Path(__file__).resolve().parent
+ROOT = _HERE.parent
+
+
+def _load_module(path: Path, name: str):
+    """Import a sibling script whose filename starts with a digit.
+
+    `02_audit_durations.py` and `06_hotfixes/01_compute_stt.py` are not importable by
+    name, and every other script in this repo reaches them with exactly this
+    `spec_from_file_location` trick, so this follows the convention rather than adding
+    a shared helper module no caller would find. Importing runs the module body only;
+    their `main()` is click-decorated and guarded by `if __name__ == "__main__"`.
+    """
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {path}")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+# The scoring half is stage 06's, not a second implementation: `normalize_for_scoring`
+# encodes years of decisions about what counts as a difference in this corpus (numbers
+# read aloud, roman numerals, plural endings, accents), and a private copy here would
+# drift and then disagree with the stage that actually gates the dataset.
+_stt = _load_module(ROOT / "06_hotfixes" / "01_compute_stt.py", "compute_stt_mod")
+# ...and the stage table is the duration auditor's, which already justifies its copy of
+# the runner's stage -> voice-mode pairing. Getting the mode wrong would judge a clip
+# against another voice's reader, so there must be exactly one copy to fix.
+_audit = _load_module(_HERE / "02_audit_durations.py", "stage05_audit")
+
+sys.path.insert(0, str(ROOT / "utils"))
+from cfg_sidecar import SIDECAR_FILENAME  # noqa: E402
+from nemo_manifest import parse_clip_name  # noqa: E402
+from voice_assignment import group_field, voice_for_row  # noqa: E402
+
+#: Where the per-clip QC rows land, beside the audio and the cfg_alpha sidecar.
+QC_FILENAME = "qc_stt_sidecar.jsonl"
+
+#: Salt for the sample draw. It exists so the sample is independent of the VOICE draw:
+#: `voice_assignment.voice_for_key` also hashes with blake2b, and a sample correlated
+#: with the voice assignment is exactly the one thing that would make the per-voice CER
+#: table in the summary lie. Changing this string re-draws the whole sample, so don't.
+QC_SAMPLE_SALT = "ultimed-v2-qc-sample"
+
+#: Resolution of the sample draw (a percentage is resolved to 1/10,000 of a percent).
+SAMPLE_RESOLUTION = 1_000_000
+
+#: The int8 ONNX export used by default. A sibling of this repo, so the path carries no
+#: username. It is the fine-tuned checkpoint: read the "What this is NOT" note above.
+DEFAULT_MODEL_DIR = ROOT.parent / "parakeet-tdt-0.6b-v3-UltiMed-onnx"
+
+#: Gates, same numbers stage 06 uses (`--cer-threshold` 0.08, `--tail-cer-threshold`
+#: 0.12, the latter looser because the tail window cuts mid-sentence). Shared values so
+#: "over the gate" means the same thing in both stages, and the early warning predicts
+#: what the real QC loop will flag rather than inventing a second standard.
+DEFAULT_CER_GATE = 0.08
+DEFAULT_TAIL_CER_GATE = 0.12
+
+
+def is_sampled(stem: str, *, percent: float, salt: str = QC_SAMPLE_SALT) -> bool:
+    """Whether a clip belongs to the deterministic sample.
+
+    Parameters
+    ----------
+    stem
+        Clip stem, e.g. ``004534_0006_apophyse_unciforme_des_vertebres_cervicales``.
+    percent
+        Share of clips to draw, in percent. ``0`` draws none, ``100`` draws all.
+    salt
+        See `QC_SAMPLE_SALT`.
+
+    Returns
+    -------
+    bool
+        Membership, which is a pure function of the stem: a restart, a re-run or a
+        second process all pick the SAME clips, so the sample stays a sample instead of
+        becoming a biased re-draw of whatever was on disk at restart time.
+
+    Examples
+    --------
+    >>> stems = [f"{i:06d}_0001_terme" for i in range(20000)]
+    >>> drawn = [s for s in stems if is_sampled(s, percent=5.0)]
+    >>> 850 <= len(drawn) <= 1150          # ~5% of 20,000, binomial noise aside
+    True
+    >>> is_sampled(stems[0], percent=5.0) == is_sampled(stems[0], percent=5.0)
+    True
+    """
+    if percent <= 0.0:
+        return False
+    if percent >= 100.0:
+        return True
+    digest = hashlib.blake2b(f"{salt}:{stem}".encode(), digest_size=8).digest()
+    cut = round(percent / 100.0 * SAMPLE_RESOLUTION)
+    return int.from_bytes(digest, "big") % SAMPLE_RESOLUTION < cut
+
+
+def load_cpu_model(model_dir: Path, *, quantization: str, threads: int):
+    """Load an onnx-asr Parakeet model from a LOCAL per-precision export directory.
+
+    Parameters
+    ----------
+    model_dir
+        A `parakeet-tdt-0.6b-v3-*-onnx` checkout.
+    quantization
+        Subfolder/precision to load, e.g. ``"int8"``.
+    threads
+        onnxruntime intra-op threads. Pinned deliberately: left alone, onnxruntime
+        takes every core and starves the process feeding the GPU, which is the one
+        thing this script must not do.
+
+    Notes
+    -----
+    The `relocate` shim is what the model repo's own README prescribes: onnx-asr globs
+    the repository ROOT for its model files, while these exports keep them one folder
+    deeper (`int8/encoder-model.int8.onnx`), so the loader finds nothing without it.
+    """
+    import onnx_asr
+    import onnxruntime as ort
+    from onnx_asr.loader import create_asr_resolver
+
+    def relocate(pattern: str) -> str:
+        basename = pattern.replace("?", ".")
+        for folder in ("int8/", "w4a8/", "fp16/", "fp32/", ""):
+            if (model_dir / folder / basename).is_file():
+                return folder + pattern
+        return pattern
+
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = threads
+    opts.inter_op_num_threads = 1
+
+    name = "nemo-parakeet-tdt-0.6b-v3"
+    model_type = create_asr_resolver(name, str(model_dir)).model_type
+    original = model_type._get_model_files
+    model_type._get_model_files = staticmethod(
+        lambda quantization=None: {k: relocate(v)
+                                   for k, v in original(quantization).items()})
+    try:
+        return onnx_asr.load_model(name, path=str(model_dir),
+                                   quantization=quantization, sess_options=opts)
+    finally:
+        model_type._get_model_files = staticmethod(original)
+
+
+@dataclass
+class Job:
+    """One clip to check."""
+
+    stage: str
+    stem: str
+    path: Path
+    reason: str                     # "retry" or "sample"
+    key: str                        # dedup key, see StageWatch.handled
+    cfg_alpha: float | None = None
+    src_ts: str | None = None       # the cfg_alpha sidecar row's timestamp, if any
+
+
+@dataclass
+class StageWatch:
+    """Everything needed to follow one stage directory.
+
+    The manifest is NOT held in memory as text: 602,885 rows of
+    `asr_training_source` would be a few hundred MB for the ~5% of them this script
+    ever reads. Instead `offsets` maps the clip's identity to a byte offset and the row
+    is seeked and parsed on demand, which is one disk read per checked clip.
+    """
+
+    name: str
+    mode: str
+    jsonl: Path
+    audio: Path
+    offsets: dict[int, int] | None = None   # term*10_000 + variant -> byte offset
+    voice_field: str | None = None          # the grouping field, decided once
+    handle: object | None = None            # open binary handle on the manifest
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    seen: set[str] = field(default_factory=set)      # every clip name listed so far
+    handled: set[str] = field(default_factory=set)   # dedup keys already queued/done
+    stems: set[str] = field(default_factory=set)     # stems queued under ANY reason
+    sidecar_offset: int = 0
+    ready: bool = False
+
+
+def row_key(term_index: int, variant_index: int) -> int:
+    """Pack a clip's identity into one int key.
+
+    The variant index is zero-padded to 4 digits in every clip name, so 10,000 is a
+    safe radix; a row above it could not be named by stage 05 in the first place.
+    """
+    return term_index * 10_000 + variant_index
+
+
+def ensure_index(watch: StageWatch) -> None:
+    """Build `watch.offsets` and decide `watch.voice_field`, then keep the manifest open.
+
+    Costs one pass over the stage's `generated_dataset.jsonl` (~8 s for the 534k-row
+    dictionary stage) and is done LAZILY, on the first clip of that stage that is
+    actually checked, so following all five stages costs nothing until they produce.
+    Called from the worker threads, hence the lock and the second `ready` test.
+    """
+    if watch.ready:
+        return
+    with watch.lock:
+        if watch.ready:
+            return
+        _index_manifest(watch)
+
+
+def _index_manifest(watch: StageWatch) -> None:
+    """The index pass itself. Call `ensure_index`, which guards it."""
+    offsets: dict[int, int] = {}
+    field_name: str | None = None
+    t0 = time.monotonic()
+    with watch.jsonl.open("rb") as fh:
+        offset = 0
+        for raw in fh:
+            length = len(raw)
+            if raw.strip():
+                try:
+                    row = json.loads(raw)
+                    key = row_key(int(row["term_index"]), int(row["variant_index"]))
+                except (ValueError, KeyError, TypeError):
+                    offset += length
+                    continue
+                offsets[key] = offset
+                # The grouping field is decided ONCE from the first valid row, exactly
+                # as the generator does it, because a later row missing `source_id`
+                # would otherwise regroup the rest of the file onto `term_index` and
+                # hand back the wrong voice for every clip after it.
+                if field_name is None:
+                    field_name = group_field(row)
+            offset += length
+    watch.offsets = offsets
+    watch.voice_field = field_name
+    watch.handle = watch.jsonl.open("rb")
+    watch.ready = True
+    logger.info("{}: indexed {} manifest rows in {:.1f}s (voice mode {}, field {})",
+                watch.name, len(offsets), time.monotonic() - t0, watch.mode, field_name)
+
+
+def manifest_row(watch: StageWatch, stem: str) -> dict | None:
+    """The manifest row behind a clip stem, or None when there is no such row.
+
+    `ensure_index` must have returned first: it holds the same lock while indexing, and
+    the two are called in sequence from the worker, never nested.
+    """
+    parsed = parse_clip_name(f"{stem}.flac")
+    if parsed is None or watch.offsets is None or watch.handle is None:
+        return None
+    offset = watch.offsets.get(row_key(parsed[0], parsed[1]))
+    if offset is None:
+        return None
+    with watch.lock:                     # one shared handle, so seek+read is critical
+        watch.handle.seek(offset)
+        raw = watch.handle.readline()
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return None
+
+
+@dataclass
+class Stats:
+    """Running totals, for the periodic summary."""
+
+    checked: int = 0
+    by_reason: Counter = field(default_factory=Counter)
+    over_gate: int = 0
+    dropped: int = 0
+    failed: int = 0
+    audio_s: float = 0.0
+    stt_s: float = 0.0
+    started: float = field(default_factory=time.monotonic)
+    cer_by_voice: dict[str, list[float]] = field(default_factory=dict)
+    over_by_voice: Counter = field(default_factory=Counter)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def add(self, *, reason: str, voice: str | None, cer: float | None,
+            over: bool, duration: float, stt_s: float) -> int:
+        """Fold one finished check in, and return the new total.
+
+        Locked because every worker writes here and ``+=`` on an attribute is a
+        read-modify-write, not an atomic operation: without it the totals quietly
+        drift low as soon as --workers is above 1. The returned count is what the
+        caller uses to decide whether this check lands on a summary boundary, so that
+        decision is made inside the lock too and no boundary is missed or doubled.
+        """
+        with self.lock:
+            self.checked += 1
+            self.by_reason[reason] += 1
+            self.audio_s += duration
+            self.stt_s += stt_s
+            if over:
+                self.over_gate += 1
+                self.over_by_voice[voice or "?"] += 1
+            if cer is not None:
+                self.cer_by_voice.setdefault(voice or "?", []).append(cer)
+            return self.checked
+
+    def bump(self, attr: str) -> None:
+        """Increment one of the error counters under the same lock."""
+        with self.lock:
+            setattr(self, attr, getattr(self, attr) + 1)
+
+    def lines(self, *, workers: int) -> list[str]:
+        """The summary, as log lines: the cost of the QC first, then per-voice CER."""
+        with self.lock:
+            return self._lines(workers=workers)
+
+    def _lines(self, *, workers: int) -> list[str]:
+        """Render the summary. Call `lines`, which holds the lock."""
+        wall = max(time.monotonic() - self.started, 1e-9)
+        pct = 100.0 * self.over_gate / self.checked if self.checked else 0.0
+        out = [
+            f"qc: {self.checked} clip(s) checked "
+            f"({', '.join(f'{n} {r}' for r, n in sorted(self.by_reason.items()))}), "
+            f"{self.over_gate} over gate ({pct:.1f}%)"
+            + (f", {self.dropped} sample(s) dropped to keep up" if self.dropped else "")
+            + (f", {self.failed} failed" if self.failed else ""),
+            f"qc cost: {self.audio_s / 3600:.2f} h of audio read in "
+            f"{self.stt_s / 60:.1f} min of CPU "
+            f"({self.audio_s / self.stt_s if self.stt_s else 0:.1f}x realtime), "
+            f"{100 * self.stt_s / (wall * max(workers, 1)):.0f}% duty cycle over "
+            f"{wall / 3600:.2f} h",
+        ]
+        for voice, cers in sorted(self.cer_by_voice.items()):
+            ordered = sorted(cers)
+            p90 = ordered[min(len(ordered) - 1, int(0.9 * len(ordered)))]
+            out.append(f"  {voice:<12} n={len(ordered):<6} "
+                       f"CER median {statistics.median(ordered):.4f} p90 {p90:.4f} "
+                       f"over {self.over_by_voice.get(voice, 0)}")
+        return out
+
+
+class Context:
+    """Queues, output file and stats, shared by the poller and the worker threads."""
+
+    def __init__(self, cfg, watches: dict[str, StageWatch]) -> None:
+        self.cfg = cfg
+        self.watches = watches
+        self.stop = threading.Event()
+        self.lock = threading.Lock()
+        # Two queues, not one, because the two populations are not worth the same: a
+        # retried clip is the whole point of this script, a sampled one is one of
+        # 25,000 interchangeable draws. So retries are served first and are never the
+        # ones dropped when the CPU falls behind.
+        self.retries: deque[Job] = deque()
+        self.samples: deque[Job] = deque()
+        self.in_flight = 0
+        self.stats = Stats()
+        self.write_lock = threading.Lock()
+
+    def enqueue(self, job: Job) -> None:
+        watch = self.watches[job.stage]
+        with self.lock:
+            # A retried clip is dedup'd on its TAKE (stem + the sidecar row's
+            # timestamp), a sampled one on its stem alone. The extra stem test is what
+            # keeps a retried clip out of the sample as well: it is already going to be
+            # checked, under the label that says why, and transcribing it twice would
+            # spend the scarce CPU on a clip already covered and count it twice in the
+            # per-voice table.
+            if job.key in watch.handled:
+                return
+            if job.reason == "sample" and job.stem in watch.stems:
+                return
+            watch.handled.add(job.key)
+            watch.stems.add(job.stem)
+            if job.reason == "retry":
+                self.retries.append(job)
+                return
+            self.samples.append(job)
+            # The backlog is capped so a stall (a slow disk, a paused process, a
+            # --backfill of a finished stage) cannot grow the queue without bound.
+            # The OLDEST samples go, since a fresh clip says more about the run's
+            # current state than one from an hour ago.
+            while len(self.samples) > self.cfg.max_queue:
+                self.samples.popleft()
+                self.stats.bump("dropped")
+
+    def next_job(self) -> Job | None:
+        with self.lock:
+            for queue in (self.retries, self.samples):
+                if queue:
+                    self.in_flight += 1
+                    return queue.popleft()
+            return None
+
+    def done(self) -> None:
+        with self.lock:
+            self.in_flight -= 1
+
+    def idle(self) -> bool:
+        with self.lock:
+            return not self.retries and not self.samples and self.in_flight == 0
+
+    def depth(self) -> tuple[int, int]:
+        with self.lock:
+            return len(self.retries), len(self.samples)
+
+    def write(self, path: Path, row: dict) -> None:
+        line = json.dumps(row, ensure_ascii=False) + "\n"
+        with self.write_lock:
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(line)
+
+
+def poll_sidecar(watch: StageWatch, ctx: Context) -> None:
+    """Queue every clip that appeared in `cfg_alpha_sidecar.jsonl` since the last poll.
+
+    The sidecar is append-only, so it is read from a byte offset rather than re-parsed
+    whole: that is cheap, and it also makes a RE-DRAWN clip a new job. Stage 05 appends
+    a fresh row whenever it re-draws a stem that already had one (`02_audit_durations.py`
+    repairs a clip by deleting it, and the next resume regenerates it), and the new take
+    deserves its own check, which a stem-keyed dedup would swallow.
+    """
+    path = watch.audio / SIDECAR_FILENAME
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+    if size <= watch.sidecar_offset:
+        if size < watch.sidecar_offset:      # truncated/replaced: start over
+            watch.sidecar_offset = 0
+        else:
+            return
+    with path.open("rb") as fh:
+        fh.seek(watch.sidecar_offset)
+        data = fh.read()
+    # Only advance past COMPLETE lines: stage 05 may be mid-append, and half a row now
+    # must be re-read in full on the next poll rather than parsed and lost.
+    tail = data.rfind(b"\n")
+    if tail < 0:
+        return
+    watch.sidecar_offset += tail + 1
+    for raw in data[:tail].splitlines():
+        if not raw.strip():
+            continue
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            continue
+        stem = row.get("stem")
+        if not stem:
+            continue
+        clip = watch.audio / f"{stem}.flac"
+        if not clip.is_file():               # deleted by the duration auditor since
+            continue
+        ts = row.get("ts") or ""
+        ctx.enqueue(Job(stage=watch.name, stem=stem, path=clip, reason="retry",
+                        key=f"{stem}@{ts}", cfg_alpha=row.get("cfg_alpha"),
+                        src_ts=ts or None))
+
+
+def poll_audio(watch: StageWatch, ctx: Context) -> int:
+    """Queue the sampled clips that appeared in the audio directory since the last poll.
+
+    Returns the number of NEW clip files seen, sampled or not, which is what the caller
+    uses to notice that a stage has started producing.
+    """
+    try:
+        names = os.listdir(watch.audio)
+    except OSError as exc:
+        logger.debug("{}: cannot list {} ({})", watch.name, watch.audio, exc)
+        return 0
+    fresh = 0
+    for name in names:
+        if name in watch.seen:
+            continue
+        watch.seen.add(name)
+        # parse_clip_name rejects everything that is not a finished clip: the two
+        # sidecars, voice_assignment.json, and the `*.flac.tmp` a clip is written to
+        # before its atomic rename (so a half-written file is never read).
+        if parse_clip_name(name) is None:
+            continue
+        fresh += 1
+        stem = name[: -len(".flac")]
+        if is_sampled(stem, percent=ctx.cfg.sample_percent):
+            ctx.enqueue(Job(stage=watch.name, stem=stem, path=watch.audio / name,
+                            reason="sample", key=stem))
+    return fresh
+
+
+def seed_handled(watch: StageWatch, out_path: Path) -> int:
+    """Re-read this stage's own QC output so a restart does not redo its work.
+
+    Keys are rebuilt exactly as `poll_sidecar` / `poll_audio` build them, which is why
+    the retry rows carry `src_ts`: it is the identity of the TAKE, not of the clip.
+    """
+    if not out_path.is_file():
+        return 0
+    count = 0
+    with out_path.open(encoding="utf-8") as fh:
+        for raw in fh:
+            if not raw.strip():
+                continue
+            try:
+                row = json.loads(raw)
+            except ValueError:
+                continue                     # torn final line of a killed run
+            stem = row.get("stem")
+            if not stem:
+                continue
+            if row.get("reason") == "retry":
+                watch.handled.add(f"{stem}@{row.get('src_ts') or ''}")
+            else:
+                watch.handled.add(stem)
+            watch.stems.add(stem)
+            count += 1
+    return count
+
+
+def check_clip(job: Job, model, watch: StageWatch, ctx: Context) -> None:
+    """Transcribe one clip, score it against its label, and append its QC row."""
+    cfg = ctx.cfg
+    ensure_index(watch)
+    row = manifest_row(watch, job.stem)
+    if row is None:
+        logger.warning("{}: no manifest row, not checked", job.stem)
+        ctx.stats.bump("failed")
+        return
+    reference = _stt.get_reference(row, cfg.reference_key)
+    if not reference:
+        logger.warning("{}: manifest row has no {}, not checked",
+                       job.stem, cfg.reference_key)
+        ctx.stats.bump("failed")
+        return
+    voice = voice_for_row(row, field=watch.voice_field, mode=watch.mode)
+
+    t0 = time.monotonic()
+    try:
+        wav, sr = sf.read(str(job.path), dtype="float32", always_2d=False)
+    except Exception as exc:                 # noqa: BLE001 - a vanished/torn clip is
+        logger.warning("{}: unreadable ({}), not checked", job.stem, exc)
+        ctx.stats.bump("failed")                # reported, never fatal
+        return
+    if getattr(wav, "ndim", 1) > 1:
+        wav = wav.mean(axis=1)
+    duration = len(wav) / sr if sr else 0.0
+    # onnx-asr resamples to the model's 16 kHz itself when handed a waveform plus its
+    # rate; its path API cannot be used here because it reads WAV through the stdlib
+    # `wave` module only, and this corpus is 24 kHz FLAC.
+    transcript = model.recognize(wav, sample_rate=sr)
+    stt_s = time.monotonic() - t0
+
+    wer, cer = _stt.compute_metrics(reference, transcript)
+    tail = _stt.tail_cer(reference, transcript, duration)
+    over = ((cer is not None and cer >= cfg.cer_threshold)
+            or (tail is not None and tail >= cfg.tail_cer_threshold))
+
+    out_row = {
+        "stem": job.stem,
+        "stage": job.stage,
+        "reason": job.reason,
+        "voice": voice,
+        "duration": round(duration, 2),
+        "cer": None if cer is None else round(cer, 4),
+        "wer": None if wer is None else round(wer, 4),
+        "tail_cer": None if tail is None else round(tail, 4),
+        "over_gate": over,
+        "stt_s": round(stt_s, 2),
+        "ts": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if job.cfg_alpha is not None:
+        out_row["cfg_alpha"] = job.cfg_alpha
+    if job.src_ts:
+        out_row["src_ts"] = job.src_ts
+    # The transcript is kept only where it is evidence. On a clean clip it repeats the
+    # label and would add ~8 MB per 25,000 rows for nothing; on a flagged one it is the
+    # entire reason to look, and the audio may well be deleted and re-drawn before
+    # anyone does.
+    if over or cfg.keep_transcripts:
+        out_row["transcript"] = transcript
+        out_row["reference"] = reference
+    ctx.write(watch.audio / cfg.out_name, out_row)
+
+    total = ctx.stats.add(reason=job.reason, voice=voice, cer=cer, over=over,
+                          duration=duration, stt_s=stt_s)
+    if cfg.summary_every and total % cfg.summary_every == 0:
+        for line in ctx.stats.lines(workers=cfg.workers):
+            logger.info(line)
+    if over:
+        logger.warning("{} [{}, {}]: CER {} tail {} ({:.1f}s) -> {}",
+                       job.stem, job.reason, voice,
+                       "n/a" if cer is None else f"{cer:.3f}",
+                       "n/a" if tail is None else f"{tail:.3f}",
+                       duration, transcript[:160])
+
+
+def worker_loop(model, ctx: Context) -> None:
+    """Drain the queues until asked to stop, retries before samples."""
+    while not ctx.stop.is_set():
+        job = ctx.next_job()
+        if job is None:
+            ctx.stop.wait(1.0)
+            continue
+        try:
+            check_clip(job, model, ctx.watches[job.stage], ctx)
+        except Exception as exc:             # noqa: BLE001 - one bad clip must not
+            logger.exception("{}: check failed ({})", job.stem, exc)   # end the run
+            ctx.stats.bump("failed")
+        finally:
+            ctx.done()
+
+
+@click.command(context_settings={"help_option_names": ["-h", "--help"]})
+@click.option("--stage", "stages", multiple=True, type=str,
+              help="Stage directory to follow, repeatable (default: all five, "
+                   f"{', '.join(_audit.STAGES)}). A stage that is not producing yet "
+                   "costs nothing: its manifest is only indexed once a clip of its "
+                   "own shows up.")
+@click.option("--model-dir", type=click.Path(file_okay=False, path_type=Path),
+              default=str(DEFAULT_MODEL_DIR), show_default=True,
+              help="A parakeet-tdt-0.6b-v3-*-onnx export. The default is fine-tuned "
+                   "on v1 of THIS dataset, so it is a gross-error detector, not an "
+                   "impartial judge: see the module docstring.")
+@click.option("--quantization", default="int8", show_default=True,
+              help="Precision subfolder of the export to load. int8 is the one "
+                   "measured on this host; fp16 is ~2x slower on CPU.")
+@click.option("--sample-percent", default=5.0, show_default=True,
+              help="Percent of clips to check beyond the retried ones. The draw is a "
+                   "hash of the clip stem, so it is identical across restarts. 0 "
+                   "checks only clips that needed a retry.")
+@click.option("--retries/--no-retries", "do_retries", default=True, show_default=True,
+              help="Check every clip that has a cfg_alpha_sidecar.jsonl row, i.e. "
+                   "every clip whose first take was rejected for its duration.")
+@click.option("--threads", default=3, show_default=True,
+              help="onnxruntime intra-op threads PER worker. Measured on this host: "
+                   "3 threads x 2 workers 9.4x realtime, 4x1 7.7x, 6x1 6.7x (past ~4 "
+                   "it is memory-bandwidth bound and fights the generator).")
+@click.option("--workers", default=1, show_default=True,
+              help="Parallel checks. 1 is deliberate: a 5% sample needs ~1.5x "
+                   "realtime and one worker delivers ~7x, so a second one would only "
+                   "take threads from the process feeding the GPU.")
+@click.option("--nice", "nice_level", default=10, show_default=True,
+              help="Niceness applied to this process, so the generator wins every "
+                   "contested timeslice. 0 to leave the priority alone.")
+@click.option("--poll-seconds", default=30.0, show_default=True,
+              help="How often to look for new clips and new sidecar rows.")
+@click.option("--max-queue", default=2000, show_default=True,
+              help="Cap on QUEUED samples; the oldest are dropped past it (counted in "
+                   "the summary). Retries are never dropped.")
+@click.option("--cer-threshold", default=DEFAULT_CER_GATE, show_default=True,
+              help="Whole-clip CER at or above which a clip is logged and keeps its "
+                   "transcript. Stage 06's own gate.")
+@click.option("--tail-cer-threshold", default=DEFAULT_TAIL_CER_GATE, show_default=True,
+              help="Same, for the CER of the clip's last ~30 s, where truncations and "
+                   "derailed endings live. Looser, like stage 06's.")
+@click.option("--reference-key", default="asr_training_source", show_default=True,
+              help="Manifest field holding the text the TTS was asked to say.")
+@click.option("--backfill", is_flag=True,
+              help="Also check the clips (and sidecar rows) ALREADY on disk. Without "
+                   "it only clips that appear from now on are checked.")
+@click.option("--once", is_flag=True,
+              help="Drain the current queue and exit instead of tailing. With "
+                   "--backfill this is the manual 'check this folder' mode.")
+@click.option("--summary-every", default=200, show_default=True,
+              help="Log the per-voice CER table every N checks (0 to only log it at "
+                   "exit).")
+@click.option("--keep-transcripts", is_flag=True,
+              help="Store the transcript of every checked clip, not just the flagged "
+                   "ones (~8 MB per 25k clips).")
+@click.option("--out-name", default=QC_FILENAME, show_default=True,
+              help="Output filename, written in each stage's audio directory.")
+@click.option("--log-file", default="qc_cpu_stt.log", show_default=True,
+              help="Append the log here as well as to stderr; empty string disables. "
+                   "A bare filename lands beside this script.")
+def main(stages: tuple[str, ...], model_dir: Path, quantization: str,
+         sample_percent: float, do_retries: bool, threads: int, workers: int,
+         nice_level: int, poll_seconds: float, max_queue: int, cer_threshold: float,
+         tail_cer_threshold: float, reference_key: str, backfill: bool, once: bool,
+         summary_every: int, keep_transcripts: bool, out_name: str,
+         log_file: str) -> None:
+    """STT-check a sample of a running stage-05 generation on the spare CPU cores."""
+    logger.remove()
+    logger.add(sys.stderr, format="{time:YYYY-MM-DD HH:mm:ss} | <level>{message}</level>",
+               level="INFO")
+    if log_file:
+        log_path = Path(log_file)
+        logger.add(log_path if log_path.is_absolute() else _HERE / log_path, format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
+                   level="INFO", enqueue=True)
+
+    names = stages or tuple(_audit.STAGES)
+    unknown = [n for n in names if n not in _audit.STAGES]
+    if unknown:
+        raise click.BadParameter(
+            f"unknown stage(s) {unknown}, known: {list(_audit.STAGES)}")
+    if nice_level:
+        try:
+            os.nice(nice_level)
+        except OSError as exc:
+            logger.warning("could not renice to +{} ({})", nice_level, exc)
+
+    cfg = SimpleNamespace(
+        sample_percent=sample_percent, max_queue=max_queue,
+        cer_threshold=cer_threshold, tail_cer_threshold=tail_cer_threshold,
+        reference_key=reference_key, out_name=out_name, workers=workers,
+        keep_transcripts=keep_transcripts, summary_every=summary_every)
+
+    watches: dict[str, StageWatch] = {}
+    for name in names:
+        stage_dir = ROOT / name
+        jsonl = stage_dir / "generated_dataset.jsonl"
+        audio = stage_dir / "generated_audios"
+        if not jsonl.is_file() or not audio.exists():
+            logger.warning("{}: no generated_dataset.jsonl or generated_audios, skipped",
+                           name)
+            continue
+        # Resolve the symlink: these directories point at an external SSD, and
+        # `os.listdir` on the link works but every logged path would be the link.
+        watches[name] = StageWatch(name=name, mode=_audit.STAGES[name], jsonl=jsonl,
+                                   audio=audio.resolve())
+    if not watches:
+        raise click.ClickException("no stage to follow")
+
+    ctx = Context(cfg, watches)
+
+    for watch in watches.values():
+        resumed = seed_handled(watch, watch.audio / out_name)
+        if not backfill:
+            # Mark what is already on disk as seen WITHOUT queueing it, which is what
+            # makes the default mode a tail: only clips generated from now on are
+            # checked. The sidecar is skipped the same way, by starting at its EOF.
+            try:
+                watch.seen.update(os.listdir(watch.audio))
+            except OSError:
+                pass
+            try:
+                watch.sidecar_offset = (watch.audio / SIDECAR_FILENAME).stat().st_size
+            except OSError:
+                watch.sidecar_offset = 0
+        logger.info("{}: following {} ({} clip(s) on disk, {} already checked{})",
+                    watch.name, watch.audio, len(watch.seen), resumed,
+                    ", backfilling" if backfill else "")
+
+    logger.info("loading {} ({}) with {} thread(s) x {} worker(s)...",
+                model_dir.name, quantization, threads, workers)
+    t0 = time.monotonic()
+    model = load_cpu_model(model_dir.resolve(), quantization=quantization,
+                           threads=threads)
+    logger.info("model loaded in {:.1f}s; sample {}%, retries {}, gates {} / {} (tail)",
+                time.monotonic() - t0, sample_percent,
+                "on" if do_retries else "off", cer_threshold, tail_cer_threshold)
+
+    def _stop(signum, _frame):
+        logger.warning("signal {}, finishing the clip in flight and stopping", signum)
+        ctx.stop.set()
+
+    signal.signal(signal.SIGINT, _stop)
+    signal.signal(signal.SIGTERM, _stop)
+
+    # The model is shared by every worker on purpose: an onnxruntime session is
+    # thread-safe for Run(), and a second copy of the encoder would cost another
+    # 619 MB of RAM for nothing.
+    pool = [threading.Thread(target=worker_loop, args=(model, ctx), daemon=True,
+                             name=f"qc{i}") for i in range(max(workers, 1))]
+    for thread in pool:
+        thread.start()
+
+    try:
+        while not ctx.stop.is_set():
+            for watch in watches.values():
+                # Classifying a clip needs only its stem (the sample is a hash) and the
+                # cfg_alpha sidecar, so the poller never touches the manifest: the index
+                # is built by the first worker that actually has a clip to check, which
+                # is what keeps following all five stages free until they produce.
+                poll_audio(watch, ctx)
+                if do_retries:
+                    poll_sidecar(watch, ctx)
+            if once and ctx.idle():
+                break
+            retry_depth, sample_depth = ctx.depth()
+            if retry_depth or sample_depth:
+                logger.info("queue: {} retry, {} sample", retry_depth, sample_depth)
+            ctx.stop.wait(1.0 if once else poll_seconds)
+    finally:
+        ctx.stop.set()
+        for thread in pool:
+            thread.join(timeout=120)
+        for line in ctx.stats.lines(workers=workers):
+            logger.info(line)
+
+
+if __name__ == "__main__":
+    main()
