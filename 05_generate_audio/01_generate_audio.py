@@ -80,6 +80,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import io
+import math
 import json
 import re
 import sys
@@ -152,6 +153,11 @@ VOXTRAL_VOICES = [
 VOXTRAL_FRAME_RATE_HZ = 12.5
 VOXTRAL_DEFAULT_MAX_NEW_TOKENS = 4096  # -> 327.68 s of audio
 TRUNCATION_TOLERANCE_S = 0.5
+# Terms of the per-clip frame budget, see budget_seconds() for the measurement they
+# come from. They are module constants rather than literals in the parser so the
+# tests and stage 06 can import the same numbers.
+BUDGET_FIXED_S = 3.0
+BUDGET_CHARS_PER_S = 8.0
 # How often the run writes a progress line (with an absolute ETA) to the log, in
 # clips. The tqdm bar is for the terminal; this is for a run measured in days,
 # where the bar is gone after a tmux detach or a scrollback wipe and the only
@@ -168,6 +174,44 @@ class TruncatedAudioError(RuntimeError):
 def frame_cap_seconds(max_new_tokens: int = VOXTRAL_DEFAULT_MAX_NEW_TOKENS) -> float:
     """Longest clip the backend can emit under a given frame budget, in seconds."""
     return max_new_tokens / VOXTRAL_FRAME_RATE_HZ
+
+
+def budget_seconds(text: str, fixed: float = BUDGET_FIXED_S,
+                   chars_per_second: float = BUDGET_CHARS_PER_S) -> float:
+    """Longest duration this text can PLAUSIBLY take, in seconds.
+
+    `fixed` seconds of head and tail room plus one second per `chars_per_second`
+    characters. Measured over the 602,813 v1 clips that carry both their TTS input
+    (`asr_training_source`) and a duration: the model reads French at 16.6 characters
+    per second of audio (median), 13.2 at p1, 11.6 at p0.1, and the default
+    3 s + chars/8 would have cut **7 of those 602,813 clips** (0.001%, all of them on
+    the document stages). It is therefore a runaway detector rather than a length
+    limit: a 60-character dictionary term gets 10.5 s instead of the server's global
+    327.68 s cap, so a take that starts looping syllables is stopped in seconds.
+
+    Parameters
+    ----------
+    text
+        The exact string sent as `input`, not the ASR target: the TTS respellings
+        change the length (IgM -> I-gé-M).
+    fixed, chars_per_second
+        The two terms of the budget, exposed as CLI flags for stages whose prosody
+        differs (a slower voice needs a lower `chars_per_second`).
+    """
+    return fixed + len(text) / chars_per_second
+
+
+def budget_tokens(text: str, fixed: float = BUDGET_FIXED_S,
+                  chars_per_second: float = BUDGET_CHARS_PER_S) -> int:
+    """`budget_seconds` as a frame count for the request's `max_new_tokens`.
+
+    Stage 0 emits one 12.5 Hz frame per decode step, so seconds * 12.5 = frames. The
+    result is clamped to the server's own ceiling (vllm-omni refuses more than
+    `_TTS_MAX_NEW_TOKENS_MAX` = 4096) and to a floor of 64 frames (5.12 s), below
+    which a short text plus an unlucky lead-in silence could be cut legitimately.
+    """
+    frames = math.ceil(budget_seconds(text, fixed, chars_per_second) * VOXTRAL_FRAME_RATE_HZ)
+    return max(64, min(VOXTRAL_DEFAULT_MAX_NEW_TOKENS, frames))
 
 
 def is_truncated(duration: float | None, cap_seconds: float | None,
@@ -206,6 +250,16 @@ def build_body(text: str, args: argparse.Namespace, voice: str | None = None) ->
     restart: see run_batch.
     """
     body: dict = {"input": text, "response_format": args.format}
+    # A per-clip frame budget turns a runaway take into a cheap, detected failure: the
+    # server stops it at ~1.3x the plausible duration instead of generating up to
+    # 327.68 s of looping syllables, which costs a slot ~6 minutes and (when it stops
+    # just under the cap) silently lands rambling audio in the dataset under a short
+    # label. Opt-in because it changes what the server is asked for, and the 1.68%
+    # of over-long clips it is aimed at is a cfg_alpha 2.0 phenomenon (v1 at 1.3 had
+    # 0.0004%), so a future run at a lower cfg_alpha may not need it.
+    if getattr(args, "auto_token_budget", False):
+        body["max_new_tokens"] = budget_tokens(
+            text, args.budget_fixed_seconds, args.budget_chars_per_second)
     optional = {
         "model": args.model,
         "instructions": args.instruction,
@@ -277,10 +331,15 @@ def synthesize(base_url: str, text: str, out: Path,
         raise RuntimeError(f"server returned {code} after {elapsed:.2f}s: "
                            f"{payload[:500].decode('utf-8', 'replace')}")
     dur = payload_duration(payload)
-    if is_truncated(dur, args.max_audio_seconds):
+    # With a per-clip budget the cap to compare against is that budget, not the
+    # server's global one: the whole point is to catch the clip that ran long for its
+    # text, which the 327.68 s cap only catches in the worst case.
+    cap = (budget_seconds(text, args.budget_fixed_seconds, args.budget_chars_per_second)
+           if getattr(args, "auto_token_budget", False) else args.max_audio_seconds)
+    if is_truncated(dur, cap):
         raise TruncatedAudioError(
             f"clip stopped at the backend frame cap ({dur:.2f}s >= "
-            f"{args.max_audio_seconds:.2f}s): generation stopped for length, not at the "
+            f"{cap:.2f}s): generation stopped for length, not at the "
             f"end of the text, so the audio is cut short. Not written. Shorten the input "
             f"({len(text)} chars) or raise the server's max_new_tokens and "
             f"--max-audio-seconds together."
@@ -642,6 +701,23 @@ def main() -> int:
                         f"{VOXTRAL_DEFAULT_MAX_NEW_TOKENS} frames at "
                         f"{VOXTRAL_FRAME_RATE_HZ} Hz); must match the server's actual "
                         "VOXTRAL_MAX_TOKENS. 0 disables the check.")
+    p.add_argument("--auto-token-budget", action="store_true",
+                   help="Ask the server for only as many frames as the text can "
+                        "plausibly need (max_new_tokens = "
+                        f"{BUDGET_FIXED_S:.0f}s + chars/{BUDGET_CHARS_PER_S:.0f} at "
+                        f"{VOXTRAL_FRAME_RATE_HZ} Hz) and judge truncation against that "
+                        "budget instead of the global cap. Stops a looping take in "
+                        "seconds instead of letting it run to 327.68s, and keeps "
+                        "rambling audio out of the dataset. Measured safe: it would "
+                        "have cut 7 of 602,813 real v1 clips.")
+    p.add_argument("--budget-fixed-seconds", type=float, default=BUDGET_FIXED_S,
+                   help="Head/tail room term of --auto-token-budget (default: "
+                        f"{BUDGET_FIXED_S}).")
+    p.add_argument("--budget-chars-per-second", type=float, default=BUDGET_CHARS_PER_S,
+                   help="Slowest plausible reading speed in characters per second of "
+                        f"audio, the other term of --auto-token-budget (default: "
+                        f"{BUDGET_CHARS_PER_S}; measured median 16.6, p1 13.2, p0.1 "
+                        "11.6 over 602,813 v1 clips).")
     p.add_argument("--log-file", default=str(DEFAULT_LOG_FILE),
                    help=f"Loguru log file, appended to (default: {DEFAULT_LOG_FILE}).")
 

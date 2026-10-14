@@ -140,8 +140,82 @@ def test_stage06_omits_extra_params_when_nothing_is_set() -> None:
     print("OK stage 06 omits extra_params when no knob is set")
 
 
+def test_stage05_token_budget_is_opt_in_and_sized_from_the_text() -> None:
+    """The per-clip frame budget: off by default, and proportional when on.
+
+    It must stay off unless asked for, because it changes what the server generates
+    for every clip of a 600k-row run. When on, the budget is the one measured in
+    budget_seconds(): 3 s plus one second per 8 characters, at 12.5 frames per
+    second, which for a 60-character term is 10.5 s (132 frames) instead of the
+    server's global 4096 frames.
+    """
+    tts = load_module(TTS_PATH, "tts_budget_under_test")
+    text = "a" * 60
+
+    plain = tts.build_body(text, _stage05_args())
+    assert "max_new_tokens" not in plain, "the budget must be opt-in"
+
+    args = _stage05_args(auto_token_budget=True, budget_fixed_seconds=3.0,
+                         budget_chars_per_second=8.0)
+    body = tts.build_body(text, args)
+    assert body["max_new_tokens"] == 132, body["max_new_tokens"]
+    assert abs(tts.budget_seconds(text, 3.0, 8.0) - 10.5) < 1e-9
+
+    # Clamped at both ends: never above the server's ceiling, never so low that a
+    # short text plus a lead-in silence could be cut legitimately.
+    assert tts.budget_tokens("x" * 100_000, 3.0, 8.0) == tts.VOXTRAL_DEFAULT_MAX_NEW_TOKENS
+    assert tts.budget_tokens("", 0.1, 8.0) == 64
+    print("OK stage 05 token budget is opt-in and proportional to the text")
+
+
+def test_stage05_judges_truncation_against_the_budget() -> None:
+    """A clip that runs long FOR ITS TEXT must be rejected, not written.
+
+    This is the half that keeps rambling audio out of the dataset: a 60-character
+    term that comes back as 30 s of audio stopped for length somewhere, and under
+    the global 327.68 s cap alone nothing would notice (observed on the live run at
+    cfg_alpha 2.0: 1.68% of dictionary clips over 41.2 s, v1's own maximum, up to
+    202 s).
+    """
+    import wave, io, tempfile
+
+    tts = load_module(TTS_PATH, "tts_budget_truncation")
+
+    def wav_of(seconds: float) -> bytes:
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(24000)
+            w.writeframes(b"\x00\x00" * int(24000 * seconds))
+        return buf.getvalue()
+
+    tts.post_json = lambda url, body, timeout: (200, wav_of(30.0), 1.0)
+    text = "a" * 60          # budget 10.5 s, so 30 s of audio is a runaway
+
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "clip.flac"
+        args = _stage05_args(auto_token_budget=True, budget_fixed_seconds=3.0,
+                             budget_chars_per_second=8.0, timeout=600.0,
+                             max_audio_seconds=327.68)
+        try:
+            tts.synthesize("http://stub", text, out, args)
+            raise AssertionError("a 30 s clip for a 10.5 s budget must be rejected")
+        except tts.TruncatedAudioError:
+            pass
+        assert not out.exists(), "nothing may be written, so a resume retries the clip"
+
+        # Same clip, budget off: the global cap is 327.68 s, so 30 s is accepted.
+        args.auto_token_budget = False
+        tts.synthesize("http://stub", text, out, args)
+        assert out.exists()
+    print("OK stage 05 rejects a clip that runs long for its own text")
+
+
 if __name__ == "__main__":
     test_stage05_nests_the_seed()
     test_stage06_nests_seed_and_cfg_alpha()
     test_stage06_omits_extra_params_when_nothing_is_set()
+    test_stage05_token_budget_is_opt_in_and_sized_from_the_text()
+    test_stage05_judges_truncation_against_the_budget()
     print("OK all")
