@@ -26,30 +26,39 @@ cd "$(dirname "$(readlink -f "$0")")"
 # Knobs, all overridable from the environment. cfg_alpha 2.0 is the measured top
 # of the usable band (1.2 to 2.0); stage 06's retry ladder walks DOWN from it.
 CFG_ALPHA="${CFG_ALPHA:-2.0}"
-# 16 requests in flight, measured on 2026-10-14, NOT the 10 v1 started with (v1
-# itself moved to 15 after its first day and ran 8 days there). Two reasons for 16:
-# the server's CUDA-graph capture sizes are [1,2,4,8,16,32] and the batch is padded
-# UP to the next one, so 10 in flight executes the 16-row graph with 6 empty rows;
-# and the measured throughput follows, 2,070 clips/h at 10 against 3,042 at 15 with
-# the SAME 17.4 s per clip (v1's own log), then 3,860 clips/h / 23.1x realtime at 16.
-# CONCURRENCY=32 (the top capture bucket) was measured at 26.8x realtime, i.e. +16%
-# for ~70% more latency per clip: worth about 19 h over the full corpus and harmless
-# for a batch job, but it is not the free doubling the bucket size suggests. Do not
-# go above 32: a batch larger than the biggest captured graph loses the graph.
-CONCURRENCY="${CONCURRENCY:-16}"
+# 32 requests in flight, the top of the server's CUDA-graph capture sizes
+# ([1,2,4,8,16,32], with the batch padded UP to the next one, so 17..32 in flight all
+# execute the same 32-row graph and the Euler loop runs once over the whole batch).
+# NOT the 10 v1 started with (v1 itself moved to 15 after a day and stayed 8 days).
+# Measured on 2026-10-14, same server, same clips:
+#   10 in flight  2,070 clips/h  17.4 s per clip   (v1's log)
+#   15 in flight  3,042 clips/h  17.4 s per clip   (v1's log, same evening)
+#   16 in flight  3,860 clips/h  14.9 s per clip   23.1x realtime
+#   32 in flight  4,610-4,960    25.1 s per clip   28-30x realtime
+# So +50% from 10 to 15 at identical latency, then +22% more at 32 for ~70% more
+# latency per clip (48 -> 89 ms per audio frame), which a batch run does not care
+# about. Do NOT go above 32: a batch larger than the biggest captured graph has no
+# graph to pad into. The longer per-clip latency is also why --timeout defaults to
+# 600 s: a clip running to the frame cap takes ~365 s at this concurrency.
+CONCURRENCY="${CONCURRENCY:-32}"
 URL="${URL:-http://127.0.0.1:8003}"
-# TOKEN_BUDGET=1 asks the server for only as many frames as each text can plausibly
-# need (3 s + chars/8), so a take that starts looping syllables is stopped in seconds
-# instead of running to the 327.68 s cap, and is left missing for a re-run to retry
-# instead of landing rambling audio in the dataset. Measured at cfg_alpha 2.0: 0.52%
-# of clips exceed that budget, the worst by 4.7x. Off by default because it changes
-# what the server is asked for on every clip; see the runbook, step 1.
-TOKEN_BUDGET="${TOKEN_BUDGET:-0}"
-budget_args=()
-# An `if` rather than `[ ... ] && ...`: the script runs under `set -e`, where a
-# trailing test that FAILS is the last command of the line and kills the run.
+# The per-clip frame budget, ON by default: the server is asked for only as many
+# frames as each text can plausibly need (3 s + chars/8 at 12.5 Hz), so a take that
+# starts looping syllables is stopped in seconds instead of running to the 327.68 s
+# cap, and is left missing for a re-run to retry instead of landing rambling audio in
+# the dataset under a short label. Measured at cfg_alpha 2.0: 0.52% of clips exceed
+# that budget (the worst by 4.7x, 202 s of audio for 317 characters), against 0.001%
+# of the 602,813 real v1 clips the budget was fitted on. TOKEN_BUDGET=0 turns it off
+# for a run at a lower cfg_alpha, where rambling is rare. See the runbook, step 1.
+TOKEN_BUDGET="${TOKEN_BUDGET:-1}"
+# An `if/else` rather than `[ ... ] && ...`: the script runs under `set -e`, where a
+# trailing test that FAILS is the last command of the line and kills the run. The
+# flag is passed EXPLICITLY either way, so the log shows which regime a run used
+# instead of leaving it to the client's default of the day.
 if [ "$TOKEN_BUDGET" = "1" ]; then
   budget_args=(--auto-token-budget)
+else
+  budget_args=(--no-auto-token-budget)
 fi
 # A separate log from v1's tts_generate.log on purpose: that file is the only
 # record of v1's throughput and is what the runbook's ETA was measured from.

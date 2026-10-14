@@ -140,20 +140,27 @@ def test_stage06_omits_extra_params_when_nothing_is_set() -> None:
     print("OK stage 06 omits extra_params when no knob is set")
 
 
-def test_stage05_token_budget_is_opt_in_and_sized_from_the_text() -> None:
-    """The per-clip frame budget: off by default, and proportional when on.
+def test_stage05_token_budget_is_on_by_default_and_sized_from_the_text() -> None:
+    """The per-clip frame budget: ON unless disabled, and proportional to the text.
 
-    It must stay off unless asked for, because it changes what the server generates
-    for every clip of a 600k-row run. When on, the budget is the one measured in
-    budget_seconds(): 3 s plus one second per 8 characters, at 12.5 frames per
-    second, which for a 60-character term is 10.5 s (132 frames) instead of the
-    server's global 4096 frames.
+    The default is what this asserts, through the real parser rather than a hand-made
+    namespace, because the default IS the decision (2026-10-14): 0.52% of the clips
+    generated at cfg_alpha 2.0 run past the budget, so a run that forgets the flag
+    writes rambling audio. The budget itself is the one measured in budget_seconds():
+    3 s plus one second per 8 characters, at 12.5 frames per second, which for a
+    60-character term is 10.5 s (132 frames) instead of the server's 4096.
     """
     tts = load_module(TTS_PATH, "tts_budget_under_test")
     text = "a" * 60
 
-    plain = tts.build_body(text, _stage05_args())
-    assert "max_new_tokens" not in plain, "the budget must be opt-in"
+    parsed = tts.build_parser().parse_args(["--input", "x.jsonl", "--output", "out"])
+    assert parsed.auto_token_budget is True, "the budget must be on by default"
+    assert tts.build_parser().parse_args(
+        ["--input", "x.jsonl", "--output", "out", "--no-auto-token-budget"]
+    ).auto_token_budget is False, "--no-auto-token-budget must turn it off"
+
+    off = tts.build_body(text, _stage05_args(auto_token_budget=False))
+    assert "max_new_tokens" not in off, "disabled means the field is not sent at all"
 
     args = _stage05_args(auto_token_budget=True, budget_fixed_seconds=3.0,
                          budget_chars_per_second=8.0)
@@ -165,7 +172,7 @@ def test_stage05_token_budget_is_opt_in_and_sized_from_the_text() -> None:
     # short text plus a lead-in silence could be cut legitimately.
     assert tts.budget_tokens("x" * 100_000, 3.0, 8.0) == tts.VOXTRAL_DEFAULT_MAX_NEW_TOKENS
     assert tts.budget_tokens("", 0.1, 8.0) == 64
-    print("OK stage 05 token budget is opt-in and proportional to the text")
+    print("OK stage 05 token budget is on by default and proportional to the text")
 
 
 def test_stage05_judges_truncation_against_the_budget() -> None:
@@ -216,6 +223,6 @@ if __name__ == "__main__":
     test_stage05_nests_the_seed()
     test_stage06_nests_seed_and_cfg_alpha()
     test_stage06_omits_extra_params_when_nothing_is_set()
-    test_stage05_token_budget_is_opt_in_and_sized_from_the_text()
+    test_stage05_token_budget_is_on_by_default_and_sized_from_the_text()
     test_stage05_judges_truncation_against_the_budget()
     print("OK all")

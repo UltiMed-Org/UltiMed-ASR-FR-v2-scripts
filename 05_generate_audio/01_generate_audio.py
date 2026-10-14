@@ -254,9 +254,13 @@ def build_body(text: str, args: argparse.Namespace, voice: str | None = None) ->
     # server stops it at ~1.3x the plausible duration instead of generating up to
     # 327.68 s of looping syllables, which costs a slot ~6 minutes and (when it stops
     # just under the cap) silently lands rambling audio in the dataset under a short
-    # label. Opt-in because it changes what the server is asked for, and the 1.68%
-    # of over-long clips it is aimed at is a cfg_alpha 2.0 phenomenon (v1 at 1.3 had
-    # 0.0004%), so a future run at a lower cfg_alpha may not need it.
+    # label. ON by default since 2026-10-14: 0.52% of the clips generated at
+    # cfg_alpha 2.0 exceed the budget and the worst exceeded it 4.7x (317 characters
+    # of text, 202 s of audio), so leaving it off costs ~2,700 rambling clips over the
+    # dictionary stage alone. --no-auto-token-budget disables it for a run at a lower
+    # cfg_alpha, where the rambling is rare (v1 at 1.3: 4 clips in 1,068,676 over
+    # 41.2 s). getattr rather than args.auto_token_budget so a synthetic namespace
+    # that does not define the field still builds a valid body.
     if getattr(args, "auto_token_budget", False):
         body["max_new_tokens"] = budget_tokens(
             text, args.budget_fixed_seconds, args.budget_chars_per_second)
@@ -613,7 +617,13 @@ def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
     return 1 if (failed or bad_rows) else 0
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI, separate from main() so tests can assert its defaults.
+
+    Several of them are measured decisions rather than conveniences
+    (--auto-token-budget, --timeout, --max-audio-seconds), so a test that pins them
+    is pinning the reasoning in the help text, not the plumbing.
+    """
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--url", default=DEFAULT_URL,
                    help=f"Base URL of the TTS server (default: {DEFAULT_URL}).")
@@ -701,15 +711,18 @@ def main() -> int:
                         f"{VOXTRAL_DEFAULT_MAX_NEW_TOKENS} frames at "
                         f"{VOXTRAL_FRAME_RATE_HZ} Hz); must match the server's actual "
                         "VOXTRAL_MAX_TOKENS. 0 disables the check.")
-    p.add_argument("--auto-token-budget", action="store_true",
-                   help="Ask the server for only as many frames as the text can "
+    p.add_argument("--auto-token-budget", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="ON by default (--no-auto-token-budget to disable). "
+                        "Ask the server for only as many frames as the text can "
                         "plausibly need (max_new_tokens = "
                         f"{BUDGET_FIXED_S:.0f}s + chars/{BUDGET_CHARS_PER_S:.0f} at "
                         f"{VOXTRAL_FRAME_RATE_HZ} Hz) and judge truncation against that "
                         "budget instead of the global cap. Stops a looping take in "
                         "seconds instead of letting it run to 327.68s, and keeps "
                         "rambling audio out of the dataset. Measured safe: it would "
-                        "have cut 7 of 602,813 real v1 clips.")
+                        "have cut 7 of 602,813 real v1 clips (0.001%%), while 0.52%% "
+                        "of the clips generated at cfg_alpha 2.0 exceed it.")
     p.add_argument("--budget-fixed-seconds", type=float, default=BUDGET_FIXED_S,
                    help="Head/tail room term of --auto-token-budget (default: "
                         f"{BUDGET_FIXED_S}).")
@@ -737,7 +750,11 @@ def main() -> int:
                           help="Talker repetition penalty (1.0 = none).")
     sampling.add_argument("--do-sample", action=argparse.BooleanOptionalAction, default=None,
                           help="Enable talker sampling; --no-do-sample forces greedy decode.")
-    args = p.parse_args()
+    return p
+
+
+def main() -> int:
+    args = build_parser().parse_args()
 
     # stderr through tqdm.write so log lines don't mangle the progress bar.
     logger.remove()
