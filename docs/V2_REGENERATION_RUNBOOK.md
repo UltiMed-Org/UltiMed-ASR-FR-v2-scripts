@@ -80,20 +80,24 @@ done
 
   **The bound is set by the slowest VOICE, not by the corpus average**, and that distinction is worth 2% of a voice's clips. Measured over the 28,749 v2 dictionary clips on disk (`05_generate_audio/02_audit_durations.py` prints this table), the ten voices read at very different speeds, in characters per second of audio:
 
-  | voice | median | legit p0.1 | rejected by `3 + chars/8` |
-  |---|---:|---:|---:|
-  | fr_female | 16.36 | 11.10 | 0.00% |
-  | h_itf_def | 15.65 | 10.13 | 0.00% |
-  | fr_male | 15.23 | 10.47 | 0.00% |
-  | h_frm_nlf | 15.22 | 9.03 | 0.14% |
-  | h_frf_itm | 14.36 | 8.41 | 0.14% |
-  | h_frf_esm | 14.08 | 8.67 | 0.11% |
-  | h_frm_ptf | 13.65 | 7.52 | 0.27% |
-  | h_itf_arm | 13.30 | 8.14 | 0.04% |
-  | h_frf_ptm | 13.03 | 7.35 | 0.31% |
-  | **h_frm_chf** | **10.74** | **5.58** | **3.05%** |
+  | voice | median | legit p1 | fastest clip | **its bounds** | rejected by `3 + chars/8` |
+  |---|---:|---:|---:|---:|---:|
+  | fr_female | 16.38 | 13.22 | 20.49 | **9.9 - 29.7** | 0.00% |
+  | h_itf_def | 15.64 | 11.44 | 20.50 | **8.6 - 29.7** | 0.00% |
+  | fr_male | 15.27 | 11.87 | 19.42 | **8.9 - 28.2** | 0.00% |
+  | h_frm_nlf | 15.20 | 11.34 | 19.62 | **8.5 - 28.4** | 0.14% |
+  | h_frf_itm | 14.36 | 10.28 | 19.75 | **7.7 - 28.6** | 0.14% |
+  | h_frf_esm | 14.09 | 11.07 | 19.66 | **8.3 - 28.5** | 0.11% |
+  | h_frm_ptf | 13.67 | 9.67 | 18.75 | **7.3 - 27.2** | 0.27% |
+  | h_itf_arm | 13.30 | 9.22 | 21.28 | **6.9 - 30.9** | 0.04% |
+  | h_frf_ptm | 13.03 | 8.84 | 18.72 | **6.6 - 27.1** | 0.31% |
+  | **h_frm_chf** | **10.75** | **7.00** | 18.22 | **5.3 - 26.4** | **3.05%** |
 
-  ("legit p0.1" excludes the clips reading below that voice's median/2.5, i.e. its actual runaways, 1.08% for h_frm_chf and under 0.2% everywhere else.) So the first bound was rejecting the slow voice *for being slow*, three attempts at a time. `utils/frame_budget.py` now sets `SLOW_CHARS_PER_S = 5.0`, under h_frm_chf's own slow tail, and the floor below at `chars/30`, above the fastest clip ever measured. The band still catches the disasters by a wide margin: the worst runaway was 264.6 s of audio for 351 characters (1.33 chars/s, bound 73.2 s).
+  ("legit p1" excludes the clips reading below that voice's median/2.5, i.e. its actual runaways, 1.08% for h_frm_chf and under 0.2% everywhere else.) So the first bound was rejecting the slow voice *for being slow*, three attempts at a time, while barely bounding the fast ones at all.
+
+  **The bounds are therefore per voice** (`VOICE_RATES` in `utils/frame_budget.py`, resolved by `rates_for_voice`): upper = `0.75 x` that voice's legit p1, the knee where each voice's rejection share stops exceeding its genuine-runaway share; lower = `1.45 x` its fastest observed clip, a wide margin because each voice has only ~3.2k clips here while the 602,813-clip v1 corpus reached 28.5 chars/s against a p99.9 of 20.5. A voice the table does not list falls back to the global `5.0 / 30.0`, the widest band, so an unlisted voice is never rejected for being unlisted; `--budget-chars-per-second` / `--floor-chars-per-second` override the table for every voice.
+
+  What that buys: a runaway by fr_female is now caught at 9.9 chars/s instead of 5.0, i.e. in half the GPU time (37 s instead of 71 s for a 339-character text). Re-audited over 32,605 clips, the rejections spread to 0.00-0.13% per voice instead of 3.05% on one, and 12 clips the global band had let through turned out to read at 5.2-5.9 chars/s against their own voices' medians of 13-14. The floor is nearly voice-independent (every voice's fastest clip is 18.2-21.3 chars/s), so those bounds all land near the old global 30.
 
   (4) **A clip can also be too SHORT**, and that failure is just as silent: the backend emits a stop token early and answers 200 with audio that sounds complete on its own. `--floor-chars-per-second` (default 30, i.e. `chars/30` seconds) rejects it, with the budget on or off. It flags none of the 602,813 v1 clips nor any of the 29,141 v2 ones, so it only ever fires on a gross failure; stage 06's STT QC remains the real quality gate.
 

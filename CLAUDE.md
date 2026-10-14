@@ -472,21 +472,25 @@ are sent only when explicitly set so server startup defaults apply otherwise.
 in that one module because `01_generate_audio.py`,
 `05_generate_audio/02_audit_durations.py` and (eventually) stage 06 must use the
 same numbers. A clip is rejected, not written, and the row counts as failed when
-it is **over budget** (duration at or past `3 s + chars/5`, i.e. it ran out of
-frames while still talking: a looping take) or **implausibly short** (below
-`chars/30`, i.e. part of the text was never spoken). Both failures are silent on
+it is **over budget** (duration at or past `3 s + chars/slow`, i.e. it ran out
+of frames while still talking: a looping take) or **implausibly short** (below
+`chars/fast`, i.e. part of the text was never spoken), where `slow` and `fast`
+are **per voice** (`VOICE_RATES`, 5.3-9.9 and 26.4-30.9 chars per second of
+audio; an unlisted voice falls back to the global 5.0/30.0, the widest band). Both failures are silent on
 the wire: `/v1/audio/speech` has no `finish_reason`, so only comparing duration
 to text length catches them. `--auto-token-budget` (ON by default) also sends the
 upper bound as `max_new_tokens`, so a runaway dies in seconds instead of running
 to the server's 327.68 s cap; the floor needs nothing from the server and is
 checked either way.
 
-The rates are set by the EXTREMES of the voice roster, not by the corpus average,
-and that matters: the ten v2 voices read at medians 10.74 (h_frm_chf) to 16.36
-(fr_female) chars per second of audio, so the first bound (`3 s + chars/8`) was
-rejecting the slow voice at 3.05% against 0.00-0.31% for the other nine, three
-attempts at a time. See `utils/frame_budget.py`'s docstring for the per-voice
-table and `docs/V2_REGENERATION_RUNBOOK.md` step 1.
+Per voice matters because the ten v2 voices read at medians 10.75 (h_frm_chf) to
+16.38 (fr_female) chars per second of audio: a single bound loose enough for the
+slow voice (the first one, `3 s + chars/8`) rejected it at 3.05% against
+0.00-0.31% for the other nine, while leaving a fast voice unbounded until three
+times its natural duration. Each voice's upper bound is 0.75x its measured legit
+p1 rate and its floor 1.45x its fastest observed clip; see
+`utils/frame_budget.py`'s docstring for the table and the derivation, and
+`docs/V2_REGENERATION_RUNBOOK.md` step 1.
 
 A rejection is retried in place, `--retries` (default 2), **at the same
 cfg_alpha**: re-sending the same text is a genuinely new take (Voxtral's only
@@ -495,9 +499,11 @@ a per-attempt cfg would contradict the flat `cfg_alpha` column stage 06 writes
 into the manifest. A clip that fails every attempt stays missing for the next
 re-run, which is why each stage ends with a plain re-run of the same command.
 `02_audit_durations.py` applies the same bounds to clips ALREADY on disk and
-deletes the offenders (dry run by default), which is how the ~29k clips generated
-before any of this existed were cleaned: 51 over budget of 29,141, 33 of them on
-h_frm_chf. Covered by `tests/test_audio_truncation.py` and the three duration
+deletes the offenders (dry run by default), resolving the per-voice rates exactly
+as the generator does so its verdicts are identical. That is how the clips
+generated before any of this existed were cleaned: 51 over budget of 29,141
+under the first global band, then 12 more of 32,605 once the bounds became per
+voice. Covered by `tests/test_audio_truncation.py` and the three duration
 checks in `tests/test_tts_wire_format.py`.
 
 **Voices (v2).** Batch mode spreads the corpus over the ten French voices of
