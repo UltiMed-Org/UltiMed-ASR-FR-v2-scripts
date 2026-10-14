@@ -105,6 +105,19 @@ from voice_assignment import (  # noqa: E402
     voice_for_row,
     write_provenance,
 )
+# The duration sanity rules live in utils/ because three callers need the SAME
+# numbers: this script (which sends the budget as max_new_tokens and rejects a take
+# that comes back outside it), 02_audit_durations.py (which re-checks clips already on
+# disk) and eventually 06_hotfixes. Re-exported under the names the tests use.
+from frame_budget import (  # noqa: E402
+    BUDGET_FIXED_S,
+    FAST_CHARS_PER_S,
+    SLOW_CHARS_PER_S as BUDGET_CHARS_PER_S,
+    budget_seconds,
+    budget_tokens,
+    classify_duration,
+    floor_seconds,
+)
 
 DEFAULT_URL = "http://127.0.0.1:8003"
 DEFAULT_LOG_FILE = Path(__file__).resolve().parent / "tts_generate.log"
@@ -153,65 +166,53 @@ VOXTRAL_VOICES = [
 VOXTRAL_FRAME_RATE_HZ = 12.5
 VOXTRAL_DEFAULT_MAX_NEW_TOKENS = 4096  # -> 327.68 s of audio
 TRUNCATION_TOLERANCE_S = 0.5
-# Terms of the per-clip frame budget, see budget_seconds() for the measurement they
-# come from. They are module constants rather than literals in the parser so the
-# tests and stage 06 can import the same numbers.
-BUDGET_FIXED_S = 3.0
-BUDGET_CHARS_PER_S = 8.0
 # How often the run writes a progress line (with an absolute ETA) to the log, in
 # clips. The tqdm bar is for the terminal; this is for a run measured in days,
 # where the bar is gone after a tmux detach or a scrollback wipe and the only
 # durable answer to "when does this finish" has to be in the log file.
 PROGRESS_LOG_EVERY = 500
+# Extra attempts for a clip whose duration is rejected; see synthesize_with_retries
+# for why a plain re-request is a genuinely different take.
+DEFAULT_RETRIES = 2
 
 
 class TruncatedAudioError(RuntimeError):
     """The backend stopped on its token limit instead of at the end of the text, so the
     clip is cut short. Subclasses RuntimeError so batch mode counts it as a per-row
-    failure (nothing written, a resume retries) rather than aborting the run."""
+    failure (nothing written, a resume retries) rather than aborting the run.
+
+    With --auto-token-budget (the default) that limit is the per-clip budget, so this
+    is the runaway detector: the take was still talking when it ran out of frames,
+    i.e. it was looping rather than reading. Without it, it means the server's global
+    cap, i.e. genuinely too much text."""
+
+
+class ImplausiblyShortError(RuntimeError):
+    """The clip is far SHORTER than its text can be read in, so part of the text was
+    not spoken (or the take is near-silence). The mirror image of
+    TruncatedAudioError, and a RuntimeError for the same reason: one failed row,
+    nothing written, retried in place and again by the next resume.
+
+    This failure has no `finish_reason` either: the backend emits a stop token early
+    and answers 200 with a clip that sounds complete in isolation. Only comparing the
+    duration to the text's length catches it, which is why the floor is checked on
+    every clip and not just on budgeted runs."""
+
+
+def floor_rate(args: argparse.Namespace) -> float:
+    """`--floor-chars-per-second` off a namespace that may not define it."""
+    return getattr(args, "floor_chars_per_second", FAST_CHARS_PER_S)
+
+
+def attempt_budget(args: argparse.Namespace) -> int:
+    """How many attempts one clip gets in total, i.e. `--retries` + 1."""
+    return max(1, getattr(args, "retries", DEFAULT_RETRIES) + 1)
 
 
 def frame_cap_seconds(max_new_tokens: int = VOXTRAL_DEFAULT_MAX_NEW_TOKENS) -> float:
     """Longest clip the backend can emit under a given frame budget, in seconds."""
     return max_new_tokens / VOXTRAL_FRAME_RATE_HZ
 
-
-def budget_seconds(text: str, fixed: float = BUDGET_FIXED_S,
-                   chars_per_second: float = BUDGET_CHARS_PER_S) -> float:
-    """Longest duration this text can PLAUSIBLY take, in seconds.
-
-    `fixed` seconds of head and tail room plus one second per `chars_per_second`
-    characters. Measured over the 602,813 v1 clips that carry both their TTS input
-    (`asr_training_source`) and a duration: the model reads French at 16.6 characters
-    per second of audio (median), 13.2 at p1, 11.6 at p0.1, and the default
-    3 s + chars/8 would have cut **7 of those 602,813 clips** (0.001%, all of them on
-    the document stages). It is therefore a runaway detector rather than a length
-    limit: a 60-character dictionary term gets 10.5 s instead of the server's global
-    327.68 s cap, so a take that starts looping syllables is stopped in seconds.
-
-    Parameters
-    ----------
-    text
-        The exact string sent as `input`, not the ASR target: the TTS respellings
-        change the length (IgM -> I-gé-M).
-    fixed, chars_per_second
-        The two terms of the budget, exposed as CLI flags for stages whose prosody
-        differs (a slower voice needs a lower `chars_per_second`).
-    """
-    return fixed + len(text) / chars_per_second
-
-
-def budget_tokens(text: str, fixed: float = BUDGET_FIXED_S,
-                  chars_per_second: float = BUDGET_CHARS_PER_S) -> int:
-    """`budget_seconds` as a frame count for the request's `max_new_tokens`.
-
-    Stage 0 emits one 12.5 Hz frame per decode step, so seconds * 12.5 = frames. The
-    result is clamped to the server's own ceiling (vllm-omni refuses more than
-    `_TTS_MAX_NEW_TOKENS_MAX` = 4096) and to a floor of 64 frames (5.12 s), below
-    which a short text plus an unlucky lead-in silence could be cut legitimately.
-    """
-    frames = math.ceil(budget_seconds(text, fixed, chars_per_second) * VOXTRAL_FRAME_RATE_HZ)
-    return max(64, min(VOXTRAL_DEFAULT_MAX_NEW_TOKENS, frames))
 
 
 def is_truncated(duration: float | None, cap_seconds: float | None,
@@ -323,11 +324,11 @@ def synthesize(base_url: str, text: str, out: Path,
     The audio is written to a .tmp sibling then renamed, so a killed run
     never leaves a truncated file that a resume would skip as done.
 
-    Raises TruncatedAudioError (a RuntimeError) when the clip comes back pinned at the
-    backend's frame cap, i.e. generation stopped for length rather than at the end of
-    the text. Nothing is written in that case, so the row stays "to generate" and a
-    resume retries it; the real fix is shorter input text, since the same text will
-    truncate again.
+    Raises TruncatedAudioError when the clip comes back at or past its upper bound
+    (the per-clip budget with --auto-token-budget, the server's global frame cap
+    without it), and ImplausiblyShortError when it is below the floor its text can be
+    read in. Both are RuntimeErrors, both leave nothing written, so the row stays "to
+    generate" for the in-run retry and for the next resume.
     """
     code, payload, elapsed = post_json(f"{base_url}/v1/audio/speech",
                                        build_body(text, args, voice), args.timeout)
@@ -338,20 +339,85 @@ def synthesize(base_url: str, text: str, out: Path,
     # With a per-clip budget the cap to compare against is that budget, not the
     # server's global one: the whole point is to catch the clip that ran long for its
     # text, which the 327.68 s cap only catches in the worst case.
+    budget_on = getattr(args, "auto_token_budget", False)
     cap = (budget_seconds(text, args.budget_fixed_seconds, args.budget_chars_per_second)
-           if getattr(args, "auto_token_budget", False) else args.max_audio_seconds)
-    if is_truncated(dur, cap):
+           if budget_on else args.max_audio_seconds)
+    # max() only to keep the ratio in the message below finite when the floor is
+    # disabled with --floor-chars-per-second 0 (no clip can then be "short").
+    floor = max(1e-9, floor_seconds(text, floor_rate(args)))
+    # One classifier for both bounds, shared with 02_audit_durations.py so a clip
+    # rejected here is exactly a clip that script would delete from disk, and vice
+    # versa. `budget=None` lets it recompute the per-clip bound from the text.
+    verdict = classify_duration(
+        text, dur, budget=None if budget_on else args.max_audio_seconds,
+        fixed=args.budget_fixed_seconds,
+        slow_chars_per_second=args.budget_chars_per_second,
+        fast_chars_per_second=floor_rate(args),
+        tolerance=TRUNCATION_TOLERANCE_S)
+    if verdict == "over":
+        # Spelled out because this line is what a grep over a multi-day log has to
+        # answer with: how far over, against which bound, and for how much text. The
+        # ratio is the honest severity measure (2.0x is a loop, 1.05x is a long take).
         raise TruncatedAudioError(
-            f"clip stopped at the backend frame cap ({dur:.2f}s >= "
-            f"{cap:.2f}s): generation stopped for length, not at the "
-            f"end of the text, so the audio is cut short. Not written. Shorten the input "
-            f"({len(text)} chars) or raise the server's max_new_tokens and "
-            f"--max-audio-seconds together."
+            f"over budget: {dur:.2f}s of audio for {len(text)} chars, "
+            f"{'budget' if budget_on else 'server frame cap'} {cap:.2f}s "
+            f"({dur / cap:.2f}x), {'ran out of frames while still talking' if budget_on else 'stopped for length'}, "
+            f"so the take was looping rather than reading. Not written."
+        )
+    if verdict == "short":
+        raise ImplausiblyShortError(
+            f"implausibly short: {dur:.2f}s of audio for {len(text)} chars, "
+            f"floor {floor:.2f}s ({dur / floor:.2f}x), i.e. "
+            f"{len(text) / max(dur, 1e-9):.0f} chars/s where the model reads at 16.6, "
+            f"so part of the text was not spoken. Not written."
         )
     tmp = out.with_suffix(out.suffix + ".tmp")
     tmp.write_bytes(payload)
     tmp.replace(out)
     return elapsed, dur
+
+
+def synthesize_with_retries(base_url: str, text: str, out: Path,
+                            args: argparse.Namespace,
+                            voice: str | None = None) -> tuple[float, float | None, int]:
+    """`synthesize` plus in-run retries on a duration rejection; returns
+    (backend elapsed seconds of the ACCEPTED take, its duration, attempts used).
+
+    Why retrying at all helps: the only randomness in Voxtral's pipeline is the fresh
+    Gaussian each frame's flow-matching ODE starts from, so an unseeded re-request on
+    the SAME text is a genuinely new take, not a replay. A take that rambled or
+    dropped half the sentence is usually a sampling accident, and the measured rates
+    (0.52% over budget at cfg_alpha 2.0, 0.001% under the floor on real v1 clips) say
+    independent attempts rarely fail twice.
+
+    Deliberately at the SAME cfg_alpha every time. Lowering it per attempt would
+    improve the odds (the stage 06 ladder walks 2.0 -> 1.8 -> 1.6 -> 1.4 for its own
+    QC failures), but then the clip on disk no longer matches the flat `cfg_alpha`
+    column stage 06 writes into the manifest, and nothing here records a per-clip
+    value. Add a sidecar first if that trade ever looks worth it.
+
+    Only duration rejections are retried. A non-200, a timeout or an unreachable
+    server are not sampling accidents: they are handled by the caller, which can
+    abort the whole run rather than hammer a sick server row by row.
+    """
+    attempts = attempt_budget(args)
+    for attempt in range(1, attempts + 1):
+        try:
+            elapsed, dur = synthesize(base_url, text, out, args, voice)
+            if attempt > 1:
+                logger.warning("{}: attempt {}/{} accepted ({:.2f}s of audio)",
+                               out.name, attempt, attempts,
+                               dur if dur is not None else float("nan"))
+            return elapsed, dur, attempt
+        except (TruncatedAudioError, ImplausiblyShortError) as e:
+            # Logged per attempt, at warning while there is still a retry left and
+            # left to the caller to log as an error once there is not, so a grep for
+            # ERROR counts clips actually lost and a grep for the reason counts takes.
+            if attempt >= attempts:
+                raise
+            logger.warning("{}: attempt {}/{} rejected, retrying: {}",
+                           out.name, attempt, attempts, e)
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def cmd_check(base_url: str, args: argparse.Namespace) -> int:
@@ -386,7 +452,7 @@ def run_single(base_url: str, args: argparse.Namespace) -> int:
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     try:
-        elapsed, dur = synthesize(base_url, args.input, out, args)
+        elapsed, dur, attempts = synthesize_with_retries(base_url, args.input, out, args)
     except urllib.error.URLError as e:
         logger.error("unreachable: {}", e)
         return 2
@@ -394,7 +460,8 @@ def run_single(base_url: str, args: argparse.Namespace) -> int:
         logger.error("{}", e)
         return 1
     dur_info = f", {dur:.2f}s of audio" if dur is not None else ""
-    logger.info("wrote {}{} (backend took {:.2f}s)", out.resolve(), dur_info, elapsed)
+    logger.info("wrote {}{} (backend took {:.2f}s{})", out.resolve(), dur_info, elapsed,
+                f", {attempts} attempts" if attempts > 1 else "")
     return 0
 
 
@@ -498,6 +565,12 @@ def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
                              field=None, counts=Counter({args.voice: len(planned)}))
 
     failed = generated = 0
+    # The two duration rejections are counted apart from the other failures because
+    # they mean opposite things and have opposite fixes: "over" is a runaway take
+    # (retry, or lower cfg_alpha), "short" is dropped text (retry, or check the
+    # respelling). `retried_ok` is what says whether the in-run retries are worth
+    # their GPU time: it counts clips that failed at least once and still landed.
+    over_budget = too_short = retried_ok = 0
     total_audio = 0.0
     aborted = False
     interrupted = False
@@ -508,7 +581,7 @@ def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
     # --concurrency 1. as_completed yields in finish order, so log lines interleave,
     # but each row still lands in its own file.
     pool = ThreadPoolExecutor(max_workers=max(1, args.concurrency))
-    futures = {pool.submit(synthesize, base_url, text, out, args, voice): out
+    futures = {pool.submit(synthesize_with_retries, base_url, text, out, args, voice): out
                for out, text, voice in todo}
     t_start = time.monotonic()
     # smoothing=0 makes tqdm report the CUMULATIVE average rate instead of its
@@ -525,7 +598,7 @@ def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
         for fut in bar:
             out = futures[fut]
             try:
-                elapsed, dur = fut.result()
+                elapsed, dur, attempts = fut.result()
             except urllib.error.URLError as e:
                 logger.error("server unreachable ({}), aborting; re-run to resume", e)
                 aborted = True
@@ -543,11 +616,27 @@ def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
                              "a resume retries it", out.name, args.timeout, e)
                 failed += 1
                 continue
+            except TruncatedAudioError as e:
+                # Already warned once per rejected attempt by the wrapper; this is the
+                # line that says the clip was given up on, after all its retries.
+                logger.error("{}: giving up after {} attempts, {}",
+                             out.name, attempt_budget(args), e)
+                over_budget += 1
+                failed += 1
+                continue
+            except ImplausiblyShortError as e:
+                logger.error("{}: giving up after {} attempts, {}",
+                             out.name, attempt_budget(args), e)
+                too_short += 1
+                failed += 1
+                continue
             except RuntimeError as e:
                 logger.error("{}: {}", out.name, e)
                 failed += 1
                 continue
             generated += 1
+            if attempts > 1:
+                retried_ok += 1
             if dur is not None:
                 total_audio += dur
             logger.debug("{} ({}{:.2f}s backend)", out.name,
@@ -609,6 +698,12 @@ def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
     logger.info("done{}: {} generated{}, {} failed, {} skipped as existing, {} bad rows",
                 " (interrupted)" if interrupted else "",
                 generated, audio_info, failed, skipped_existing, bad_rows)
+    # Separate line, always printed, because these are the numbers that decide whether
+    # to re-run the stage and whether to touch cfg_alpha, and they must survive a grep
+    # of a multi-day log that has 500k DEBUG lines in it.
+    logger.info("duration rejections: {} over budget, {} implausibly short, "
+                "{} saved by a retry (up to {} attempts each)",
+                over_budget, too_short, retried_ok, attempt_budget(args))
     # 130 is the shell's conventional "killed by SIGINT", and generate_v2.sh keys on it
     # to stop the whole run instead of moving to the next stage (a stage exiting 1 for a
     # handful of failed clips must NOT stop it, since a re-run retries exactly those).
@@ -720,17 +815,36 @@ def build_parser() -> argparse.ArgumentParser:
                         f"{VOXTRAL_FRAME_RATE_HZ} Hz) and judge truncation against that "
                         "budget instead of the global cap. Stops a looping take in "
                         "seconds instead of letting it run to 327.68s, and keeps "
-                        "rambling audio out of the dataset. Measured safe: it would "
-                        "have cut 7 of 602,813 real v1 clips (0.001%%), while 0.52%% "
-                        "of the clips generated at cfg_alpha 2.0 exceed it.")
+                        "rambling audio out of the dataset. The rate is the SLOWEST "
+                        "voice's slow tail, not the average one (see "
+                        "utils/frame_budget.py): the ten v2 voices read at medians "
+                        "10.7 to 16.4 chars/s, so a bound set on the average rejects "
+                        "the slow voice for being slow.")
     p.add_argument("--budget-fixed-seconds", type=float, default=BUDGET_FIXED_S,
                    help="Head/tail room term of --auto-token-budget (default: "
                         f"{BUDGET_FIXED_S}).")
     p.add_argument("--budget-chars-per-second", type=float, default=BUDGET_CHARS_PER_S,
                    help="Slowest plausible reading speed in characters per second of "
                         f"audio, the other term of --auto-token-budget (default: "
-                        f"{BUDGET_CHARS_PER_S}; measured median 16.6, p1 13.2, p0.1 "
-                        "11.6 over 602,813 v1 clips).")
+                        f"{BUDGET_CHARS_PER_S}, below the slowest voice h_frm_chf at "
+                        "p0.1 of 5.58; its median is 10.7 and the fastest voice's is "
+                        "16.4).")
+    p.add_argument("--floor-chars-per-second", type=float, default=FAST_CHARS_PER_S,
+                   help="Fastest plausible reading speed in characters per second of "
+                        "audio: a clip shorter than chars/this did not speak all of "
+                        f"its text and is rejected (default: {FAST_CHARS_PER_S}, above "
+                        "the fastest clip ever measured: 21.3 chars/s over 28,749 v2 "
+                        "clips and 28.5 over 602,813 v1 ones, so it flags none of "
+                        "them). Checked "
+                        "on every run, budget or not, since it needs nothing from the "
+                        "server. 0 disables it.")
+    p.add_argument("--retries", type=int, default=DEFAULT_RETRIES,
+                   help="Extra attempts for a clip whose DURATION is rejected (over "
+                        "budget or implausibly short), default 2, i.e. 3 attempts. "
+                        "Each attempt is a genuinely new take (the flow-matching noise "
+                        "is fresh per request), at the same cfg_alpha, so a rambling "
+                        "take is usually fixed by one retry. Does not retry non-200s, "
+                        "timeouts or an unreachable server.")
     p.add_argument("--log-file", default=str(DEFAULT_LOG_FILE),
                    help=f"Loguru log file, appended to (default: {DEFAULT_LOG_FILE}).")
 
