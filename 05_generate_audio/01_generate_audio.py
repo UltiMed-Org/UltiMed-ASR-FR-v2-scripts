@@ -204,6 +204,17 @@ def floor_rate(args: argparse.Namespace) -> float:
     return getattr(args, "floor_chars_per_second", FAST_CHARS_PER_S)
 
 
+def budget_terms(args: argparse.Namespace) -> tuple[float, float]:
+    """The upper bound's two terms off a namespace that may not define them.
+
+    Needed even when the budget is OFF, because the floor check runs either way and
+    goes through the same classifier: a caller that never asked for a budget (a test,
+    stage 06's synthetic namespace) must not have to carry its fields.
+    """
+    return (getattr(args, "budget_fixed_seconds", BUDGET_FIXED_S),
+            getattr(args, "budget_chars_per_second", BUDGET_CHARS_PER_S))
+
+
 def attempt_budget(args: argparse.Namespace) -> int:
     """How many attempts one clip gets in total, i.e. `--retries` + 1."""
     return max(1, getattr(args, "retries", DEFAULT_RETRIES) + 1)
@@ -263,8 +274,7 @@ def build_body(text: str, args: argparse.Namespace, voice: str | None = None) ->
     # 41.2 s). getattr rather than args.auto_token_budget so a synthetic namespace
     # that does not define the field still builds a valid body.
     if getattr(args, "auto_token_budget", False):
-        body["max_new_tokens"] = budget_tokens(
-            text, args.budget_fixed_seconds, args.budget_chars_per_second)
+        body["max_new_tokens"] = budget_tokens(text, *budget_terms(args))
     optional = {
         "model": args.model,
         "instructions": args.instruction,
@@ -340,8 +350,8 @@ def synthesize(base_url: str, text: str, out: Path,
     # server's global one: the whole point is to catch the clip that ran long for its
     # text, which the 327.68 s cap only catches in the worst case.
     budget_on = getattr(args, "auto_token_budget", False)
-    cap = (budget_seconds(text, args.budget_fixed_seconds, args.budget_chars_per_second)
-           if budget_on else args.max_audio_seconds)
+    fixed, slow = budget_terms(args)
+    cap = (budget_seconds(text, fixed, slow) if budget_on else args.max_audio_seconds)
     # max() only to keep the ratio in the message below finite when the floor is
     # disabled with --floor-chars-per-second 0 (no clip can then be "short").
     floor = max(1e-9, floor_seconds(text, floor_rate(args)))
@@ -350,8 +360,7 @@ def synthesize(base_url: str, text: str, out: Path,
     # versa. `budget=None` lets it recompute the per-clip bound from the text.
     verdict = classify_duration(
         text, dur, budget=None if budget_on else args.max_audio_seconds,
-        fixed=args.budget_fixed_seconds,
-        slow_chars_per_second=args.budget_chars_per_second,
+        fixed=fixed, slow_chars_per_second=slow,
         fast_chars_per_second=floor_rate(args),
         tolerance=TRUNCATION_TOLERANCE_S)
     if verdict == "over":
