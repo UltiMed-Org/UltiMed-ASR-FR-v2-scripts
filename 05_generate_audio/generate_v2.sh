@@ -26,7 +26,17 @@ cd "$(dirname "$(readlink -f "$0")")"
 # Knobs, all overridable from the environment. cfg_alpha 2.0 is the measured top
 # of the usable band (1.2 to 2.0); stage 06's retry ladder walks DOWN from it.
 CFG_ALPHA="${CFG_ALPHA:-2.0}"
-CONCURRENCY="${CONCURRENCY:-10}"          # what v1 ran, and what its throughput was measured at
+# 16 requests in flight, measured on 2026-10-14, NOT the 10 v1 started with (v1
+# itself moved to 15 after its first day and ran 8 days there). Two reasons for 16:
+# the server's CUDA-graph capture sizes are [1,2,4,8,16,32] and the batch is padded
+# UP to the next one, so 10 in flight executes the 16-row graph with 6 empty rows;
+# and the measured throughput follows, 2,070 clips/h at 10 against 3,042 at 15 with
+# the SAME 17.4 s per clip (v1's own log), then 3,860 clips/h / 23.1x realtime at 16.
+# CONCURRENCY=32 (the top capture bucket) was measured at 26.8x realtime, i.e. +16%
+# for ~70% more latency per clip: worth about 19 h over the full corpus and harmless
+# for a batch job, but it is not the free doubling the bucket size suggests. Do not
+# go above 32: a batch larger than the biggest captured graph loses the graph.
+CONCURRENCY="${CONCURRENCY:-16}"
 URL="${URL:-http://127.0.0.1:8003}"
 # A separate log from v1's tts_generate.log on purpose: that file is the only
 # record of v1's throughput and is what the runbook's ETA was measured from.
