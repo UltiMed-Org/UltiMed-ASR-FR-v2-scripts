@@ -871,7 +871,16 @@ def main(stages: tuple[str, ...], model_dir: Path, quantization: str,
         thread.start()
 
     try:
+        polled = False
         while not ctx.stop.is_set():
+            # --once means "drain what is on disk NOW", so it polls exactly once: the
+            # generator keeps adding clips, so re-listing a 100k-entry directory every
+            # few seconds would both cost real CPU and keep moving the finish line.
+            if once and polled:
+                if ctx.idle():
+                    break
+                ctx.stop.wait(5.0)
+                continue
             for watch in watches.values():
                 # Classifying a clip needs only its stem (the sample is a hash) and the
                 # cfg_alpha sidecar, so the poller never touches the manifest: the index
@@ -880,12 +889,13 @@ def main(stages: tuple[str, ...], model_dir: Path, quantization: str,
                 poll_audio(watch, ctx)
                 if do_retries:
                     poll_sidecar(watch, ctx)
-            if once and ctx.idle():
-                break
+            polled = True
             retry_depth, sample_depth = ctx.depth()
             if retry_depth or sample_depth:
                 logger.info("queue: {} retry, {} sample", retry_depth, sample_depth)
-            ctx.stop.wait(1.0 if once else poll_seconds)
+            if once:
+                continue
+            ctx.stop.wait(poll_seconds)
     finally:
         ctx.stop.set()
         for thread in pool:
