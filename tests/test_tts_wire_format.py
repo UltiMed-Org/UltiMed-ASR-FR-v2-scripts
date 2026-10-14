@@ -36,6 +36,7 @@ This file was written with Claude Code.
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -219,10 +220,158 @@ def test_stage05_judges_truncation_against_the_budget() -> None:
     print("OK stage 05 rejects a clip that runs long for its own text")
 
 
+def test_stage05_rejects_an_implausibly_short_clip() -> None:
+    """The mirror image: a clip far SHORTER than its text can be read in.
+
+    This failure is as silent as the runaway (stop token emitted early, HTTP 200, a
+    clip that sounds complete in isolation), so only the duration-vs-length comparison
+    catches it. Checked whether or not the budget is on, since the floor needs nothing
+    from the server.
+    """
+    import io
+    import tempfile
+    import wave
+
+    tts = load_module(TTS_PATH, "tts_budget_short")
+
+    def wav_of(seconds: float) -> bytes:
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(24000)
+            w.writeframes(b"\x00\x00" * int(24000 * seconds))
+        return buf.getvalue()
+
+    # 300 characters in 2 s is 150 chars/s, five times the fastest voice ever measured
+    # (21.3 chars/s), so all but a few words went missing.
+    text = "a" * 300
+    tts.post_json = lambda url, body, timeout: (200, wav_of(2.0), 1.0)
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "clip.flac"
+        args = _stage05_args(auto_token_budget=True, budget_fixed_seconds=3.0,
+                             budget_chars_per_second=5.0, floor_chars_per_second=30.0,
+                             timeout=600.0, max_audio_seconds=327.68, retries=0)
+        try:
+            tts.synthesize("http://stub", text, out, args)
+            raise AssertionError("2 s of audio for 300 chars must be rejected")
+        except tts.ImplausiblyShortError:
+            assert not out.exists(), "nothing may be written, so a resume retries it"
+
+        # The floor is independent of the budget: turning the budget off must not
+        # turn it off too, or an unbudgeted run silently keeps truncated clips.
+        args.auto_token_budget = False
+        try:
+            tts.synthesize("http://stub", text, out, args)
+            raise AssertionError("the floor must apply with the budget off too")
+        except tts.ImplausiblyShortError:
+            pass
+
+        # 25 s for 300 chars is 12 chars/s, inside every voice's measured range.
+        tts.post_json = lambda url, body, timeout: (200, wav_of(25.0), 1.0)
+        tts.synthesize("http://stub", text, out, args)
+        assert out.exists()
+    print("OK stage 05 rejects a clip too short to hold its own text")
+
+
+def test_stage05_retries_a_duration_rejection_at_the_same_cfg() -> None:
+    """A rejected take is retried in place, and the retry is a genuinely new take.
+
+    The retry is worth GPU time only because the flow-matching noise is fresh per
+    request, so re-sending the same text is a new sample rather than a replay. The
+    cfg_alpha must NOT change between attempts: the dataset's cfg_alpha column is
+    written as one flat value, and nothing records a per-clip one.
+    """
+    import io
+    import tempfile
+    import wave
+
+    tts = load_module(TTS_PATH, "tts_budget_retry")
+
+    def wav_of(seconds: float) -> bytes:
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(24000)
+            w.writeframes(b"\x00\x00" * int(24000 * seconds))
+        return buf.getvalue()
+
+    text = "a" * 60  # budget 3 + 60/5 = 15 s, floor 60/30 = 2 s
+    seen_cfg = []
+    calls = {"n": 0}
+
+    def flaky(url, body, timeout):
+        calls["n"] += 1
+        seen_cfg.append(body.get("extra_params", {}).get("cfg_alpha"))
+        # First two takes ramble, the third reads the text in a plausible 4 s.
+        return (200, wav_of(40.0 if calls["n"] <= 2 else 4.0), 1.0)
+
+    tts.post_json = flaky
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "clip.flac"
+        args = _stage05_args(auto_token_budget=True, budget_fixed_seconds=3.0,
+                             budget_chars_per_second=5.0, floor_chars_per_second=30.0,
+                             timeout=600.0, max_audio_seconds=327.68, retries=2,
+                             cfg_alpha=2.0)
+        elapsed, dur, attempts = tts.synthesize_with_retries("http://stub", text, out, args)
+        assert attempts == 3, f"expected 3 attempts, got {attempts}"
+        assert out.exists() and abs(dur - 4.0) < 0.1
+        assert seen_cfg == [2.0, 2.0, 2.0], f"cfg_alpha must not move: {seen_cfg}"
+
+        # Out of retries: the exception reaches the caller, which counts the clip as
+        # failed so the next resume picks it up.
+        calls["n"] = -10  # every take rambles from here on
+        out.unlink()
+        args.retries = 1
+        try:
+            tts.synthesize_with_retries("http://stub", text, out, args)
+            raise AssertionError("a clip that fails every attempt must raise")
+        except tts.TruncatedAudioError:
+            assert not out.exists()
+    print("OK stage 05 retries a duration rejection at an unchanged cfg_alpha")
+
+
+def test_the_band_covers_the_slowest_and_the_fastest_voice() -> None:
+    """The bounds must sit outside every VOICE, not outside the corpus average.
+
+    Measured 2026-10-14 over 28,749 v2 dictionary clips: the ten voices read at
+    medians 10.74 (h_frm_chf) to 16.36 (fr_female) chars per second of audio, and
+    h_frm_chf's own slow tail reaches 5.58 chars/s at p0.1 once its real runaways are
+    excluded. The fastest clip ever seen reads at 21.3 chars/s here and 28.5 over the
+    602,813 single-voice v1 clips. A bound inside those numbers rejects a voice for
+    its natural pace: at 3 s + chars/8 that cost h_frm_chf 3.05% of its clips against
+    0.00-0.31% for the other nine.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "utils"))
+    import frame_budget as fb
+
+    assert fb.SLOW_CHARS_PER_S <= 5.58, (
+        f"{fb.SLOW_CHARS_PER_S} chars/s is inside h_frm_chf's slow tail (5.58 at p0.1)"
+    )
+    assert fb.FAST_CHARS_PER_S >= 28.5, (
+        f"{fb.FAST_CHARS_PER_S} chars/s is below the fastest clip measured (28.5)"
+    )
+    # A 20-character dictionary term and a 300-character document, the two shapes the
+    # corpus actually has: both bands must contain every voice's natural duration.
+    for chars, slowest, fastest in ((20, 10.74, 16.36), (300, 10.74, 16.36)):
+        text = "a" * chars
+        assert fb.budget_seconds(text) > chars / slowest, (
+            f"{chars} chars read by the slowest voice would be rejected")
+        assert fb.floor_seconds(text) < chars / fastest, (
+            f"{chars} chars read by the fastest voice would be rejected")
+    # And the measured disaster is still caught by a wide margin: 202 s for 317 chars.
+    assert fb.classify_duration("a" * 317, 202.2) == "over"
+    print("OK the band sits outside the slowest and the fastest voice")
+
+
 if __name__ == "__main__":
     test_stage05_nests_the_seed()
     test_stage06_nests_seed_and_cfg_alpha()
     test_stage06_omits_extra_params_when_nothing_is_set()
     test_stage05_token_budget_is_on_by_default_and_sized_from_the_text()
     test_stage05_judges_truncation_against_the_budget()
+    test_stage05_rejects_an_implausibly_short_clip()
+    test_stage05_retries_a_duration_rejection_at_the_same_cfg()
+    test_the_band_covers_the_slowest_and_the_fastest_voice()
     print("OK all")
