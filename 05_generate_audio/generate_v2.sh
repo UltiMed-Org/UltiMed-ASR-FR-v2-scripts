@@ -38,6 +38,19 @@ CFG_ALPHA="${CFG_ALPHA:-2.0}"
 # go above 32: a batch larger than the biggest captured graph loses the graph.
 CONCURRENCY="${CONCURRENCY:-16}"
 URL="${URL:-http://127.0.0.1:8003}"
+# TOKEN_BUDGET=1 asks the server for only as many frames as each text can plausibly
+# need (3 s + chars/8), so a take that starts looping syllables is stopped in seconds
+# instead of running to the 327.68 s cap, and is left missing for a re-run to retry
+# instead of landing rambling audio in the dataset. Measured at cfg_alpha 2.0: 0.52%
+# of clips exceed that budget, the worst by 4.7x. Off by default because it changes
+# what the server is asked for on every clip; see the runbook, step 1.
+TOKEN_BUDGET="${TOKEN_BUDGET:-0}"
+budget_args=()
+# An `if` rather than `[ ... ] && ...`: the script runs under `set -e`, where a
+# trailing test that FAILS is the last command of the line and kills the run.
+if [ "$TOKEN_BUDGET" = "1" ]; then
+  budget_args=(--auto-token-budget)
+fi
 # A separate log from v1's tts_generate.log on purpose: that file is the only
 # record of v1's throughput and is what the runbook's ETA was measured from.
 LOG_FILE="${LOG_FILE:-$PWD/tts_generate_v2.log}"
@@ -64,7 +77,7 @@ fi
 curl -fsS -m 5 "$URL/health" >/dev/null \
   || { echo "no TTS server on $URL -- start it first: sudo docker compose up -d --build voxtral-tts" >&2; exit 1; }
 
-echo "v2 run: ${#STAGES[@]} stage(s), cfg_alpha $CFG_ALPHA, concurrency $CONCURRENCY, log $LOG_FILE"
+echo "v2 run: ${#STAGES[@]} stage(s), cfg_alpha $CFG_ALPHA, concurrency $CONCURRENCY, token budget $TOKEN_BUDGET, log $LOG_FILE"
 echo "stop it any time with Ctrl-C: in-flight clips finish, queued ones are dropped, and"
 echo "re-running this same command resumes on exactly the clips that are missing."
 run_start=$SECONDS
@@ -87,6 +100,7 @@ for s in "${STAGES[@]}"; do
     --voice-mode "$m" \
     --cfg-alpha "$CFG_ALPHA" \
     --concurrency "$CONCURRENCY" \
+    "${budget_args[@]}" \
     --log-file "$LOG_FILE" || rc=$?
   elapsed="$(date -u -d "@$((SECONDS - stage_start))" '+%H:%M:%S')"
   case "$rc" in
