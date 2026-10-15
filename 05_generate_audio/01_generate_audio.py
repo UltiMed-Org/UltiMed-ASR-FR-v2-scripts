@@ -137,6 +137,17 @@ from frame_budget import (  # noqa: E402
     rates_for_voice,
 )
 
+# The budget help text names the slowest and fastest voice rather than hardcoding two
+# names, so it stays true when the roster changes. It changed on 2026-10-15: h_frm_chf
+# was the slowest voice at 5.3 chars/s and was dropped from the roster, while its
+# measured row in VOICE_RATES deliberately outlives the roster (see frame_budget.py),
+# so a hardcoded name here would quote a voice that no longer reads anything.
+_RATED_ROSTER = [(v, VOICE_RATES[v]) for v in VOICES_FR_V2 if v in VOICE_RATES]
+_SLOWEST_VOICE, _SLOWEST_RATES = min(_RATED_ROSTER, key=lambda kv: kv[1][0])
+_FASTEST_VOICE, _FASTEST_RATES = max(_RATED_ROSTER, key=lambda kv: kv[1][0])
+_FLOOR_LO = min(r[1] for _, r in _RATED_ROSTER)
+_FLOOR_HI = max(r[1] for _, r in _RATED_ROSTER)
+
 DEFAULT_URL = "http://127.0.0.1:8003"
 DEFAULT_LOG_FILE = Path(__file__).resolve().parent / "tts_generate.log"
 
@@ -233,10 +244,11 @@ def budget_terms(args: argparse.Namespace,
     """The three numbers that bound one clip: (fixed seconds, slow rate, fast rate).
 
     The two rates come from the VOICE's measured reading speed when the voice is
-    known, because the ten v2 voices differ by 1.9x on the slow side: at the global
+    known, because the v2 voices differ by 1.5x on the slow side: at the global
     band a runaway by fr_female (median 16.4 chars/s) is only caught once it passes
     5.0 chars/s, i.e. after three times its natural duration, while the same bound
-    rejects h_frm_chf (median 10.7) for merely being slow.
+    rejects h_frm_chf (median 10.7, 1.9x apart on the ten-voice roster it was
+    measured on, and dropped from the roster on 2026-10-15) for merely being slow.
 
     `--budget-chars-per-second` / `--floor-chars-per-second` default to None exactly
     so that this table applies; passing either one explicitly overrides it for every
@@ -704,7 +716,7 @@ def resolve_roster(args: argparse.Namespace) -> tuple[tuple[str, ...] | None, st
 def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
-    # Ten voices by default (v2), one voice when --voice or --voice-mode single says so
+    # Nine voices by default (v2), one voice when --voice or --voice-mode single says so
     # (v1). The voice is a per-request field, so a single run covers the whole roster
     # with no restart and no second pass.
     voices, voice_mode = resolve_roster(args)
@@ -1058,7 +1070,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "seconds instead of letting it run to 327.68s, and keeps "
                         "rambling audio out of the dataset. The rate is the SLOWEST "
                         "voice's slow tail, not the average one (see "
-                        "utils/frame_budget.py): the ten v2 voices read at medians "
+                        "utils/frame_budget.py): the ten v2 voices measured there read "
                         "10.7 to 16.4 chars/s, so a bound set on the average rejects "
                         "the slow voice for being slow.")
     p.add_argument("--budget-fixed-seconds", type=float, default=BUDGET_FIXED_S,
@@ -1068,17 +1080,17 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Slowest plausible reading speed in characters per second of "
                         "audio, the other term of --auto-token-budget. Unset (the "
                         "default) means PER VOICE, from the measured table in "
-                        f"utils/frame_budget.py: {VOICE_RATES['h_frm_chf'][0]} for the "
-                        f"slowest voice h_frm_chf up to {VOICE_RATES['fr_female'][0]} "
-                        f"for the fastest fr_female, and {BUDGET_CHARS_PER_S} for a "
+                        f"utils/frame_budget.py: {_SLOWEST_RATES[0]} for the "
+                        f"slowest voice {_SLOWEST_VOICE} up to {_FASTEST_RATES[0]} "
+                        f"for the fastest {_FASTEST_VOICE}, and {BUDGET_CHARS_PER_S} for a "
                         "voice the table does not list. Passing a value overrides the "
                         "table for every voice.")
     p.add_argument("--floor-chars-per-second", type=float, default=None,
                    help="Fastest plausible reading speed in characters per second of "
                         "audio: a clip shorter than chars/this did not speak all of "
                         "its text and is rejected. Unset (the default) means PER "
-                        f"VOICE, {VOICE_RATES['h_frm_chf'][1]} to "
-                        f"{VOICE_RATES['h_itf_arm'][1]}, and {FAST_CHARS_PER_S} for an "
+                        f"VOICE, {_FLOOR_LO} to "
+                        f"{_FLOOR_HI}, and {FAST_CHARS_PER_S} for an "
                         "unlisted voice; each is 1.45x the fastest clip ever measured "
                         "for that voice, so it flags none of the 602,813 v1 clips nor "
                         "any of the 32,189 v2 ones. Checked on every run, budget or "

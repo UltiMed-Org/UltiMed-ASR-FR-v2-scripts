@@ -107,6 +107,13 @@ VOICE_RATES: dict[str, tuple[float, float]] = {
     "h_frf_itm": (7.7, 28.6),   # median 14.36, legit p1 10.28, fastest 19.75
     "h_frm_ptf": (7.3, 27.2),   # median 13.67, legit p1  9.67, fastest 18.75
     "h_frf_ptm": (6.6, 27.1),   # median 13.03, legit p1  8.84, fastest 18.72
+    # Off the roster since 2026-10-15 (VOICES_FR_V2 dropped it for derailing), and the
+    # row stays anyway: the measurement is still true, a lookup for a voice the roster
+    # no longer has is harmless, re-adding the name must not silently fall back to the
+    # global band, and the tests use it as their slow-voice fixture because it is the
+    # extreme that motivated a per-voice table at all. Nothing reads it in production;
+    # the help text in 01_generate_audio.py derives its figures from the ROSTER, which
+    # now makes h_frf_ptm the slowest voice in use at 6.6.
     "h_frm_chf": (5.3, 26.4),   # median 10.75, legit p1  7.00, fastest 18.22
 }
 
