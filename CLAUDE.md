@@ -116,7 +116,7 @@ preview approach was retired (`build_tarred.py` / `build_preview_parquet.py`
 deleted). The dataset is published (NOTICE + card shipped) at
 `Olicorne/UltiMed-ASR-FR-v1`, and the pipeline scripts at
 `github.com/thiswillbeyourgithub/UltiMed-ASR-FR-v1-scripts`. v2 re-synthesizes the
-same corpus with ten voices and is being built HERE, in this repo, on top of the
+same corpus with nine voices and is being built HERE, in this repo, on top of the
 same text corpus and stages; only the audio and the `voice` column differ. **v2
 will be pushed over `-v1`**, i.e. into the existing Hub repo rather than a new
 one, with the rename handled later (user's call, 2026-10-13). So treat the
@@ -317,7 +317,7 @@ from _pipeline_shared import call_llm, PricingTracker  # noqa: E402
   lazily) so `tests/test_nemo_manifest.py`
   (`python tests/test_nemo_manifest.py`) exercises the splitter without those
   wheels. Do not fork the split logic into a stage.
-- **`voice_assignment.py`** decides which of the ten v2 French voices reads a row,
+- **`voice_assignment.py`** decides which of the nine v2 French voices reads a row,
   for both stage `05` (sends it per request) and stage `99` (writes the `voice`
   column). It is stdlib-only: `VOICES_FR_V2` (the roster, in order), `group_field`,
   `assignment_key`, `voice_for_key` / `voice_for_row`, `load_voices`, plus the
@@ -483,8 +483,9 @@ upper bound as `max_new_tokens`, so a runaway dies in seconds instead of running
 to the server's 327.68 s cap; the floor needs nothing from the server and is
 checked either way.
 
-Per voice matters because the ten v2 voices read at medians 10.75 (h_frm_chf) to
-16.38 (fr_female) chars per second of audio: a single bound loose enough for the
+Per voice matters because the v2 voices read at very different speeds. When the
+bound was measured the roster was ten and the medians ran 10.75 (h_frm_chf, since
+dropped from the roster) to 16.38 (fr_female) chars per second of audio: a single bound loose enough for the
 slow voice (the first one, `3 s + chars/8`) rejected it at 3.05% against
 0.00-0.31% for the other nine, while leaving a fast voice unbounded until three
 times its natural duration. Each voice's upper bound is 0.75x its measured legit
@@ -563,12 +564,17 @@ against stage 06's CER gate, without regenerating audio. Covered by
 `tests/test_code_loops.py` (which pins the thresholds against four real captured tracks
 in `tests/data/code_tracks.json`) and the gate checks in `tests/test_tts_wire_format.py`.
 
-This gate is also why `h_frm_chf` was **not** retired despite being measurably the
-worst voice (14 of 180 over the CER gate in the unbiased sample against 4 of 165 for the
-next worst): its median CER is mid-pack, so it derails rather than being bad, and a
-derailment is now caught and redrawn per take. `utils/voice_assignment.py` keeps the
-retirement mechanism ready but `RETIRED_VOICES_FR_V2` is empty; see the comment on it
-for what would reopen the question.
+This gate is what let `h_frm_chf` survive the first audit (14 of 180 over the CER gate
+in the unbiased sample against 4 of 165 for the next worst): its median CER was mid-pack,
+so it derailed rather than reading badly, and a derailment is caught and redrawn per take.
+A larger QC sample settled it the other way on 2026-10-15: over 2,000 clips it was flagged
+on 14.9% with p90 CER 0.195, against 0.0-4.6% and p90 0.014-0.036 for the other nine. So
+it was **dropped from `VOICES_FR_V2` entirely** rather than retired, and the audio made
+before the gate existed was deleted and is being regenerated; the roster is now nine
+voices, 4F/5M. `utils/voice_assignment.py` keeps the retirement mechanism ready and
+tested with `RETIRED_VOICES_FR_V2` empty, because once a lot of audio exists retirement
+is the only safe tool: it re-draws only the dropped voice's keys (~11% here) and leaves
+the rest bit-identical, where editing the roster re-assigns every key.
 
 **Listening to a run while it runs: `05_generate_audio/03_qc_cpu_stt.py`.** The
 duration bounds are the only check the audio gets during generation, and they
@@ -599,16 +605,17 @@ real QC holds the CPU). The mix is what bounds any cheaper detector: on the
 first 51 flagged dictionary clips (2026-10-15) 73% were `wrong_words`, fluent
 speech with no acoustic signature, but among the severe ones (CER >= 0.25) 50%
 were `loop` or `overrun`, which a waveform-only detector can find. All of them
-came from one voice, `h_frm_chf`. Covered by `tests/test_qc_cpu_stt.py` (the
+came from one voice, `h_frm_chf`, which is the finding that eventually got it dropped
+from the roster (above). Covered by `tests/test_qc_cpu_stt.py` (the
 sample draw and its independence from the voice assignment, the sidecar tail
 including a torn line and a re-drawn stem, the resume, the queue policy that
 drops stale samples but never a retried take, the four defect shapes including
 a label that repeats itself, and the report re-reading rows written before the
 field existed).
 
-**Voices (v2).** Batch mode spreads the corpus over the ten French voices of
+**Voices (v2).** Batch mode spreads the corpus over the nine French voices of
 `utils/voice_assignment.py` instead of reading all of it with one: the voice is a
-per-request field, so one run covers all ten with no restart. The flag default is
+per-request field, so one run covers all nine with no restart. The flag default is
 `--voice-mode group`, i.e. a term's variants (and a document's chunks) are read by
 one speaker, assigned by hashing the group key; `--voice-mode row` gives every clip
 its own draw, `--voice X` or `--voice-mode single` is the v1 behaviour, and
@@ -737,7 +744,7 @@ The derived dataset must ship correct attribution. Summary (full detail in
 - Do **not** redistribute the PARHAF test set (embargoed); training set only.
 - **TODO (v2):** `99_hf_release/README.md` is the PUBLISHED v1 dataset card, so it
   still documents v1's columns and its single `fr_female` voice. When v2 ships,
-  document the `voice` column there (ten voices, one per term/document) and in the
+  document the `voice` column there (nine voices, one per term/document) and in the
   "Scale and cost" row of the root `README.md`. Deliberately not done yet: the card
   must keep describing the data that is actually on the Hub. `build_parquet.py`
   already writes the column, empty for v1-era manifests, so a v1 rebuild stays
@@ -781,7 +788,7 @@ Flagging these because avoiding silent duplication is a hard rule in this repo:
   and generated frames, so it must stay above `VOXTRAL_MAX_TOKENS` + the prompt or
   the real cap is lower than this constant (today: 6144 vs 4096, so 4096 binds).
 - **The v2 voice roster (deliberate copy).** `utils/voice_assignment.py`'s
-  `VOICES_FR_V2` copies the ten names from `CrispASR/voxtral/cloning/
+  `VOICES_FR_V2` copies the nine names from `CrispASR/voxtral/cloning/
   voices_fr_production.txt` in the separate CrispASR harness repo, where they were
   chosen by ear (that repo's `PLAN_VOXTRALTTS_CLONING_TEST.md`, stages A9 and A10).
   Same reasoning as `VOXTRAL_VOICES` above: this repo must stay self-contained, so

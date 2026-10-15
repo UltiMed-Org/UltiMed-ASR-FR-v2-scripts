@@ -172,12 +172,12 @@ with audio a neutral listener would reject. Read it as a gross-error detector
 For an impartial read, point `--model-dir` at the base export
 (`parakeet-tdt-0.6b-v3-redux-onnx`) or score with Whisper through stage 06.
 
-## Ten voices (v2)
+## Nine voices (v2)
 
 v1 read the whole corpus with a single voice (`fr_female`). v2 spreads it over
-the ten French voices in `utils/voice_assignment.py`, which were picked by ear
+the nine French voices in `utils/voice_assignment.py`, which were picked by ear
 in the CrispASR harness repo (`voxtral/cloning/voices_fr_production.txt`). The
-voice is a per-request field, so **one run covers all ten**, no restart and no
+voice is a per-request field, so **one run covers all nine**, no restart and no
 second pass:
 
 ```bash

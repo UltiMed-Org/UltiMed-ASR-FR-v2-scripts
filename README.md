@@ -90,7 +90,7 @@ Top-level numbered folders are ordered pipeline stages. Files numbered inside a 
 | [`02_drugs/`](02_drugs/) | French and international drug names to medication-dictation sentences. Importance comes from real 2025 sales volumes rather than an LLM, and sentences name real dosages. [`02_drugs/sources/`](02_drugs/sources/) holds the scripts that build the stage's inputs from the public drug databases. |
 | [`03_PARHAF/`](03_PARHAF/) | PARHAF clinical documents, chunked and rewritten into faithful spoken-French paragraphs. |
 | [`04_PARROT/`](04_PARROT/) | PARROT radiology reports, French rows only, same chunk-and-rewrite path. |
-| [`05_generate_audio/`](05_generate_audio/) | Runs a local TTS server over every stage's text output. Resumable, with a truncation guard. Reads the corpus with ten French voices, one per term or document, since v2 (v1 was single-voice). |
+| [`05_generate_audio/`](05_generate_audio/) | Runs a local TTS server over every stage's text output. Resumable, with a truncation guard. Reads the corpus with nine French voices, one per term or document, since v2 (v1 was single-voice). |
 | [`06_hotfixes/`](06_hotfixes/) | The quality loop: score every clip against its transcript, regenerate the bad ones, keep the best draw. [`manifest_listener/`](06_hotfixes/manifest_listener/) is the human-in-the-loop complement, a small app for listening to clips and flagging them. |
 | [`07_acronyms/`](07_acronyms/) | 511 hand-filtered medical acronyms, each spoken with its real pronunciation while the label keeps the written form. |
 | [`99_hf_release/`](99_hf_release/) | Build NeMo manifests, package as sharded Parquet, publish. This folder is also the working copy of the published dataset repo itself: see [below](#99_hf_release-is-the-dataset-repo). |
@@ -114,7 +114,7 @@ Two stage docs are worth reading on their own: [`06_hotfixes/README_alternating_
 
 [`docs/BUILD_LOG.md`](docs/BUILD_LOG.md) is the running log kept while building: the actual commands, the actual score distributions, the actual costs, and the reasoning behind the decisions that did not work out the first time.
 
-[`docs/V2_REGENERATION_RUNBOOK.md`](docs/V2_REGENERATION_RUNBOOK.md) is the ordered procedure for the v2 run (the whole corpus re-synthesized with ten voices), including the stale-QC rules that matter because v2 reuses v1's file names.
+[`docs/V2_REGENERATION_RUNBOOK.md`](docs/V2_REGENERATION_RUNBOOK.md) is the ordered procedure for the v2 run (the whole corpus re-synthesized with nine voices), including the stale-QC rules that matter because v2 reuses v1's file names.
 
 [`CLAUDE.md`](CLAUDE.md) is the architecture guide. It was written for coding agents and it is the densest description of how the pieces fit together. **If you are pointing an agent at this repository, that is the file to give it first.**
 

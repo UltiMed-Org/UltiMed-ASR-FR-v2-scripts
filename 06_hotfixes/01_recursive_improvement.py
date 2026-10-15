@@ -467,7 +467,7 @@ def _synthesize_draft(
     cap rather than at the end of the text; either way the caller skips the draw.
 
     ``voice`` is the voice THIS clip was originally read by, from the manifest row's
-    ``voice`` field (v2 spreads the corpus over ten voices, one per term/document).
+    ``voice`` field (v2 spreads the corpus over nine voices, one per term/document).
     A regeneration has to use it, or the replacement clip would be spoken by someone
     else while the manifest, the Parquet and any per-voice evaluation still say the
     original name: the voice column is re-derived from the group key, so it cannot

@@ -140,7 +140,7 @@ def write_rows(path: Path, rows: list[dict]) -> None:
 def dictionary_rows() -> list[dict]:
     """Six terms x three variants, the 01_dictionnary / 02_drugs / 07_acronyms shape.
 
-    Six terms because the roster has ten voices and the point is to see several of
+    Six terms because the roster has nine voices and the point is to see several of
     them used; three variants because the point is that a term's variants do NOT
     differ. The text is unique per row, which is how the request is matched back to
     the clip (the request body carries the text, not the filename).

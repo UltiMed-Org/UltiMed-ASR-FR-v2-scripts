@@ -1,6 +1,6 @@
 # v2 regeneration runbook
 
-Written with Claude Code on 2026-10-14, for the run that re-synthesizes the whole UltiMed corpus with the ten French Voxtral voices.
+Written with Claude Code on 2026-10-14, for the run that re-synthesizes the whole UltiMed corpus with the nine French Voxtral voices.
 
 v2 keeps v1's texts, file names, group keys and splits-by-intent, and replaces every `.flac`. That one sentence is the source of every trap below: a QC value, a duration or a drop list keyed on a **file name** still "matches" after the audio under that name has been replaced, which makes stale v1 judgements look like fresh v2 ones. The checks in this document exist because none of them are visible in the output: the manifest just carries a plausible number.
 
@@ -21,7 +21,7 @@ Inputs, all five `generated_dataset.jsonl`, verified row by row:
 | **total** | **602,885** | | **70,961** | ~60k per voice |
 
 - Every row carries `term_index`, `variant_index`, `term` and a non-empty `asr_training_source` (stage 05 hard-requires them at `05_generate_audio/01_generate_audio.py:374`), and no two rows of a stage produce the same file name stem.
-- All ten roster voices are used by all five stages. The roster is `utils/voice_assignment.py::VOICES_FR_V2`, byte-identical to `CrispASR/voxtral/cloning/voices_fr_production.txt`, and each name resolves to an embedding file in the checkpoint's `voice_embedding/`.
+- All nine roster voices are used by all five stages. The roster is `utils/voice_assignment.py::VOICES_FR_V2`, byte-identical to `CrispASR/voxtral/cloning/voices_fr_production.txt`, and each name resolves to an embedding file in the checkpoint's `voice_embedding/`.
 - The five `generated_audios` symlinks point at **empty** folders under `/media/.../audio_datasets/v2/`, and `99_hf_release/data` points at that same v2 root, so `data/NeMO_files` does not exist yet (scripts defaulting to it will say "no manifest found" until step 3).
 
 The server is the only thing that has to be brought up by hand, and it is not part of this repo:
@@ -80,7 +80,7 @@ done
 
   Three things are true about stopping them. (1) **Cancellation works**: `/v1/audio/speech` is wrapped in vLLM's `@with_cancellation`, which polls `raw_request.is_disconnected()`, and `vllm_omni/entrypoints/async_omni.py::generate` catches `CancelledError`/`GeneratorExit` and calls `_abort_internal_requests`, so closing the socket (what the client's `--timeout` does) really frees the GPU. Measured against the live run: 32 requests dropped after 3 s left no mark on its throughput, while the same 32 left to finish cut it from ~4,800 clips/h to 600-1,800 clips/h for ~90 s. (2) But a **timeout is the wrong detector**, because it is time-based and cannot tell a long clip from a loop without knowing the text. (3) The right one is the per-clip frame budget, **on by default** since 2026-10-14 (`--no-auto-token-budget`, or `TOKEN_BUDGET=0 ./generate_v2.sh`, to disable), which asks for `(3 s + chars/5) x 12.5` frames and rejects a clip that comes back pinned at its own budget. `max_new_tokens` is honored per request (25 frames returns exactly 2.00 s of audio in 2.4 s of wall), so the loop dies in seconds.
 
-  **The bound is set by the slowest VOICE, not by the corpus average**, and that distinction is worth 2% of a voice's clips. Measured over the 28,749 v2 dictionary clips on disk (`05_generate_audio/02_audit_durations.py` prints this table), the ten voices read at very different speeds, in characters per second of audio:
+  **The bound is set by the slowest VOICE, not by the corpus average**, and that distinction is worth 2% of a voice's clips. Measured over the 28,749 v2 dictionary clips on disk (`05_generate_audio/02_audit_durations.py` prints this table), the ten voices then on the roster read at very different speeds, in characters per second of audio:
 
   | voice | median | legit p1 | fastest clip | **its bounds** | rejected by `3 + chars/8` |
   |---|---:|---:|---:|---:|---:|
@@ -93,9 +93,9 @@ done
   | h_frm_ptf | 13.67 | 9.67 | 18.75 | **7.3 - 27.2** | 0.27% |
   | h_itf_arm | 13.30 | 9.22 | 21.28 | **6.9 - 30.9** | 0.04% |
   | h_frf_ptm | 13.03 | 8.84 | 18.72 | **6.6 - 27.1** | 0.31% |
-  | **h_frm_chf** | **10.75** | **7.00** | 18.22 | **5.3 - 26.4** | **3.05%** |
+  | **h_frm_chf** (dropped) | **10.75** | **7.00** | 18.22 | **5.3 - 26.4** | **3.05%** |
 
-  ("legit p1" excludes the clips reading below that voice's median/2.5, i.e. its actual runaways, 1.08% for h_frm_chf and under 0.2% everywhere else.) So the first bound was rejecting the slow voice *for being slow*, three attempts at a time, while barely bounding the fast ones at all.
+  ("legit p1" excludes the clips reading below that voice's median/2.5, i.e. its actual runaways, 1.08% for h_frm_chf and under 0.2% everywhere else.) `h_frm_chf` was dropped from the roster on 2026-10-15 on QC evidence, so the roster is the nine other rows; its `VOICE_RATES` entry stays, because the measurement is still true and a re-added voice must not silently fall back to the global band. So the first bound was rejecting the slow voice *for being slow*, three attempts at a time, while barely bounding the fast ones at all.
 
   **The bounds are therefore per voice** (`VOICE_RATES` in `utils/frame_budget.py`, resolved by `rates_for_voice`): upper = `0.75 x` that voice's legit p1, the knee where each voice's rejection share stops exceeding its genuine-runaway share; lower = `1.45 x` its fastest observed clip, a wide margin because each voice has only ~3.2k clips here while the 602,813-clip v1 corpus reached 28.5 chars/s against a p99.9 of 20.5. A voice the table does not list falls back to the global `5.0 / 30.0`, the widest band, so an unlisted voice is never rejected for being unlisted; `--budget-chars-per-second` / `--floor-chars-per-second` override the table for every voice.
 
