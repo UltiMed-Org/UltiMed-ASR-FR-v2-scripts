@@ -71,39 +71,44 @@ check("same voices under every PYTHONHASHSEED",
 # roster order changes, every v2 clip would be relabelled, so that must be a decision
 # and not an accident. Update these only together with a regeneration of the audio.
 # This pin is the PRE-retirement mapping (`retired=()`), which is the one the audio
-# already on disk was generated under and which must therefore never move again.
+# on disk is generated under. It has moved exactly once, on 2026-10-15, when the
+# roster went from ten voices to nine (`h_frm_chf` dropped, see
+# voice_assignment.RETIRED_VOICES_FR_V2) and the 148,303 clips then on disk were
+# deleted in the same operation, which is the only circumstance that permits it.
 check("historical mapping is pinned to known values",
-      local == ["h_frm_chf", "h_frf_ptm", "fr_female", "h_frm_chf", "h_frf_esm",
-                "h_frm_ptf"],
+      local == ["h_frm_nlf", "h_frf_esm", "h_frm_ptf", "h_frf_itm", "h_frf_esm",
+                "h_frm_nlf"],
       str(local))
 # No voice is retired at the moment (RETIRED_VOICES_FR_V2 is empty, see the comment
 # on it), so the mechanism is exercised with an explicit tuple. Testing it against the
 # module default instead would make these checks vanish the moment the default is empty,
 # which is exactly when a future retirement needs them most.
-RETIRED = ("h_frm_chf",)
+RETIRED = ("h_frf_esm",)
 # The live mapping differs from the historical one in exactly the positions that drew
-# the retired voice: keys 0 and 12345 above move, the other four do not. That is the
-# whole promise of retiring by re-draw instead of by deletion.
+# the retired voice: of the six keys above, "42" and "PARROT:12" move and the other
+# four do not. That is the whole promise of retiring by re-draw instead of by deletion.
 check("retiring only moves the retired voice's keys",
       [va.voice_for_key(k, retired=RETIRED) for k in KEYS]
-      == ["fr_male", "h_frf_ptm", "fr_female", "h_itf_arm", "h_frf_esm", "h_frm_ptf"],
+      == ["h_frm_nlf", "h_frm_nlf", "h_frm_ptf", "h_frf_itm", "h_frm_nlf",
+           "h_frm_nlf"],
       str([va.voice_for_key(k, retired=RETIRED) for k in KEYS]))
 check("a retired voice is never returned",
       not {va.voice_for_key(str(i), retired=RETIRED) for i in range(5_000)} & set(RETIRED),
       str(sorted({va.voice_for_key(str(i), retired=RETIRED) for i in range(5_000)})))
-# Retiring a voice must leave the other nine tenths of the corpus alone, or every
+# Retiring a voice must leave the other eight ninths of the corpus alone, or every
 # already-generated clip of a surviving voice would silently become mislabelled.
 _moved = sum(va.voice_for_key(str(i), retired=RETIRED)
              != va.voice_for_key(str(i), retired=())
              for i in range(20_000))
-check("retiring one of ten voices moves only ~10 pct of keys",
-      1_600 < _moved < 2_400, f"{_moved} of 20000 moved")
+check("retiring one of nine voices moves only ~11 pct of keys",
+      1_800 < _moved < 2_700, f"{_moved} of 20000 moved")
 # `retired=()` must still be able to name the retired voice, since that is how a
 # maintenance pass finds the clips it already read and deletes them.
 check("the historical mapping still yields the retired voice",
       RETIRED[0] in {va.voice_for_key(str(i), retired=()) for i in range(5_000)})
 # With nothing retired, the live mapping must BE the historical one, bit for bit: that
-# is what keeps the 139k clips already on disk correctly labelled.
+# is what keeps every clip already on disk correctly labelled, and it is the property
+# that makes a mid-run retirement cheap and a mid-run roster edit impossible.
 check("an empty retirement changes nothing",
       all(va.voice_for_key(str(i)) == va.voice_for_key(str(i), retired=())
           for i in range(5_000)))
@@ -115,7 +120,7 @@ except ValueError:
     _raised = True
 check("an entirely retired roster raises", _raised)
 # Retiring a second voice must not disturb the keys that never drew either of them.
-_two = ("h_frm_chf", "h_itf_def")
+_two = ("h_frf_esm", "h_itf_def")
 _kept = [str(i) for i in range(4_000)
          if va.voice_for_key(str(i), retired=RETIRED) not in _two]
 check("a second retirement leaves untouched keys untouched",

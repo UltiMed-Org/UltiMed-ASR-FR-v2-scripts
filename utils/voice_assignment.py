@@ -1,7 +1,7 @@
-"""Which of the ten French voices reads a given row, decided once and re-derivable.
+"""Which of the nine French voices reads a given row, decided once and re-derivable.
 
 v1 is single-voice (`fr_female` throughout), which makes a speaker-independent ASR
-model learn one speaker's articulation. v2 spreads the same corpus over ten voices,
+model learn one speaker's articulation. v2 spreads the same corpus over nine voices,
 and two stages need to agree on which voice read which clip: `05_generate_audio`
 sends it at synthesis time, and `99_hf_release` records it in the manifest and the
 Parquet long after the audio was written. This module is the single place that
@@ -18,8 +18,9 @@ its voice independently of every other row, so the corpus text can keep being ed
 rows can be added, and a half-finished run can resume, without any already-generated
 clip becoming mislabelled. The price is imperfect balance, measured over the v1 inputs
 at 2.8 pct spread on 01_dictionnary and up to 50 pct on 04_PARROT (475 document groups
-over ten voices, so 116 to 194 clips per voice): acceptable, because the model sees
-about 60k clips per voice overall and the skew lives in the two smallest stages.
+over the roster, which was ten voices when that was measured, so 116 to 194 clips per
+voice): acceptable, because the model sees about 67k clips per voice overall and the
+skew lives in the two smallest stages.
 
 `blake2b` rather than the builtin `hash()`: Python randomises string hashing per
 process unless `PYTHONHASHSEED` is pinned, and the manifest builder runs in a
@@ -40,10 +41,15 @@ import hashlib
 import json
 from pathlib import Path
 
-# The ten French voices cleared for v2, in roster order. Chosen by ear over two
+# The nine French voices cleared for v2, in roster order. Chosen by ear over two
 # audition rounds, the second on medical text: FLEURS-clean prose did not predict
 # behaviour on drug names and dosages and disagreed about 6 of 16 candidates. They are
-# ten DISTINCT acoustic identities (five female, five male), not ten variants of three.
+# nine DISTINCT acoustic identities (four female, five male), not nine variants of
+# three. That audition cleared TEN, five female and five male; `h_frm_chf` (heard as
+# cheerful_female) was dropped on 2026-10-15 after the QC sample measured it derailing
+# far more than the rest, which is why the roster is 4F/5M rather than even. See
+# RETIRED_VOICES_FR_V2 below for those numbers and for why it was dropped outright
+# instead of retired.
 # Deliberate copy, like VOXTRAL_VOICES in 05_generate_audio/01_generate_audio.py: the
 # roster is decided in the CrispASR harness repo (voxtral/cloning/voices_fr_production.txt,
 # plan stages A9 and A10 there) and this repo must stay self-contained, so if that
@@ -58,7 +64,6 @@ VOICES_FR_V2 = (
     "h_frf_itm",    # it_male
     "h_frm_ptf",    # pt_female
     "h_frf_ptm",    # pt_male
-    "h_frm_chf",    # cheerful_female
 )
 
 #: Voices dropped from the roster after measurement. They stay listed in
@@ -67,22 +72,28 @@ VOICES_FR_V2 = (
 RETIRED_VOICES_FR_V2: tuple[str, ...] = ()
 #: EMPTY on purpose, and the mechanism below is kept ready rather than used.
 #:
-#: The candidate was `h_frm_chf`, and the measurement against it still stands: 14 of
-#: 180 clips over stage 06's CER gate in the unbiased 5% QC sample (2026-10-15),
-#: against 4 of 165 for the next worst voice and zero for four of the ten, with every
-#: `loop` and `overrun` among the first 51 flagged clips belonging to it. What stopped
-#: the retirement is the rest of that measurement: its median CER (0.0069) is mid-pack,
-#: so the voice reads most sentences well and then occasionally loses the text
-#: entirely. It derails, it is not bad.
+#: Empty does not mean no voice ever failed. `h_frm_chf` (heard as cheerful_female)
+#: did, and on 2026-10-15 it was deleted from `VOICES_FR_V2` outright rather than
+#: retired here. That is the move `voice_for_key` warns against, and it was safe
+#: exactly once, for a reason that will not come back: it was decided while the whole
+#: v2 corpus was being deleted anyway (148,303 dictionary clips, so that every clip
+#: would carry the code sidecar the gate writes), so there was no audio on disk for the
+#: re-draw to mislabel. The same edit DURING a run re-assigns every key and silently
+#: mislabels every clip already written.
 #:
-#: That distinction is what makes retirement the wrong tool. A voice that derails on
-#: 8% of takes is repaired by rejecting the derailed take and drawing again, which is
-#: what `utils/code_loops.py` now does per take from the codes the take emitted, at
-#: essentially no cost and before the clip is ever written. Retiring the voice instead
-#: would spend the dataset's acoustic diversity (one of ten distinct identities, 10% of
-#: the corpus) to avoid a failure the generator can now catch. Revisit this if the
-#: code gate turns out NOT to catch its derailments: the honest check is this voice's
-#: over-gate rate in the QC sample once clips generated under the gate dominate it.
+#: The measurement that condemned it: 14 of 180 clips over stage 06's CER gate in the
+#: unbiased 5% QC sample, against 4 of 165 for the next worst voice and zero for four
+#: of the ten, every `loop` and `overrun` among the first 51 flagged clips belonging to
+#: it, and p90 CER 0.195 against 0.014 to 0.036 for the rest. Its median CER (0.0069)
+#: was mid-pack: it read most sentences well and then occasionally lost the text
+#: entirely. It derailed, it was not bad, which is why the first plan was to keep it
+#: and let the code gate reject its bad takes; the dataset was then held to a higher
+#: bar than "recoverable by retry".
+#:
+#: So this stays wired and tested for the next voice that turns out bad, because once
+#: audio exists retirement is the only safe tool: re-drawing leaves every key that did
+#: not land on the retired voice bit-identical (~89 pct of the corpus at nine voices),
+#: whereas editing the roster means regenerating all of it.
 
 #: How many re-draws `voice_for_key` tries before falling back to a direct draw over
 #: the survivors. Only reachable when most of the roster is retired; see there.
@@ -191,8 +202,8 @@ def voice_for_key(key: str, voices: tuple[str, ...] | list[str] = VOICES_FR_V2,
 
     **A voice is retired by re-drawing, never by deleting its roster entry.** The
     mapping is `voices[digest % len(voices)]`, so dropping one name changes
-    `len(voices)` and therefore re-assigns *every* key: with ten voices that would
-    relabel ~90 pct of the corpus, and because the resume check in
+    `len(voices)` and therefore re-assigns *every* key: with nine voices that would
+    relabel ~89 pct of the corpus, and because the resume check in
     `01_generate_audio.py` matches filenames, which carry no voice, the audio already
     on disk would quietly become mislabelled rather than be regenerated. That is the
     same failure the module docstring rejects a counter for. Instead the first draw is
@@ -209,10 +220,15 @@ def voice_for_key(key: str, voices: tuple[str, ...] | list[str] = VOICES_FR_V2,
     3. retirements compose: retiring a second voice later leaves every key that never
        landed on it untouched.
 
-    The cost is ~`1 / (1 - retired_fraction)` hashes per call, i.e. 1.11 for one voice
-    in ten. After `_RETIRE_MAX_ATTEMPTS` failures it draws directly over the survivors
-    instead, which keeps the function total when nearly the whole roster is retired
-    (at nine of ten retired, a bounded loop alone would leave ~1e-3 of keys undecided).
+    The cost is ~`1 / (1 - retired_fraction)` hashes per call, i.e. 1.125 for one
+    voice in nine. After `_RETIRE_MAX_ATTEMPTS` failures it draws directly over the
+    survivors instead, which keeps the function total when nearly the whole roster is
+    retired (at eight of nine retired, a bounded loop alone would leave ~1e-3 of keys
+    undecided).
+
+    Done once for real, deliberately, and only because the audio was being deleted in
+    the same operation: see `RETIRED_VOICES_FR_V2` for why dropping `h_frm_chf` from
+    the roster on 2026-10-15 was not an exception to the rule above.
 
     Examples
     --------
@@ -220,16 +236,16 @@ def voice_for_key(key: str, voices: tuple[str, ...] | list[str] = VOICES_FR_V2,
     True
     >>> voice_for_key("42") not in RETIRED_VOICES_FR_V2
     True
-    >>> # Retiring a voice leaves the other nine tenths of the keys alone. Passed
+    >>> # Retiring a voice leaves the other eight ninths of the keys alone. Passed
     >>> # explicitly because RETIRED_VOICES_FR_V2 is currently empty: no voice is
     >>> # retired, so the live mapping and the historical one are the same mapping.
-    >>> same = sum(voice_for_key(str(k), retired=("h_frm_chf",))
+    >>> same = sum(voice_for_key(str(k), retired=("h_frm_ptf",))
     ...            == voice_for_key(str(k), retired=())
     ...            for k in range(10000))
     >>> 8500 < same < 9500
     True
     >>> # ...and the retired voice is then never drawn.
-    >>> any(voice_for_key(str(k), retired=("h_frm_chf",)) == "h_frm_chf"
+    >>> any(voice_for_key(str(k), retired=("h_frm_ptf",)) == "h_frm_ptf"
     ...     for k in range(10000))
     False
     """
