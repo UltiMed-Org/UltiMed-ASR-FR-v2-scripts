@@ -76,27 +76,37 @@ check("historical mapping is pinned to known values",
       local == ["h_frm_chf", "h_frf_ptm", "fr_female", "h_frm_chf", "h_frf_esm",
                 "h_frm_ptf"],
       str(local))
-# And the live mapping, which differs from it in exactly the positions that drew the
-# retired voice: keys 0 and 12345 above moved, the other four did not. That is the
+# No voice is retired at the moment (RETIRED_VOICES_FR_V2 is empty, see the comment
+# on it), so the mechanism is exercised with an explicit tuple. Testing it against the
+# module default instead would make these checks vanish the moment the default is empty,
+# which is exactly when a future retirement needs them most.
+RETIRED = ("h_frm_chf",)
+# The live mapping differs from the historical one in exactly the positions that drew
+# the retired voice: keys 0 and 12345 above move, the other four do not. That is the
 # whole promise of retiring by re-draw instead of by deletion.
-check("live mapping only moves the retired voice's keys",
-      [va.voice_for_key(k) for k in KEYS]
+check("retiring only moves the retired voice's keys",
+      [va.voice_for_key(k, retired=RETIRED) for k in KEYS]
       == ["fr_male", "h_frf_ptm", "fr_female", "h_itf_arm", "h_frf_esm", "h_frm_ptf"],
-      str([va.voice_for_key(k) for k in KEYS]))
-check("the retired voice is never returned",
-      not {va.voice_for_key(str(i)) for i in range(5_000)} & set(va.RETIRED_VOICES_FR_V2),
-      str(sorted({va.voice_for_key(str(i)) for i in range(5_000)})))
+      str([va.voice_for_key(k, retired=RETIRED) for k in KEYS]))
+check("a retired voice is never returned",
+      not {va.voice_for_key(str(i), retired=RETIRED) for i in range(5_000)} & set(RETIRED),
+      str(sorted({va.voice_for_key(str(i), retired=RETIRED) for i in range(5_000)})))
 # Retiring a voice must leave the other nine tenths of the corpus alone, or every
 # already-generated clip of a surviving voice would silently become mislabelled.
-_moved = sum(va.voice_for_key(str(i)) != va.voice_for_key(str(i), retired=())
+_moved = sum(va.voice_for_key(str(i), retired=RETIRED)
+             != va.voice_for_key(str(i), retired=())
              for i in range(20_000))
 check("retiring one of ten voices moves only ~10 pct of keys",
       1_600 < _moved < 2_400, f"{_moved} of 20000 moved")
 # `retired=()` must still be able to name the retired voice, since that is how a
 # maintenance pass finds the clips it already read and deletes them.
 check("the historical mapping still yields the retired voice",
-      va.RETIRED_VOICES_FR_V2[0]
-      in {va.voice_for_key(str(i), retired=()) for i in range(5_000)})
+      RETIRED[0] in {va.voice_for_key(str(i), retired=()) for i in range(5_000)})
+# With nothing retired, the live mapping must BE the historical one, bit for bit: that
+# is what keeps the 139k clips already on disk correctly labelled.
+check("an empty retirement changes nothing",
+      all(va.voice_for_key(str(i)) == va.voice_for_key(str(i), retired=())
+          for i in range(5_000)))
 # A roster that is entirely retired is a configuration error, not a silent fallback.
 try:
     va.voice_for_key("1", voices=("a", "b"), retired=("a", "b"))
@@ -107,10 +117,11 @@ check("an entirely retired roster raises", _raised)
 # Retiring a second voice must not disturb the keys that never drew either of them.
 _two = ("h_frm_chf", "h_itf_def")
 _kept = [str(i) for i in range(4_000)
-         if va.voice_for_key(str(i)) not in _two]
+         if va.voice_for_key(str(i), retired=RETIRED) not in _two]
 check("a second retirement leaves untouched keys untouched",
-      all(va.voice_for_key(k) == va.voice_for_key(k, retired=_two) for k in _kept),
-      f"{sum(va.voice_for_key(k) != va.voice_for_key(k, retired=_two) for k in _kept)}"
+      all(va.voice_for_key(k, retired=RETIRED) == va.voice_for_key(k, retired=_two)
+          for k in _kept),
+      f"{sum(va.voice_for_key(k, retired=RETIRED) != va.voice_for_key(k, retired=_two) for k in _kept)}"
       f" of {len(_kept)} moved")
 
 # --------------------------------------------------- 2. group cohesion + key field

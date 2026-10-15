@@ -64,15 +64,25 @@ VOICES_FR_V2 = (
 #: Voices dropped from the roster after measurement. They stay listed in
 #: `VOICES_FR_V2` on purpose: see `voice_for_key` for why deleting an entry is NOT
 #: how a voice is retired, and what it would cost.
-RETIRED_VOICES_FR_V2 = (
-    # Derails far more than any other voice: 14 of 180 clips over stage 06's CER gate
-    # in the unbiased 5% QC sample (2026-10-15), against 4 of 165 for the next worst
-    # and zero for four of the ten, and every `loop` and `overrun` among the first 51
-    # flagged clips was this voice. Its median CER (0.0069) is mid-pack, so what is
-    # wrong is derailment, not accent or articulation: it reads most sentences well
-    # and then occasionally loses the text entirely.
-    "h_frm_chf",
-)
+RETIRED_VOICES_FR_V2: tuple[str, ...] = ()
+#: EMPTY on purpose, and the mechanism below is kept ready rather than used.
+#:
+#: The candidate was `h_frm_chf`, and the measurement against it still stands: 14 of
+#: 180 clips over stage 06's CER gate in the unbiased 5% QC sample (2026-10-15),
+#: against 4 of 165 for the next worst voice and zero for four of the ten, with every
+#: `loop` and `overrun` among the first 51 flagged clips belonging to it. What stopped
+#: the retirement is the rest of that measurement: its median CER (0.0069) is mid-pack,
+#: so the voice reads most sentences well and then occasionally loses the text
+#: entirely. It derails, it is not bad.
+#:
+#: That distinction is what makes retirement the wrong tool. A voice that derails on
+#: 8% of takes is repaired by rejecting the derailed take and drawing again, which is
+#: what `utils/code_loops.py` now does per take from the codes the take emitted, at
+#: essentially no cost and before the clip is ever written. Retiring the voice instead
+#: would spend the dataset's acoustic diversity (one of ten distinct identities, 10% of
+#: the corpus) to avoid a failure the generator can now catch. Revisit this if the
+#: code gate turns out NOT to catch its derailments: the honest check is this voice's
+#: over-gate rate in the QC sample once clips generated under the gate dominate it.
 
 #: How many re-draws `voice_for_key` tries before falling back to a direct draw over
 #: the survivors. Only reachable when most of the roster is retired; see there.
@@ -210,11 +220,18 @@ def voice_for_key(key: str, voices: tuple[str, ...] | list[str] = VOICES_FR_V2,
     True
     >>> voice_for_key("42") not in RETIRED_VOICES_FR_V2
     True
-    >>> # Retiring a voice leaves the other nine tenths of the keys alone.
-    >>> same = sum(voice_for_key(str(k)) == voice_for_key(str(k), retired=())
+    >>> # Retiring a voice leaves the other nine tenths of the keys alone. Passed
+    >>> # explicitly because RETIRED_VOICES_FR_V2 is currently empty: no voice is
+    >>> # retired, so the live mapping and the historical one are the same mapping.
+    >>> same = sum(voice_for_key(str(k), retired=("h_frm_chf",))
+    ...            == voice_for_key(str(k), retired=())
     ...            for k in range(10000))
     >>> 8500 < same < 9500
     True
+    >>> # ...and the retired voice is then never drawn.
+    >>> any(voice_for_key(str(k), retired=("h_frm_chf",)) == "h_frm_chf"
+    ...     for k in range(10000))
+    False
     """
     if not voices:
         raise ValueError("voices is empty")
