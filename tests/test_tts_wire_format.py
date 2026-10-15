@@ -455,6 +455,161 @@ def test_the_bounds_are_per_voice_and_overridable() -> None:
     print("OK the bounds are per voice, and a flag still overrides them")
 
 
+def test_stage05_gates_a_take_on_its_codes() -> None:
+    """A take whose codes collapsed is rejected, redrawn, and recorded.
+
+    This is the half of the defects a duration check cannot see: the clip below is a
+    perfectly plausible 4 s for its text and still wrong, because the codes say the
+    model stopped reading it. Measured live on 2026-10-15: h_frm_chf at cfg_alpha 0.3
+    produced 86 s of audio whose worst 8 s window carried a 0.02 distinct-code share
+    and held one code for 56 frames, while the same text at 1.2 scored 0.42 and was
+    kept.
+
+    Also pins the two properties that decide whether this is safe to leave on:
+    a dump that never appears (a stock, unpatched server ignores voxtral_dump_codes)
+    must read as "no opinion" and reject nothing, and each attempt must get its OWN
+    dump tag, because the server APPENDS and a shared tag would read attempt 2 as
+    attempt 1 concatenated with itself.
+    """
+    import array
+    import io
+    import tempfile
+    import wave
+
+    # Imported by name, not by path: code_loops defines dataclasses, and a
+    # module loaded by path is absent from sys.modules, which @dataclass needs to
+    # resolve its own annotations. Same reason the per-voice test imports frame_budget
+    # this way. It is also the instance stage 05 itself imports, so the thresholds
+    # asserted here are the ones that actually gate.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "utils"))
+    import code_loops
+    import code_sidecar
+
+    tts = load_module(TTS_PATH, "tts_code_gate")
+
+    def wav_of(seconds: float) -> bytes:
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(24000)
+            w.writeframes(b"\x00\x00" * int(24000 * seconds))
+        return buf.getvalue()
+
+    def write_dump(path: Path, track: list[int], *, ended: bool = True) -> None:
+        """A dump as the server writes it: 37 int16 per frame, semantic in column 0."""
+        rows = [[c] + [0] * 36 for c in track]
+        if ended:
+            rows.append([code_loops.SEMANTIC_END_AUDIO] + [0] * 36)
+        path.write_bytes(array.array("h", [v for r in rows for v in r]).tobytes())
+
+    # 8 s of audio built from three codes, which is what a real collapse looks like.
+    COLLAPSED = [10, 855, 4007] * 40
+    CLEAN = list(range(300, 500))
+
+    text = "a" * 60
+    with tempfile.TemporaryDirectory() as td:
+        dumps = Path(td) / "dumps"
+        dumps.mkdir()
+        out = Path(td) / "clip.flac"
+        tags = []
+        calls = {"n": 0}
+
+        def stub(url, body, timeout):
+            calls["n"] += 1
+            tag = body.get("extra_params", {}).get("voxtral_dump_codes")
+            tags.append(tag)
+            # First two takes collapse, the third reads the text properly. Every take
+            # is a plausible 4 s, so ONLY the codes can tell them apart.
+            write_dump(dumps / f"{tag}.i16",
+                       COLLAPSED if calls["n"] <= 2 else CLEAN)
+            return (200, wav_of(4.0), 1.0)
+
+        tts.post_json = stub
+        args = _stage05_args(
+            format="flac", auto_token_budget=True, budget_fixed_seconds=3.0,
+            budget_chars_per_second=5.0, floor_chars_per_second=30.0, timeout=600.0,
+            max_audio_seconds=327.68, retries=2, cfg_alpha=2.0,
+            code_dump_dir=str(dumps), store_semantic_codes=True)
+        _, _, attempts, cfg_used = tts.synthesize_with_retries(
+            "http://stub", text, out, args)
+
+        assert attempts == 3, attempts
+        assert out.exists(), "the third take was clean and must be written"
+        # A unique tag per attempt, or the appended dumps would run together.
+        assert tags == ["clip__t1", "clip__t2", "clip__t3"], tags
+        assert len(set(tags)) == 3, tags
+        # Every dump consumed: 925 B/s of audio would be ~11.7 GB over the corpus.
+        assert list(dumps.iterdir()) == [], list(dumps.iterdir())
+
+        # One row per ATTEMPT, not per clip: a file holding only the rejects could not
+        # answer "what do the features look like on a good take", which is the
+        # question that lets these thresholds be retuned later.
+        rows = [json.loads(ln) for ln in
+                (out.parent / "code_qc_sidecar.jsonl").read_text().splitlines()]
+        assert len(rows) == 3, rows
+        assert [r["attempt"] for r in rows] == [1, 2, 3], rows
+        assert [r["accepted"] for r in rows] == [False, False, True], rows
+        assert "collapse" in rows[0]["verdicts"], rows[0]
+        assert rows[2]["verdicts"] == [], rows[2]
+        # The numbers themselves, which is the point of the file.
+        assert rows[0]["min_distinct_frac"] < code_loops.DEFAULT_MIN_DISTINCT_FRAC
+        assert rows[2]["min_distinct_frac"] >= code_loops.DEFAULT_MIN_DISTINCT_FRAC
+        # And the codes, so a later pass can re-derive any feature at all.
+        assert code_sidecar.decode_track(rows[0]["semantic"]) == COLLAPSED, "round trip"
+        # --no-store-semantic-codes keeps the features and drops the track.
+        args.store_semantic_codes = False
+        out_nc = Path(td) / "nocodes.flac"
+        calls["n"] = 99
+        tts.synthesize_with_retries("http://stub", text, out_nc, args)
+        last = [json.loads(ln) for ln in
+                (out.parent / "code_qc_sidecar.jsonl").read_text().splitlines()][-1]
+        assert "semantic" not in last, last
+        assert last["frames"] > 0, last
+
+    # A server that writes no dump must reject nothing: that is every stock
+    # (unpatched) vllm-omni, which merges voxtral_dump_codes and ignores it. Without
+    # this, turning the gate on against the wrong server would fail an entire run.
+    with tempfile.TemporaryDirectory() as td:
+        dumps = Path(td) / "dumps"
+        dumps.mkdir()
+        out = Path(td) / "clip.flac"
+        tts.post_json = lambda url, body, timeout: (200, wav_of(4.0), 1.0)
+        args = _stage05_args(
+            format="flac", auto_token_budget=True, budget_fixed_seconds=3.0,
+            budget_chars_per_second=5.0, floor_chars_per_second=30.0, timeout=600.0,
+            max_audio_seconds=327.68, retries=2, cfg_alpha=2.0,
+            code_dump_dir=str(dumps))
+        _, _, attempts, _ = tts.synthesize_with_retries("http://stub", text, out, args)
+        assert attempts == 1, "no dump means no opinion, not a rejection"
+        assert out.exists()
+        assert not (out.parent / "code_qc_sidecar.jsonl").exists(), (
+            "nothing measured, so nothing to record")
+
+    print("OK stage 05 gates a take on its codes, and a missing dump gates nothing")
+
+
+def test_run_single_unpacks_what_the_ladder_returns() -> None:
+    """Single mode must survive its own call.
+
+    Regression: synthesize_with_retries grew a fourth return value (the cfg_alpha the
+    accepted take was drawn at) with the retry ladder, and run_single kept unpacking
+    three, so `--input "some text"` raised ValueError before synthesizing anything.
+    Batch mode was unaffected, which is why it went unnoticed.
+    """
+    import tempfile
+
+    tts = load_module(TTS_PATH, "tts_run_single")
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "clip.flac"
+        out.write_bytes(b"")
+        tts.synthesize_with_retries = lambda *a, **k: (1.5, 4.0, 1, 2.0)
+        args = _stage05_args(input="Bonjour docteur.", output=str(out), cfg_alpha=2.0)
+        assert tts.run_single("http://stub", args) == 0
+
+    print("OK run_single unpacks the ladder's four return values")
+
+
 def test_the_band_covers_the_slowest_and_the_fastest_voice() -> None:
     """The bounds must sit outside every VOICE, not outside the corpus average.
 
@@ -496,6 +651,8 @@ if __name__ == "__main__":
     test_stage05_judges_truncation_against_the_budget()
     test_stage05_rejects_an_implausibly_short_clip()
     test_stage05_retries_a_duration_rejection_down_the_cfg_ladder()
+    test_stage05_gates_a_take_on_its_codes()
+    test_run_single_unpacks_what_the_ladder_returns()
     test_the_band_covers_the_slowest_and_the_fastest_voice()
     test_the_bounds_are_per_voice_and_overridable()
     print("OK all")

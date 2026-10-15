@@ -113,6 +113,9 @@ from voice_assignment import (  # noqa: E402
 # sidecar that records where each clip landed: stage 06 walks the SAME ladder for its
 # STT-QC failures and READS this sidecar when it writes the manifest's cfg_alpha
 # column, so the numbers and the file format cannot live in either stage.
+from code_loops import (DEFAULT_MIN_DISTINCT_FRAC, inspect_dump,  # noqa: E402
+                         load_dump, semantic_track)
+from code_sidecar import record_code_take  # noqa: E402
 from cfg_sidecar import (  # noqa: E402
     CFG_ALPHA_FLOOR,
     CFG_ALPHA_STEP,
@@ -214,6 +217,17 @@ class ImplausiblyShortError(RuntimeError):
     every clip and not just on budgeted runs."""
 
 
+class DerailedTakeError(RuntimeError):
+    """The take's own codes say it derailed: it collapsed onto a handful of semantic
+    codes, held one for over a second, or looped a unit. See utils/code_loops.py.
+
+    Separate from TruncatedAudioError because the two catch disjoint failures and the
+    difference is worth having in the log: a duration rejection means the take ran
+    long or short for its text, while this one means the take is the right LENGTH and
+    still wrong, which is the half of the defects a duration check cannot see.
+    """
+
+
 def budget_terms(args: argparse.Namespace,
                  voice: str | None = None) -> tuple[float, float, float]:
     """The three numbers that bound one clip: (fixed seconds, slow rate, fast rate).
@@ -275,7 +289,7 @@ def post_json(url: str, body: dict, timeout: float) -> tuple[int, bytes, float]:
 
 
 def build_body(text: str, args: argparse.Namespace, voice: str | None = None,
-               cfg_alpha: float | None = None) -> dict:
+               cfg_alpha: float | None = None, dump_tag: str | None = None) -> dict:
     """Request body for /v1/audio/speech; unset knobs are omitted so the
     server falls back to its startup defaults.
 
@@ -327,8 +341,16 @@ def build_body(text: str, args: argparse.Namespace, voice: str | None = None,
     # nested key merges and ignores it, so sending both is always safe. Same wire
     # format as CrispASR/tts.py and stage 06's tts_synthesize.
     # cfg_alpha rides the same nested route: stock vllm-omni drops a flat one silently.
+    # voxtral_dump_codes makes the server append the codes stage 0 emitted to
+    # <VOXTRAL_CODE_DUMP_DIR>/<tag>.i16, which is what lets a take be checked for
+    # derailment without transcribing it (utils/code_loops.py). Only the patched fork
+    # reads this key; a stock server merges and ignores it, so sending it is safe and
+    # the audio is byte-identical either way. The tag must be unique per ATTEMPT
+    # because the file is APPENDED to: reusing it would concatenate a retry onto the
+    # take it was retrying and read back as one long derailed clip.
     extra = {"cfg_alpha": args.cfg_alpha if cfg_alpha is None else cfg_alpha,
-             "voxtral_noise_seed": args.seed}
+             "voxtral_noise_seed": args.seed,
+             "voxtral_dump_codes": dump_tag}
     extra = {k: v for k, v in extra.items() if v is not None}
     if extra:
         body["extra_params"] = extra
@@ -354,9 +376,50 @@ def payload_duration(payload: bytes) -> float | None:
         return None
 
 
+def dump_path(args: argparse.Namespace, tag: str | None) -> Path | None:
+    """Host path of the dump for `tag`, or None when code QC is off for this run.
+
+    The dir is the HOST view of what the server knows as $VOXTRAL_CODE_DUMP_DIR, so
+    the two are different strings for the same directory and only the operator can
+    say so: hence --code-dump-dir rather than anything derived.
+    """
+    base = getattr(args, "code_dump_dir", None)
+    if not base or not tag:
+        return None
+    return Path(base) / f"{tag}.i16"
+
+
+def read_codes(args: argparse.Namespace, tag: str | None):
+    """Inspect this attempt's dump and delete it; returns (CodeTake, track) or None.
+
+    The raw dump is 37 int16 per frame, 925 B/s of audio, so leaving them behind would
+    cost ~11.7 GB over the corpus and 600k files in one directory. It is unlinked here,
+    on every path, as soon as it has been read.
+
+    Returns None when code QC is off, when the file never appeared (a stock server
+    ignores voxtral_dump_codes, so its absence must read as "no opinion" and never
+    reject a take), or when it holds no whole frame.
+    """
+    path = dump_path(args, tag)
+    if path is None:
+        return None
+    try:
+        take = inspect_dump(path)
+        track, _ = semantic_track(load_dump(path))
+    except OSError:
+        return None
+    finally:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    return (take, track) if take.frames else None
+
+
 def synthesize(base_url: str, text: str, out: Path,
                args: argparse.Namespace, voice: str | None = None,
-               cfg_alpha: float | None = None) -> tuple[float, float | None]:
+               cfg_alpha: float | None = None,
+               dump_tag: str | None = None, attempt: int = 1) -> tuple[float, float | None]:
     """Synthesize `text` into `out`; return (backend elapsed seconds,
     clip duration seconds or None when unparseable).
 
@@ -372,11 +435,20 @@ def synthesize(base_url: str, text: str, out: Path,
     generate" for the in-run retry and for the next resume.
     """
     code, payload, elapsed = post_json(f"{base_url}/v1/audio/speech",
-                                       build_body(text, args, voice, cfg_alpha),
+                                       build_body(text, args, voice, cfg_alpha,
+                                                  dump_tag=dump_tag),
                                        args.timeout)
     if code != 200:
+        # Read and delete the dump even on a failure, or a run that 500s for an hour
+        # leaves a dump per attempt behind. The result is discarded: there is no clip.
+        read_codes(args, dump_tag)
         raise RuntimeError(f"server returned {code} after {elapsed:.2f}s: "
                            f"{payload[:500].decode('utf-8', 'replace')}")
+    # Read before the duration verdicts below, which raise: the dump has to be
+    # consumed and unlinked on every path out of this function, and its verdict is
+    # worth recording even for a take a duration check is about to reject (that is
+    # how the gate's thresholds get judged later against a second opinion).
+    codes = read_codes(args, dump_tag)
     dur = payload_duration(payload)
     # With a per-clip budget the cap to compare against is that budget, not the
     # server's global one: the whole point is to catch the clip that ran long for its
@@ -395,6 +467,17 @@ def synthesize(base_url: str, text: str, out: Path,
         fixed=fixed, slow_chars_per_second=slow,
         fast_chars_per_second=fast,
         tolerance=TRUNCATION_TOLERANCE_S)
+    # One row per attempt, accepted or not, BEFORE either rejection raises, so the
+    # sidecar is a complete record of what the gate saw rather than a list of its
+    # verdicts. The thresholds in code_loops are calibrated on 30 takes; this file is
+    # what lets them be re-decided over the whole corpus without regenerating audio.
+    derailed = codes is not None and codes[0].is_bad
+    if codes is not None:
+        record_code_take(out.parent, stem=out.stem, take=codes[0], attempt=attempt,
+                         accepted=verdict not in ("over", "short") and not derailed,
+                         track=codes[1] if getattr(args, "store_semantic_codes", True)
+                         else None,
+                         voice=voice or args.voice, cfg_alpha=cfg_alpha)
     if verdict == "over":
         # Spelled out because this line is what a grep over a multi-day log has to
         # answer with: how far over, against which bound, and for how much text. The
@@ -414,6 +497,21 @@ def synthesize(base_url: str, text: str, out: Path,
             f"{len(text) / max(dur, 1e-9):.0f} chars/s where the fastest take ever "
             f"measured for this voice reaches {fast / 1.45:.1f}, so part of the text "
             f"was not spoken. Not written."
+        )
+    if derailed:
+        take = codes[0]
+        # The numbers, not just the verdict: a log line saying "collapse" cannot be
+        # argued with later, while one saying which window scored what can, and this
+        # gate is new enough that it will need arguing with.
+        raise DerailedTakeError(
+            f"derailed take: {','.join(take.verdicts)} over {take.duration_s:.2f}s "
+            f"of audio for {len(text)} chars "
+            f"({voice or args.voice or 'server default voice'}), worst 8s window "
+            f"{take.min_distinct_frac:.2f} distinct-code share (gate "
+            f"{DEFAULT_MIN_DISTINCT_FRAC}), top-3 share {take.max_top3_frac:.2f}, "
+            f"longest hold {take.held_frames} frames on code {take.held_code}"
+            f"{'' if take.ended else ', and it never emitted END_AUDIO'}. "
+            f"The codes say the model stopped reading the text. Not written."
         )
     tmp = out.with_suffix(out.suffix + ".tmp")
     tmp.write_bytes(payload)
@@ -475,8 +573,11 @@ def synthesize_with_retries(
         cfg_alpha = ladder_cfg_alpha(start=base, attempt=attempt - 1,
                                      step=step, floor=floor)
         try:
+            # Unique per attempt, because the server APPENDS to <tag>.i16: a shared
+            # tag would make attempt 2 read as attempt 1 concatenated with itself.
             elapsed, dur = synthesize(base_url, text, out, args, voice,
-                                      cfg_alpha=cfg_alpha)
+                                      cfg_alpha=cfg_alpha, attempt=attempt,
+                                      dump_tag=f"{out.stem}__t{attempt}")
             if attempt > 1:
                 logger.warning("{}: attempt {}/{} accepted ({:.2f}s of audio{})",
                                out.name, attempt, attempts,
@@ -505,7 +606,7 @@ def synthesize_with_retries(
                                  "be written ({}); the manifest will call it {}",
                                  out.name, cfg_alpha, e, base)
             return elapsed, dur, attempt, cfg_alpha
-        except (TruncatedAudioError, ImplausiblyShortError) as e:
+        except (TruncatedAudioError, ImplausiblyShortError, DerailedTakeError) as e:
             # Logged per attempt, at warning while there is still a retry left and
             # left to the caller to log as an error once there is not, so a grep for
             # ERROR counts clips actually lost and a grep for the reason counts takes.
@@ -514,6 +615,7 @@ def synthesize_with_retries(
             # Carried into the sidecar row of the take that eventually lands, so the
             # file says WHY that clip is off the run's cfg_alpha.
             reason = ("over budget" if isinstance(e, TruncatedAudioError)
+                      else "derailed codes" if isinstance(e, DerailedTakeError)
                       else "implausibly short")
             next_cfg = ladder_cfg_alpha(start=base, attempt=attempt,
                                         step=step, floor=floor)
@@ -556,7 +658,11 @@ def run_single(base_url: str, args: argparse.Namespace) -> int:
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     try:
-        elapsed, dur, attempts = synthesize_with_retries(base_url, args.input, out, args)
+        # Four values, not three: synthesize_with_retries also returns the cfg_alpha
+        # the accepted take was drawn at, added with the retry ladder. Unpacking three
+        # here made single mode raise ValueError on every call.
+        elapsed, dur, attempts, cfg_used = synthesize_with_retries(
+            base_url, args.input, out, args)
     except urllib.error.URLError as e:
         logger.error("unreachable: {}", e)
         return 2
@@ -564,8 +670,9 @@ def run_single(base_url: str, args: argparse.Namespace) -> int:
         logger.error("{}", e)
         return 1
     dur_info = f", {dur:.2f}s of audio" if dur is not None else ""
-    logger.info("wrote {}{} (backend took {:.2f}s{})", out.resolve(), dur_info, elapsed,
-                f", {attempts} attempts" if attempts > 1 else "")
+    logger.info("wrote {}{} (backend took {:.2f}s{}{})", out.resolve(), dur_info, elapsed,
+                f", {attempts} attempts" if attempts > 1 else "",
+                f", cfg_alpha {cfg_used}" if _off_base(cfg_used, args.cfg_alpha) else "")
     return 0
 
 
@@ -992,6 +1099,26 @@ def build_parser() -> argparse.ArgumentParser:
                         "step would otherwise reach CFG off, where the decoder stops "
                         "following the text and invents phonetically plausible words, "
                         "which is the very defect these retries repair.")
+    p.add_argument("--code-dump-dir", metavar="DIR", default=None,
+                   help="HOST path of the directory the server writes its code dumps "
+                        "into, i.e. the host side of $VOXTRAL_CODE_DUMP_DIR in the "
+                        "CrispASR compose (container /cache/cloning/dumps). Setting it "
+                        "turns on the code gate: every take's semantic codes are read "
+                        "back, a derailed take is rejected and redrawn down the "
+                        "cfg_alpha ladder like a duration failure, and one row per "
+                        "attempt is appended to code_qc_sidecar.jsonl beside the "
+                        "audio. Off when unset, and a stock (unpatched) server writes "
+                        "no dump, in which case the absence reads as 'no opinion' and "
+                        "nothing is ever rejected. The dumps are deleted as they are "
+                        "read: they are 925 B/s of audio, ~11.7 GB over the corpus.")
+    p.add_argument("--store-semantic-codes", action=argparse.BooleanOptionalAction,
+                   default=True,
+                   help="Store each take's semantic codes in that sidecar, base64 of "
+                        "int16 (default on). ~500 bytes for a 15 s clip, ~480 MB over "
+                        "the corpus against ~120 GB of audio, and it is what lets the "
+                        "gate's thresholds (calibrated on 30 takes) be re-decided "
+                        "later without regenerating anything. --no-store-semantic-codes "
+                        "keeps the measured features and drops the codes themselves.")
     p.add_argument("--log-file", default=str(DEFAULT_LOG_FILE),
                    help=f"Loguru log file, appended to (default: {DEFAULT_LOG_FILE}).")
 
@@ -1015,7 +1142,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    args = build_parser().parse_args()
+    # The parser is kept, not discarded, so the usage error below can go through
+    # parser.error() (usage message, exit 2) instead of raising NameError on a bare `p`.
+    parser = build_parser()
+    args = parser.parse_args()
 
     # stderr through tqdm.write so log lines don't mangle the progress bar.
     logger.remove()
@@ -1026,7 +1156,7 @@ def main() -> int:
     if args.check:
         return cmd_check(base_url, args)
     if not args.input:
-        p.error("--input is required unless --check is given")
+        parser.error("--input is required unless --check is given")
 
     in_path = Path(args.input)
     if in_path.suffix == ".jsonl" and in_path.is_file():
