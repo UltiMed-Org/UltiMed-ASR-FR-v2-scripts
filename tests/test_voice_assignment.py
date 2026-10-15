@@ -48,12 +48,14 @@ def check(label: str, ok: bool, detail: str = "") -> None:
 
 # ---------------------------------------------------------------- 1. determinism
 KEYS = ["0", "42", "534384", "PARHAF_0001", "PARROT:12", "accentué"]
-local = [va.voice_for_key(k) for k in KEYS]
+# `retired=()` throughout this block: it checks the HISTORICAL mapping, the one
+# the audio on disk was generated under, which must stay reproducible forever.
+local = [va.voice_for_key(k, retired=()) for k in KEYS]
 
 _utils = str(Path(__file__).resolve().parent.parent / "utils")
 snippet = (
     f"import sys; sys.path.insert(0, {_utils!r}); import voice_assignment as va; "
-    f"print(chr(10).join(va.voice_for_key(k) for k in {KEYS!r}))"
+    f"print(chr(10).join(va.voice_for_key(k, retired=()) for k in {KEYS!r}))"
 )
 remote = {}
 for seed in ("0", "1", "12345"):
@@ -68,10 +70,48 @@ check("same voices under every PYTHONHASHSEED",
 # A regression guard with the values written out: if the digest, the encoding or the
 # roster order changes, every v2 clip would be relabelled, so that must be a decision
 # and not an accident. Update these only together with a regeneration of the audio.
-check("mapping is pinned to known values",
+# This pin is the PRE-retirement mapping (`retired=()`), which is the one the audio
+# already on disk was generated under and which must therefore never move again.
+check("historical mapping is pinned to known values",
       local == ["h_frm_chf", "h_frf_ptm", "fr_female", "h_frm_chf", "h_frf_esm",
                 "h_frm_ptf"],
       str(local))
+# And the live mapping, which differs from it in exactly the positions that drew the
+# retired voice: keys 0 and 12345 above moved, the other four did not. That is the
+# whole promise of retiring by re-draw instead of by deletion.
+check("live mapping only moves the retired voice's keys",
+      [va.voice_for_key(k) for k in KEYS]
+      == ["fr_male", "h_frf_ptm", "fr_female", "h_itf_arm", "h_frf_esm", "h_frm_ptf"],
+      str([va.voice_for_key(k) for k in KEYS]))
+check("the retired voice is never returned",
+      not {va.voice_for_key(str(i)) for i in range(5_000)} & set(va.RETIRED_VOICES_FR_V2),
+      str(sorted({va.voice_for_key(str(i)) for i in range(5_000)})))
+# Retiring a voice must leave the other nine tenths of the corpus alone, or every
+# already-generated clip of a surviving voice would silently become mislabelled.
+_moved = sum(va.voice_for_key(str(i)) != va.voice_for_key(str(i), retired=())
+             for i in range(20_000))
+check("retiring one of ten voices moves only ~10 pct of keys",
+      1_600 < _moved < 2_400, f"{_moved} of 20000 moved")
+# `retired=()` must still be able to name the retired voice, since that is how a
+# maintenance pass finds the clips it already read and deletes them.
+check("the historical mapping still yields the retired voice",
+      va.RETIRED_VOICES_FR_V2[0]
+      in {va.voice_for_key(str(i), retired=()) for i in range(5_000)})
+# A roster that is entirely retired is a configuration error, not a silent fallback.
+try:
+    va.voice_for_key("1", voices=("a", "b"), retired=("a", "b"))
+    _raised = False
+except ValueError:
+    _raised = True
+check("an entirely retired roster raises", _raised)
+# Retiring a second voice must not disturb the keys that never drew either of them.
+_two = ("h_frm_chf", "h_itf_def")
+_kept = [str(i) for i in range(4_000)
+         if va.voice_for_key(str(i)) not in _two]
+check("a second retirement leaves untouched keys untouched",
+      all(va.voice_for_key(k) == va.voice_for_key(k, retired=_two) for k in _kept),
+      f"{sum(va.voice_for_key(k) != va.voice_for_key(k, retired=_two) for k in _kept)}"
+      f" of {len(_kept)} moved")
 
 # --------------------------------------------------- 2. group cohesion + key field
 dict_rows = [{"term_index": 7, "variant_index": i, "term": "aspirine"} for i in range(9)]
@@ -98,8 +138,12 @@ check("row mode spreads a group over voices",
 
 # ------------------------------------------------------------------- 3. balance
 counts = Counter(va.voice_for_key(str(i)) for i in range(50_000))
-even = 50_000 / len(va.VOICES_FR_V2)
-check("every voice is used", len(counts) == len(va.VOICES_FR_V2), str(sorted(counts)))
+# Over the SURVIVORS: a retired voice takes no share, and its share is spread evenly
+# over the rest rather than dumped on one replacement.
+_survivors = [v for v in va.VOICES_FR_V2 if v not in va.RETIRED_VOICES_FR_V2]
+even = 50_000 / len(_survivors)
+check("every surviving voice is used", len(counts) == len(_survivors),
+      str(sorted(counts)))
 check("no voice is off by more than 5 pct over 50k keys",
       all(abs(n - even) < 0.05 * even for n in counts.values()),
       str(dict(counts)))

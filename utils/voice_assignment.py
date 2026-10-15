@@ -61,6 +61,23 @@ VOICES_FR_V2 = (
     "h_frm_chf",    # cheerful_female
 )
 
+#: Voices dropped from the roster after measurement. They stay listed in
+#: `VOICES_FR_V2` on purpose: see `voice_for_key` for why deleting an entry is NOT
+#: how a voice is retired, and what it would cost.
+RETIRED_VOICES_FR_V2 = (
+    # Derails far more than any other voice: 14 of 180 clips over stage 06's CER gate
+    # in the unbiased 5% QC sample (2026-10-15), against 4 of 165 for the next worst
+    # and zero for four of the ten, and every `loop` and `overrun` among the first 51
+    # flagged clips was this voice. Its median CER (0.0069) is mid-pack, so what is
+    # wrong is derailment, not accent or articulation: it reads most sentences well
+    # and then occasionally loses the text entirely.
+    "h_frm_chf",
+)
+
+#: How many re-draws `voice_for_key` tries before falling back to a direct draw over
+#: the survivors. Only reachable when most of the roster is retired; see there.
+_RETIRE_MAX_ATTEMPTS = 64
+
 # How to turn a row into the thing that gets hashed. "group" keys on the group alone,
 # "row" gives every clip its own draw. v2 uses BOTH, one per stage, because the group
 # means two different things depending on the stage: for 01_dictionnary, 02_drugs and
@@ -137,7 +154,8 @@ def assignment_key(row: dict, *, field: str, mode: str = "group") -> str:
     return f"{group}:{index}"
 
 
-def voice_for_key(key: str, voices: tuple[str, ...] | list[str] = VOICES_FR_V2) -> str:
+def voice_for_key(key: str, voices: tuple[str, ...] | list[str] = VOICES_FR_V2,
+                  retired: tuple[str, ...] | list[str] = RETIRED_VOICES_FR_V2) -> str:
     """Return the voice that reads every clip whose assignment key is `key`.
 
     Parameters
@@ -147,24 +165,83 @@ def voice_for_key(key: str, voices: tuple[str, ...] | list[str] = VOICES_FR_V2) 
     voices
         The roster, in a fixed order. Order matters: it is part of the mapping, so
         re-ordering the roster re-assigns every voice.
+    retired
+        Voices that must never be returned although they are still in `voices`. Pass
+        `()` to get the mapping as it was before any voice was retired, which is how
+        a maintenance pass finds the clips a now-retired voice already read.
 
     Returns
     -------
     str
-        One name from `voices`.
+        One name from `voices` that is not in `retired`.
 
     Deterministic across processes, machines and Python versions: an 8-byte blake2b
     digest of the UTF-8 key, big-endian, modulo the roster size. See the module
     docstring for why this is a hash and not a counter.
+
+    **A voice is retired by re-drawing, never by deleting its roster entry.** The
+    mapping is `voices[digest % len(voices)]`, so dropping one name changes
+    `len(voices)` and therefore re-assigns *every* key: with ten voices that would
+    relabel ~90 pct of the corpus, and because the resume check in
+    `01_generate_audio.py` matches filenames, which carry no voice, the audio already
+    on disk would quietly become mislabelled rather than be regenerated. That is the
+    same failure the module docstring rejects a counter for. Instead the first draw is
+    made over the FULL roster exactly as before, and only when it lands on a retired
+    voice is the key re-drawn with an attempt suffix until a survivor comes up. Three
+    properties follow, and all three are what make retiring a voice mid-run safe:
+
+    1. every key whose first draw survives keeps its voice bit for bit, so the audio
+       already written stays correct and is never regenerated;
+    2. the accepted draw is uniform over the survivors, because each attempt is
+       uniform over the roster and conditioning on acceptance does not favour any
+       survivor, so the retired voice's share is spread evenly rather than dumped on
+       whichever name replaced it;
+    3. retirements compose: retiring a second voice later leaves every key that never
+       landed on it untouched.
+
+    The cost is ~`1 / (1 - retired_fraction)` hashes per call, i.e. 1.11 for one voice
+    in ten. After `_RETIRE_MAX_ATTEMPTS` failures it draws directly over the survivors
+    instead, which keeps the function total when nearly the whole roster is retired
+    (at nine of ten retired, a bounded loop alone would leave ~1e-3 of keys undecided).
+
+    Examples
+    --------
+    >>> voice_for_key("42", retired=()) in VOICES_FR_V2
+    True
+    >>> voice_for_key("42") not in RETIRED_VOICES_FR_V2
+    True
+    >>> # Retiring a voice leaves the other nine tenths of the keys alone.
+    >>> same = sum(voice_for_key(str(k)) == voice_for_key(str(k), retired=())
+    ...            for k in range(10000))
+    >>> 8500 < same < 9500
+    True
     """
     if not voices:
         raise ValueError("voices is empty")
-    digest = hashlib.blake2b(key.encode("utf-8"), digest_size=8).digest()
-    return voices[int.from_bytes(digest, "big") % len(voices)]
+    retired = tuple(retired or ())
+    survivors = tuple(v for v in voices if v not in retired)
+    if not survivors:
+        raise ValueError("every voice in the roster is retired")
+
+    for attempt in range(_RETIRE_MAX_ATTEMPTS):
+        # Attempt 0 hashes the bare key, which is what keeps the pre-retirement
+        # mapping bit-identical for every key that does not land on a retired voice.
+        # The NUL separator cannot occur in a key, so an attempt suffix can never
+        # collide with another key's bare form.
+        salted = key if attempt == 0 else f"{key}\x00{attempt}"
+        digest = hashlib.blake2b(salted.encode("utf-8"), digest_size=8).digest()
+        pick = voices[int.from_bytes(digest, "big") % len(voices)]
+        if pick not in retired:
+            return pick
+    # Unreachable for any sane roster (1e-64 at one voice in ten). Deterministic, so
+    # the few keys that get here still have one stable voice.
+    digest = hashlib.blake2b(f"{key}\x00final".encode("utf-8"), digest_size=8).digest()
+    return survivors[int.from_bytes(digest, "big") % len(survivors)]
 
 
 def voice_for_row(row: dict, *, field: str | None = None, mode: str = "group",
-                  voices: tuple[str, ...] | list[str] = VOICES_FR_V2) -> str:
+                  voices: tuple[str, ...] | list[str] = VOICES_FR_V2,
+                  retired: tuple[str, ...] | list[str] = RETIRED_VOICES_FR_V2) -> str:
     """Return the voice for one row, resolving its group field if not given.
 
     Parameters
@@ -179,14 +256,18 @@ def voice_for_row(row: dict, *, field: str | None = None, mode: str = "group",
         See `assignment_key`.
     voices
         The roster.
+    retired
+        Voices never to return; see `voice_for_key`. Pass `()` for the mapping as it
+        was before any retirement.
 
     Returns
     -------
     str
-        One name from `voices`.
+        One name from `voices` that is not in `retired`.
     """
     field = field or group_field(row)
-    return voice_for_key(assignment_key(row, field=field, mode=mode), voices)
+    return voice_for_key(assignment_key(row, field=field, mode=mode), voices,
+                         retired=retired)
 
 
 def load_voices(path) -> tuple[str, ...]:
