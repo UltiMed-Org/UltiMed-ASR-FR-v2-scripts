@@ -529,6 +529,47 @@ voice. Covered by `tests/test_audio_truncation.py`, the duration and ladder
 checks in `tests/test_tts_wire_format.py`, and `tests/test_cfg_sidecar.py` (the
 rungs, the sidecar round trip and stage 06 publishing the per-clip value).
 
+**The code gate (`utils/code_loops.py` + `utils/code_sidecar.py`, since 2026-10-15).**
+The duration bounds above cannot see a take that is a plausible **length** for its text
+and still wrong, which the CPU QC tail measures at about half the severe failures. So
+stage 05 also checks every take against the codes it emitted, for free: the patched
+Voxtral fork dumps stage 0's output when a request carries
+`extra_params.voxtral_dump_codes`, and column 0 of that dump is the semantic code, a
+hard `argmax` and so a deterministic function of text and context (the other 36 columns
+are a flow-matching draw from fresh noise each frame and differ between two
+identical-sounding takes, so they are dropped). Turn it on with `--code-dump-dir`, the
+HOST path of the server's `$VOXTRAL_CODE_DUMP_DIR`; a derailed take raises
+`DerailedTakeError` and walks the same cfg_alpha ladder.
+
+What a derailment IS was measured rather than assumed, and it is not a loop: a
+repeating-unit scan fires on none of 12 captured takes, three of which are audibly
+nothing but mumbling. The take collapses its **vocabulary** onto a handful of codes,
+mostly quiet ones. The feature is therefore the share of frames in an 8 s window
+carrying a distinct code, worst window wins: 0.45-0.63 over 18 control takes (the nine
+voices x two real texts at the production cfg_alpha), 0.18 on a partial derailment, 0.03
+at the known-bad cfg_alpha 0.3, gate at 0.25, zero false positives on the controls.
+Per window rather than per take because the whole-take figure is confounded by length
+(clean takes slide 0.61 at 94 frames to 0.36 at 418) and because a real derailment is
+usually partial: clean speech then rambling. A fraction rather than a count because
+every take's last window is short. Two safety properties: a missing dump reads as "no
+opinion" so a stock server rejects nothing, and the raw dumps are deleted as they are
+read (925 B/s, ~11.7 GB over the corpus otherwise).
+
+Every attempt appends a row to `code_qc_sidecar.jsonl` beside the audio, accepted ones
+included, with the measured features and the semantic track (base64 int16, ~480 MB over
+the corpus). That is deliberate: the thresholds are calibrated on 30 takes, and the
+stored numbers are what let them be re-decided over the whole corpus, and checked
+against stage 06's CER gate, without regenerating audio. Covered by
+`tests/test_code_loops.py` (which pins the thresholds against four real captured tracks
+in `tests/data/code_tracks.json`) and the gate checks in `tests/test_tts_wire_format.py`.
+
+This gate is also why `h_frm_chf` was **not** retired despite being measurably the
+worst voice (14 of 180 over the CER gate in the unbiased sample against 4 of 165 for the
+next worst): its median CER is mid-pack, so it derails rather than being bad, and a
+derailment is now caught and redrawn per take. `utils/voice_assignment.py` keeps the
+retirement mechanism ready but `RETIRED_VOICES_FR_V2` is empty; see the comment on it
+for what would reopen the question.
+
 **Listening to a run while it runs: `05_generate_audio/03_qc_cpu_stt.py`.** The
 duration bounds are the only check the audio gets during generation, and they
 cannot see a clip whose length is plausible but whose text is wrong. This

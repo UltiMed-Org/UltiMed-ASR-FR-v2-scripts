@@ -47,6 +47,8 @@ in practice (`./generate_v2.sh`, or `./generate_v2.sh 07_acronyms` for one stage
 checks the server is up first and logs to `tts_generate_v2.log` so v1's throughput log
 stays intact). Spelled out here because the flags are the decisions:
 
+Pass `CODE_DUMP_DIR` to turn on the code gate, which is worth doing for every v2 run: `CODE_DUMP_DIR="$HOME/path/to/CrispASR/cache/cloning/dumps" ./generate_v2.sh`. It is the host path of the directory the server knows as `$VOXTRAL_CODE_DUMP_DIR` (container `/cache/cloning/dumps`), empty by default because only the operator knows where the CrispASR checkout sits. The gate reads back the semantic codes of every take and rejects a derailed one, which catches the half of the severe defects a duration check cannot see: a take that is a plausible length for its text and still wrong, because the model collapsed onto a handful of codes instead of reading it. A rejected take walks the same cfg_alpha ladder as a duration rejection. Pointing it at a stock, unpatched server is harmless (no dump is written, and an absent dump reads as "no opinion"), and the raw dumps are deleted as they are read. One row per attempt lands in `code_qc_sidecar.jsonl` beside the audio, with the measured features and the semantic track, so the thresholds can be re-decided later without regenerating anything. See `05_generate_audio/README.md` for the measurements behind the gate and `utils/code_loops.py` for the thresholds.
+
 ```bash
 cd 05_generate_audio
 

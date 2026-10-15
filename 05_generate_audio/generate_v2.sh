@@ -64,6 +64,32 @@ TOKEN_BUDGET="${TOKEN_BUDGET:-1}"
 # $CFG_ALPHA instead. RETRIES=0 reverts to "one attempt, then leave it for the next
 # re-run".
 RETRIES="${RETRIES:-2}"
+
+# HOST path of the directory the Voxtral server writes its stage-0 code dumps into,
+# i.e. the host side of $VOXTRAL_CODE_DUMP_DIR in the CrispASR compose (the container
+# sees it as /cache/cloning/dumps). Setting it turns on the code gate: every take's
+# semantic codes are read back and a derailed take is rejected and redrawn down the
+# cfg_alpha ladder, which catches the half of the defects a duration check cannot see
+# (a take that is a plausible length for its text and still stopped reading it). One
+# row per attempt lands in code_qc_sidecar.jsonl beside the audio.
+#
+# EMPTY by default, so the gate is opt-in per run:
+#
+#   CODE_DUMP_DIR="$HOME/path/to/CrispASR/cache/cloning/dumps" ./generate_v2.sh
+#
+# No default path is baked in because only the operator knows where the CrispASR
+# checkout sits, and a hardcoded absolute path in a tracked file would publish one
+# machine's home directory layout.
+#
+# The gate is also self-disabling in the case that matters: a stock, unpatched server
+# writes no dump, and an absent dump reads as "no opinion" rather than as a rejection,
+# so pointing this at the wrong server costs nothing. The dumps themselves are deleted
+# as they are read (925 B/s of audio, ~11.7 GB over the corpus if they were kept).
+CODE_DUMP_DIR="${CODE_DUMP_DIR:-}"
+code_args=()
+if [ -n "$CODE_DUMP_DIR" ]; then
+  code_args=(--code-dump-dir "$CODE_DUMP_DIR")
+fi
 # An `if/else` rather than `[ ... ] && ...`: the script runs under `set -e`, where a
 # trailing test that FAILS is the last command of the line and kills the run. The
 # flag is passed EXPLICITLY either way, so the log shows which regime a run used
@@ -129,6 +155,7 @@ for s in "${STAGES[@]}"; do
     --concurrency "$CONCURRENCY" \
     --retries "$RETRIES" \
     "${budget_args[@]}" \
+    "${code_args[@]}" \
     --log-file "$LOG_FILE" || rc=$?
   elapsed="$(date -u -d "@$((SECONDS - stage_start))" '+%H:%M:%S')"
   case "$rc" in

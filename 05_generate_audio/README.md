@@ -52,6 +52,54 @@ uv run 01_generate_audio.py \
   --seed 42
 ```
 
+### The code gate (`--code-dump-dir`)
+
+A duration check cannot see a take that is a plausible **length** for its
+text and still wrong, and the CPU QC tail says that is about half of the
+severe failures. So every take is also checked against the codes it emitted,
+which is free: the patched Voxtral fork already dumps them, and column 0 of
+a dump is the semantic code, a hard `argmax` and therefore a deterministic
+function of text and context.
+
+```bash
+uv run 01_generate_audio.py ... \
+  --code-dump-dir "$HOME/path/to/CrispASR/cache/cloning/dumps"
+```
+
+The argument is the **host** path of the directory the server knows as
+`$VOXTRAL_CODE_DUMP_DIR` (the container sees `/cache/cloning/dumps`), so
+only the operator can say what it is. A derailed take raises
+`DerailedTakeError` and walks the same cfg_alpha ladder as a duration
+rejection.
+
+What "derailed" means is measured, not assumed, and it is **not** a loop: a
+repeating-unit scan fires on none of 12 captured takes, three of which are
+audibly nothing but mumbling. A derailed take collapses its vocabulary onto
+a handful of codes, mostly quiet ones. Per 8 s window the share of frames
+carrying a distinct code runs 0.45-0.63 on 18 control takes (the nine voices
+x two real texts at the production cfg_alpha), 0.18 on a partial
+derailment, and 0.03 at the known-bad cfg_alpha 0.3. The gate sits at 0.25.
+See `utils/code_loops.py` for the thresholds and the measurement behind
+each.
+
+Two properties worth knowing before turning it on:
+
+* **A missing dump rejects nothing.** A stock, unpatched server merges
+  `voxtral_dump_codes` and ignores it, so the absence of a dump reads as "no
+  opinion". Pointing the gate at the wrong server costs nothing rather than
+  failing a whole run.
+* **The raw dumps are deleted as they are read.** They are 925 B/s of audio,
+  so ~11.7 GB and 600k files over the corpus if they were kept.
+
+Each attempt appends one row to `code_qc_sidecar.jsonl` beside the audio,
+accepted takes included, carrying the measured features **and** the semantic
+track (base64 int16, ~500 bytes for a 15 s clip, ~480 MB over the corpus).
+Accepted takes are recorded because the thresholds are calibrated on 30
+takes and a file holding only the rejects cannot say what a good clip looks
+like; the stored codes are what let any feature be re-derived later and
+compared against stage 06's CER gate, which is the real label.
+`--no-store-semantic-codes` keeps the features and drops the track.
+
 ## `03_qc_cpu_stt.py`
 
 A sidecar process that tails a running generation and STT-checks a sample of
