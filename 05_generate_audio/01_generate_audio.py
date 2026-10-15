@@ -557,7 +557,8 @@ def synthesize_with_retries(
     booted with, which may be below 2.0), so there the retries stay as they were: same
     request, new noise.
 
-    Only duration rejections are retried. A non-200, a timeout or an unreachable
+    Only take rejections (duration or derailed codes) are retried. A non-200, a
+    timeout or an unreachable
     server are not sampling accidents: they are handled by the caller, which can
     abort the whole run rather than hammer a sick server row by row.
     """
@@ -776,12 +777,18 @@ def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
                              field=None, counts=Counter({args.voice: len(planned)}))
 
     failed = generated = 0
-    # The two duration rejections are counted apart from the other failures because
+    # The duration rejections are counted apart from the other failures because
     # they mean opposite things and have opposite fixes: "over" is a runaway take
     # (retry, or lower cfg_alpha), "short" is dropped text (retry, or check the
     # respelling). `retried_ok` is what says whether the in-run retries are worth
     # their GPU time: it counts clips that failed at least once and still landed.
     over_budget = too_short = retried_ok = 0
+    # Counted apart from the two above for the same reason they are counted apart from
+    # each other: a derailed clip has a different fix. It is not a runaway or dropped
+    # text but a take that collapsed while staying a plausible length, so the lever is
+    # cfg_alpha or the voice, never the frame budget. Also the number that says whether
+    # the code gate is earning its keep, and whether its thresholds are too tight.
+    derailed = 0
     # cfg_alpha the accepted takes landed on, counted only for the clips that left the
     # run's own value, i.e. exactly the clips that have a sidecar row. Reported at the
     # end because the shape of this histogram is the signal: a few dozen clips one
@@ -845,6 +852,12 @@ def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
                 logger.error("{}: giving up after {} attempts, {}",
                              out.name, attempt_budget(args), e)
                 too_short += 1
+                failed += 1
+                continue
+            except DerailedTakeError as e:
+                logger.error("{}: giving up after {} attempts, {}",
+                             out.name, attempt_budget(args), e)
+                derailed += 1
                 failed += 1
                 continue
             except RuntimeError as e:
@@ -920,9 +933,9 @@ def run_batch(base_url: str, jsonl_path: Path, args: argparse.Namespace) -> int:
     # Separate line, always printed, because these are the numbers that decide whether
     # to re-run the stage and whether to touch cfg_alpha, and they must survive a grep
     # of a multi-day log that has 500k DEBUG lines in it.
-    logger.info("duration rejections: {} over budget, {} implausibly short, "
-                "{} saved by a retry (up to {} attempts each)",
-                over_budget, too_short, retried_ok, attempt_budget(args))
+    logger.info("take rejections: {} over budget, {} implausibly short, "
+                "{} derailed codes, {} saved by a retry (up to {} attempts each)",
+                over_budget, too_short, derailed, retried_ok, attempt_budget(args))
     # Same reasoning: the one line that says which clips are NOT at the run's
     # cfg_alpha, and therefore which ones the sidecar (not --cfg-alpha) describes.
     if cfg_landed:
