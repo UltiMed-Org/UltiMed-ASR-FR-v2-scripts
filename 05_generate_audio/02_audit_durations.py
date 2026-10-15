@@ -55,7 +55,8 @@ from frame_budget import (  # noqa: E402
     floor_seconds,
     rates_for_voice,
 )
-from voice_assignment import VOICES_FR_V2, group_field, voice_for_row  # noqa: E402
+from voice_assignment import (RETIRED_VOICES_FR_V2, VOICES_FR_V2,  # noqa: E402
+                              group_field, voice_for_row)
 
 #: Stage directory -> voice-assignment mode, the same pairing `generate_v2.sh` uses.
 #: The voice is needed to judge a clip at all: the bounds are PER VOICE, since the ten
@@ -141,7 +142,13 @@ def audit_stage(stage: Path, mode: str, normalize_term, *, fixed: float,
         if path is None:
             missing += 1
             continue
-        voice = voice_for_row(row, field=field, mode=mode, voices=VOICES_FR_V2)
+        # `retired=()`: this joins clips that are ALREADY on disk, so the voice that
+        # matters is the one that actually read them, which is the pre-retirement
+        # mapping. Under the live mapping a retired voice's clips would be attributed
+        # to whichever voice now owns the row, and the very clips that have to be
+        # deleted would become invisible.
+        voice = voice_for_row(row, field=field, mode=mode, voices=VOICES_FR_V2,
+                              retired=())
         rows.append((voice, row["asr_training_source"], path))
 
     logger.info("{}: {} clips on disk joined to their text, {} not generated yet",
@@ -171,9 +178,17 @@ def audit_stage(stage: Path, mode: str, normalize_term, *, fixed: float,
         # to write (and vice versa): slow/fast are None unless the user overrode them
         # on the command line, in which case the override wins for every voice.
         v_slow, v_fast = rates_for_voice(voice, slow=slow, fast=fast)
-        verdict = classify_duration(text, dur, fixed=fixed,
-                                    slow_chars_per_second=v_slow,
-                                    fast_chars_per_second=v_fast)
+        # A clip read by a retired voice is wrong whatever its duration says, because
+        # the row now belongs to another voice: deleting it is what makes the next
+        # resume of 01_generate_audio.py re-read it in that voice. Checked before the
+        # duration verdict so a retired clip is reported once, under the reason that
+        # actually condemns it.
+        if voice in RETIRED_VOICES_FR_V2:
+            verdict = "retired_voice"
+        else:
+            verdict = classify_duration(text, dur, fixed=fixed,
+                                        slow_chars_per_second=v_slow,
+                                        fast_chars_per_second=v_fast)
         verdicts[verdict] += 1
         per_voice[voice][verdict] += 1
         rates[voice].append(len(text) / dur)
@@ -195,6 +210,13 @@ def audit_stage(stage: Path, mode: str, normalize_term, *, fixed: float,
                 stage.name, verdicts["ok"], verdicts["over"],
                 100.0 * verdicts["over"] / max(1, total), verdicts["short"],
                 100.0 * verdicts["short"] / max(1, total), verdicts["unreadable"])
+    if verdicts["retired_voice"]:
+        logger.warning("{}: {} clip(s) ({:.3f}%) were read by a retired voice ({}) "
+                       "and must be regenerated; --apply deletes them and the next "
+                       "run of 01_generate_audio.py refills them",
+                       stage.name, verdicts["retired_voice"],
+                       100.0 * verdicts["retired_voice"] / max(1, total),
+                       ", ".join(RETIRED_VOICES_FR_V2))
 
     # Per voice, sorted slowest median first: that is the order in which a voice
     # becomes suspect, and the column that explains an outlier rejection rate.
