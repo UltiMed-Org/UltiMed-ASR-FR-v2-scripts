@@ -126,6 +126,53 @@ def test_window_score_is_length_independent() -> None:
     assert max(runs) - min(runs) <= 4, runs
 
 
+def test_the_excerpt_shows_both_sides_of_the_worst_window() -> None:
+    """The numbers say a clip is bad; these fields say what about it is bad, which is
+    what the QC log prints so a flag can be judged without opening the audio."""
+    ref = reference(48)
+    words = ref.split()
+    cut = len(words) // 2
+    dropped = " ".join(words[cut:cut + 5])
+    hyp = drop_words(ref, at=cut, count=5)
+    s = stt.window_score(ref, hyp)
+    # The missing span IS the dropped phrase (normalized, so "trois" is "3" here), and
+    # nothing was heard in its place: that pair is what separates a skip from a misread.
+    assert s.missing.strip() == stt.normalize_for_scoring(dropped).strip(), s.missing
+    assert s.missing_heard == "", s.missing_heard
+    assert f">>>{s.missing}<<<" in s.missing_context, s.missing_context
+    # The window is shown at its full width and the expected text contains the span.
+    assert len(s.ref_window) == stt.WINDOW_CHARS, len(s.ref_window)
+    assert s.missing in s.ref_window
+    # The heard text covers the SAME stretch of audio and is shorter by exactly what
+    # went missing. (Not asserting the span is absent from `hyp_window`: this fixture
+    # repeats one sentence, so the phrase legitimately occurs again elsewhere in the
+    # window. The length relation is the invariant that holds on any text.)
+    assert len(s.ref_window) - len(s.hyp_window) == s.bad_run_chars
+    print(f"  missing {s.bad_run_chars} chars: {s.missing!r}")
+
+
+def test_the_excerpt_shows_a_loop_as_text_it_did_not_ask_for() -> None:
+    ref = reference(40)
+    words = ref.split()
+    cut = len(words) // 2
+    looped = " ".join(words[:cut] + ["seche nocturne"] * 12 + words[cut:])
+    s = stt.window_score(ref, looped)
+    # Nothing missing, but the recognizer produced far more text over the same stretch,
+    # which is the shape of a loop in these two fields.
+    assert s.missing == "" and s.bad_run_chars == 0
+    assert len(s.hyp_window) > 1.5 * len(s.ref_window), (len(s.hyp_window),
+                                                         len(s.ref_window))
+
+
+def test_the_two_entry_points_cannot_disagree() -> None:
+    """`window_metrics` is a reduction of `window_score`, not a second implementation."""
+    ref = reference(30)
+    hyp = drop_words(ref, at=12, count=4)
+    s = stt.window_score(ref, hyp)
+    assert stt.window_metrics(ref, hyp) == (s.window_cer, s.bad_run_chars)
+    assert stt.window_metrics("", "x") == (None, None)
+
+
 def test_clean_hypothesis_scores_zero() -> None:
     ref = reference(40)
     assert stt.window_metrics(ref, ref) == (0.0, 0)

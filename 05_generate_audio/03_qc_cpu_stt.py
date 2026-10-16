@@ -212,6 +212,48 @@ DEFECT_SHAPES = ("loop", "overrun", "truncated", "skipped", "wrong_words")
 #: empty the shape.
 _SKIP_RUN_CHARS = 30
 
+#: Shortest missing run worth printing a line about when a clip is flagged. ~0.7 s of
+#: speech: below it the "missing" span is a word ending or a unit abbreviation, which
+#: says nothing, while the window excerpt above it already shows the damage.
+_MISSING_SHOW_CHARS = 10
+
+
+def log_window_evidence(score, *, log=logger.warning, indent: str = "  ") -> None:
+    """Print the TEXT behind a window score: what the label says over the worst stretch
+    of the clip, what the recognizer heard over that same stretch, and the longest span
+    that went missing.
+
+    This is the line to read when deciding whether a flag is a real defect or a
+    recognizer artefact, which is why it prints both sides rather than a number. Both
+    texts are the NORMALIZED forms, because those are what the CER scored: showing the
+    raw label beside a normalized hypothesis would invite chasing differences the metric
+    never saw (digits spelled out, punctuation dropped).
+
+    Nothing is stored in the sidecar row for this: the row already carries the full
+    `reference` and `transcript`, so `window_score` reproduces every line below from
+    disk at any time (that is what `--defect-mix` does).
+
+    Parameters
+    ----------
+    score : stage 06's WindowScore
+        From `_stt.window_score(reference, transcript)`.
+    log : callable
+        Logger method to print with, so the live loop can warn and a report can info.
+    indent : str
+        Prefix for each line, to nest it under its clip's own line.
+    """
+    if score.window_cer is None:
+        return
+    log("{}expected (worst {:.0f}s window, normalized): {}", indent,
+        _stt.WINDOW_SECONDS, score.ref_window)
+    log("{}heard    (same stretch, {} chars): {}", indent, len(score.hyp_window),
+        score.hyp_window)
+    if (score.bad_run_chars or 0) >= _MISSING_SHOW_CHARS:
+        log("{}missing {} chars ({:.1f}s), heard {!r} in its place: {}", indent,
+            score.bad_run_chars,
+            score.bad_run_chars / _stt.NORM_CHARS_PER_SECOND,
+            score.missing_heard, score.missing_context)
+
 #: Immediately-repeating n-gram sizes the loop test looks for. A derailed take
 #: repeats whole words, so word n-grams find it; 2 to 5 covers "de la" through a
 #: short clause, and anything longer is already caught by the shorter windows.
@@ -230,7 +272,8 @@ _SHORT_RATIO = 0.75
 _LONG_RATIO = 1.30
 
 
-def classify_defect(reference: str, transcript: str) -> str:
+def classify_defect(reference: str, transcript: str, *,
+                    bad_run_chars: int | None = None) -> str:
     """Name the SHAPE of a flagged clip's failure, from the two texts alone.
 
     The CER gate answers "is this clip wrong"; this answers "wrong how", which is a
@@ -279,6 +322,10 @@ def classify_defect(reference: str, transcript: str) -> str:
         The label the clip was generated from.
     transcript
         What the STT model heard.
+    bad_run_chars
+        The clip's longest missing run, when the caller has already computed it (the
+        live loop has, from the same alignment it gated on). Recomputed here when not
+        given, so a re-read of old rows still classifies.
 
     Returns
     -------
@@ -314,7 +361,8 @@ def classify_defect(reference: str, transcript: str) -> str:
     # Last, because a loop or a truncation also leaves missing spans behind, and those
     # names are the more actionable ones. Reached only by a clip of the right length,
     # where a long missing run can mean nothing else.
-    _, bad_run = _stt.window_metrics(reference, transcript)
+    bad_run = (bad_run_chars if bad_run_chars is not None
+               else _stt.window_metrics(reference, transcript)[1])
     if bad_run is not None and bad_run >= _SKIP_RUN_CHARS:
         return "skipped"
     return "wrong_words"
@@ -835,7 +883,10 @@ def check_clip(job: Job, model, watch: StageWatch, ctx: Context) -> None:
     wer, cer = _stt.compute_metrics(reference, transcript)
     tail = _stt.tail_cer(reference, transcript, duration)
     # Length-independent companions to the two averages above: see the gate constants.
-    window_cer, bad_run = _stt.window_metrics(reference, transcript)
+    # `window_score` rather than `window_metrics` because the same alignment also yields
+    # the text excerpts the WARNING below prints, at no extra cost.
+    score = _stt.window_score(reference, transcript)
+    window_cer, bad_run = score.window_cer, score.bad_run_chars
     over = ((cer is not None and cer >= cfg.cer_threshold)
             or (tail is not None and tail >= cfg.tail_cer_threshold)
             or (window_cer is not None and window_cer >= cfg.window_cer_threshold)
@@ -873,7 +924,8 @@ def check_clip(job: Job, model, watch: StageWatch, ctx: Context) -> None:
     # Free: pure string work on text already in hand, and it is what turns a pile of
     # CER numbers into "how many of these are the mumbling, how many are fluent and
     # wrong". Only stored where it means something, i.e. on a flagged clip.
-    defect = classify_defect(reference, transcript) if over else None
+    defect = (classify_defect(reference, transcript, bad_run_chars=bad_run)
+              if over else None)
     if defect:
         out_row["defect"] = defect
     ctx.write(watch.audio / cfg.out_name, out_row)
@@ -891,6 +943,9 @@ def check_clip(job: Job, model, watch: StageWatch, ctx: Context) -> None:
                        "n/a" if window_cer is None else f"{window_cer:.3f}",
                        "n/a" if bad_run is None else bad_run,
                        duration, transcript[:160])
+        # The two numbers above say a clip is bad; these lines say WHAT about it is bad,
+        # which is what makes a flag actionable without opening the audio.
+        log_window_evidence(score)
 
 
 def report_defect_mix(paths: dict[str, Path], *, severe_cer: float = 0.25) -> int:
@@ -928,6 +983,11 @@ def report_defect_mix(paths: dict[str, Path], *, severe_cer: float = 0.25) -> in
         mix_all: Counter = Counter()
         mix_severe: Counter = Counter()
         by_voice: dict[str, Counter] = {}
+        # Worst stored row per shape, to print the evidence for. Keyed by shape because
+        # the shapes live at different CERs: `skipped` is low by construction (that is
+        # the point of the window gates), so a global "worst N" would only ever show
+        # loops and never the defect hardest to believe without seeing it.
+        worst: dict[str, tuple[float, dict, object]] = {}
         rows = flagged = 0
         for line in path.read_text().splitlines():
             line = line.strip()
@@ -943,8 +1003,13 @@ def report_defect_mix(paths: dict[str, Path], *, severe_cer: float = 0.25) -> in
             flagged += 1
             if not row.get("transcript") or not row.get("reference"):
                 continue
-            shape = row.get("defect") or classify_defect(row["reference"],
-                                                         row["transcript"])
+            score = _stt.window_score(row["reference"], row["transcript"])
+            shape = row.get("defect") or classify_defect(
+                row["reference"], row["transcript"],
+                bad_run_chars=score.bad_run_chars)
+            rank = score.window_cer or row.get("cer") or 0.0
+            if shape not in worst or rank > worst[shape][0]:
+                worst[shape] = (rank, row, score)
             mix_all[shape] += 1
             if (row.get("cer") or 0.0) >= severe_cer:
                 mix_severe[shape] += 1
@@ -964,6 +1029,15 @@ def report_defect_mix(paths: dict[str, Path], *, severe_cer: float = 0.25) -> in
         logger.info("  CER >= {:.2f} only: {}", severe_cer, fmt(mix_severe))
         for voice, mix in sorted(by_voice.items()):
             logger.info("  {:<12} {}", voice, fmt(mix))
+        for shape in DEFECT_SHAPES:
+            if shape not in worst:
+                continue
+            rank, row, score = worst[shape]
+            logger.info("  worst {} ({}, {}, {:.1f}s): CER {} window {}", shape,
+                        row.get("stem", "?"), row.get("voice", "?"),
+                        row.get("duration") or 0.0, row.get("cer"),
+                        "n/a" if score.window_cer is None else f"{score.window_cer:.3f}")
+            log_window_evidence(score, log=logger.info, indent="    ")
     return total
 
 

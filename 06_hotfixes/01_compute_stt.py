@@ -77,6 +77,7 @@ import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import NamedTuple
 
 import click
 import jiwer
@@ -611,8 +612,40 @@ NORM_CHARS_PER_SECOND = 14.2
 WINDOW_CHARS = round(WINDOW_SECONDS * NORM_CHARS_PER_SECOND)  # 213
 
 
-def window_metrics(reference: str, hypothesis: str) -> tuple[float | None, int | None]:
-    """Worst windowed CER and longest mis-said reference run, from one alignment.
+#: Characters of surrounding text `WindowScore.missing_context` keeps on each side of a
+#: missing span, ~3 s of speech: enough to find the span in the label by eye without
+#: making the log line unreadable.
+MISSING_CONTEXT_CHARS = 40
+
+
+class WindowScore(NamedTuple):
+    """What `window_score` found, numbers and the text they came from.
+
+    The texts are the NORMALIZED forms, because those are what the CER actually scored:
+    printing the raw label beside a normalized hypothesis would send a reader chasing
+    differences the metric never saw (digits spelled out, punctuation dropped). Empty
+    strings when there was nothing to score.
+    """
+
+    window_cer: float | None
+    bad_run_chars: int | None
+    ref_window: str
+    """The worst window's expected text, `WINDOW_CHARS` long (shorter if the whole
+    reference is)."""
+    hyp_window: str
+    """What the recognizer produced over that same stretch, via the alignment. It can be
+    much longer than `ref_window` when the model looped inside the window."""
+    missing: str
+    """The longest contiguous run of reference text the hypothesis did not say."""
+    missing_heard: str
+    """What the hypothesis has in that run's place: empty for a clean skip, a wrong
+    phrase of similar length for a misread."""
+    missing_context: str
+    """`missing` inside its neighbourhood, marked with >>> <<<, for locating it by eye."""
+
+
+def window_score(reference: str, hypothesis: str) -> WindowScore:
+    """Score a clip in windows rather than as a whole, and return the evidence.
 
     Parameters
     ----------
@@ -620,6 +653,79 @@ def window_metrics(reference: str, hypothesis: str) -> tuple[float | None, int |
         The label text, unnormalized (normalized here, like every other metric).
     hypothesis : str
         The STT transcript, unnormalized.
+
+    Returns
+    -------
+    WindowScore
+        The two length-independent numbers and the text excerpts behind them. See the
+        module-level comment above `WINDOW_SECONDS` for why they exist, and
+        `WindowScore` for what each field holds.
+
+    Notes
+    -----
+    Everything comes from a single ``jiwer.process_characters`` call, whose per-chunk
+    alignment is turned into two per-reference-character arrays (how many errors each
+    position carries, and whether it was said correctly) plus an index map from
+    reference position to hypothesis position. Insertions own no reference character, so
+    their whole length is charged to the position they were inserted at: that keeps a
+    loop (hundreds of characters repeated at one point) inside the window that contains
+    it instead of spreading it over the clip, and it keeps the metric's numerator
+    identical to the CER's. They are deliberately NOT part of ``bad_run_chars``, which
+    is about reference text that went missing.
+    """
+    ref = normalize_for_scoring(reference or "")
+    hyp = normalize_for_scoring(hypothesis or "")
+    if not ref:
+        return WindowScore(None, None, "", "", "", "", "")
+    errors = [0] * len(ref)      # CER numerator, charged to a reference position
+    missed = [False] * len(ref)  # reference characters not said correctly
+    # Reference position -> the hypothesis position aligned with it, so a window of the
+    # reference can be shown beside the text the recognizer produced over it. A deleted
+    # run maps every one of its positions to the same hypothesis index (nothing was said
+    # there), which is what makes `missing_heard` empty for a clean skip.
+    hyp_at = [0] * (len(ref) + 1)
+    hyp_at[len(ref)] = len(hyp)
+    for chunk in jiwer.process_characters(ref, hyp).alignments[0]:
+        if chunk.type == "insert":
+            at = min(chunk.ref_start_idx, len(ref) - 1)
+            errors[at] += chunk.hyp_end_idx - chunk.hyp_start_idx
+            continue
+        deleted = chunk.type == "delete"
+        for k in range(chunk.ref_end_idx - chunk.ref_start_idx):
+            i = chunk.ref_start_idx + k
+            hyp_at[i] = chunk.hyp_start_idx + (0 if deleted else k)
+            if chunk.type == "equal":
+                continue
+            errors[i] += 1       # substitute | delete
+            missed[i] = True
+    width = min(WINDOW_CHARS, len(ref))
+    total = sum(errors[:width])
+    worst, worst_at = total, 0
+    for i in range(width, len(ref)):
+        total += errors[i] - errors[i - width]
+        if total > worst:
+            worst, worst_at = total, i - width + 1
+    run = best_run = best_end = 0
+    for i, flag in enumerate(missed):
+        run = run + 1 if flag else 0
+        if run > best_run:
+            best_run, best_end = run, i + 1
+    a, b = best_end - best_run, best_end
+    before = ref[max(0, a - MISSING_CONTEXT_CHARS):a]
+    after = ref[b:b + MISSING_CONTEXT_CHARS]
+    return WindowScore(
+        window_cer=worst / width,
+        bad_run_chars=best_run,
+        ref_window=ref[worst_at:worst_at + width],
+        hyp_window=hyp[hyp_at[worst_at]:hyp_at[worst_at + width]],
+        missing=ref[a:b],
+        missing_heard=hyp[hyp_at[a]:hyp_at[b]] if best_run else "",
+        missing_context=f"{before}>>>{ref[a:b]}<<<{after}" if best_run else "",
+    )
+
+
+def window_metrics(reference: str, hypothesis: str) -> tuple[float | None, int | None]:
+    """`window_score` reduced to its two numbers, for callers that only gate on them.
 
     Returns
     -------
@@ -631,44 +737,9 @@ def window_metrics(reference: str, hypothesis: str) -> tuple[float | None, int |
     bad_run_chars : int or None
         Length of the longest contiguous run of reference characters that the hypothesis
         deleted or substituted, in normalized characters (~14.2 per second of speech).
-
-    Notes
-    -----
-    Both come from a single ``jiwer.process_characters`` call, whose per-chunk alignment
-    is turned into a per-reference-character error count. Insertions own no reference
-    character, so their whole length is charged to the position they were inserted at:
-    that keeps a loop (hundreds of characters repeated at one point) inside the window
-    that contains it instead of spreading it over the clip, and it keeps the metric's
-    numerator identical to the CER's. They are deliberately NOT part of
-    ``bad_run_chars``, which is about reference text that went missing.
     """
-    ref = normalize_for_scoring(reference or "")
-    hyp = normalize_for_scoring(hypothesis or "")
-    if not ref:
-        return None, None
-    errors = [0] * len(ref)   # CER numerator, charged to a reference position
-    missed = [False] * len(ref)  # reference characters not said correctly
-    for chunk in jiwer.process_characters(ref, hyp).alignments[0]:
-        if chunk.type == "equal":
-            continue
-        if chunk.type == "insert":
-            at = min(chunk.ref_start_idx, len(ref) - 1)
-            errors[at] += chunk.hyp_end_idx - chunk.hyp_start_idx
-            continue
-        for i in range(chunk.ref_start_idx, chunk.ref_end_idx):  # substitute | delete
-            errors[i] += 1
-            missed[i] = True
-    width = min(WINDOW_CHARS, len(ref))
-    total = sum(errors[:width])
-    worst = total
-    for i in range(width, len(ref)):
-        total += errors[i] - errors[i - width]
-        worst = max(worst, total)
-    run = best_run = 0
-    for flag in missed:
-        run = run + 1 if flag else 0
-        best_run = max(best_run, run)
-    return worst / width, best_run
+    score = window_score(reference, hypothesis)
+    return score.window_cer, score.bad_run_chars
 
 
 def duration_of(rec: dict) -> float:
