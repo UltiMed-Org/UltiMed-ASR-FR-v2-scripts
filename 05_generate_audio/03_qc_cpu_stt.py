@@ -948,7 +948,8 @@ def check_clip(job: Job, model, watch: StageWatch, ctx: Context) -> None:
         log_window_evidence(score)
 
 
-def report_defect_mix(paths: dict[str, Path], *, severe_cer: float = 0.25) -> int:
+def report_defect_mix(paths: dict[str, Path], *, severe_cer: float = 0.25,
+                      examples: int = 1) -> int:
     """Print the defect mix of sidecar rows ALREADY on disk, and return the row count.
 
     A pure re-read: it classifies from the `transcript`/`reference` the rows already
@@ -969,6 +970,10 @@ def report_defect_mix(paths: dict[str, Path], *, severe_cer: float = 0.25) -> in
     severe_cer
         CER at or above which a flagged clip counts as a derailment rather than a
         wording miss.
+    examples
+        How many worked examples to print per defect shape, worst window first. 0 for
+        the counts alone. Each one prints the two texts behind its score, which is what
+        makes a flag judgeable without opening the audio.
 
     Returns
     -------
@@ -987,7 +992,7 @@ def report_defect_mix(paths: dict[str, Path], *, severe_cer: float = 0.25) -> in
         # the shapes live at different CERs: `skipped` is low by construction (that is
         # the point of the window gates), so a global "worst N" would only ever show
         # loops and never the defect hardest to believe without seeing it.
-        worst: dict[str, tuple[float, dict, object]] = {}
+        worst: dict[str, list[tuple[float, dict, object]]] = {}
         rows = flagged = 0
         for line in path.read_text().splitlines():
             line = line.strip()
@@ -1007,9 +1012,12 @@ def report_defect_mix(paths: dict[str, Path], *, severe_cer: float = 0.25) -> in
             shape = row.get("defect") or classify_defect(
                 row["reference"], row["transcript"],
                 bad_run_chars=score.bad_run_chars)
-            rank = score.window_cer or row.get("cer") or 0.0
-            if shape not in worst or rank > worst[shape][0]:
-                worst[shape] = (rank, row, score)
+            if examples:
+                rank = score.window_cer or row.get("cer") or 0.0
+                keep = worst.setdefault(shape, [])
+                keep.append((rank, row, score))
+                keep.sort(key=lambda item: -item[0])
+                del keep[examples:]      # bounded, so a whole stage costs no memory
             mix_all[shape] += 1
             if (row.get("cer") or 0.0) >= severe_cer:
                 mix_severe[shape] += 1
@@ -1030,14 +1038,13 @@ def report_defect_mix(paths: dict[str, Path], *, severe_cer: float = 0.25) -> in
         for voice, mix in sorted(by_voice.items()):
             logger.info("  {:<12} {}", voice, fmt(mix))
         for shape in DEFECT_SHAPES:
-            if shape not in worst:
-                continue
-            rank, row, score = worst[shape]
-            logger.info("  worst {} ({}, {}, {:.1f}s): CER {} window {}", shape,
-                        row.get("stem", "?"), row.get("voice", "?"),
-                        row.get("duration") or 0.0, row.get("cer"),
-                        "n/a" if score.window_cer is None else f"{score.window_cer:.3f}")
-            log_window_evidence(score, log=logger.info, indent="    ")
+            for rank, row, score in worst.get(shape, ()):
+                logger.info("  worst {} ({}, {}, {:.1f}s): CER {} window {} run {}",
+                            shape, row.get("stem", "?"), row.get("voice", "?"),
+                            row.get("duration") or 0.0, row.get("cer"),
+                            "n/a" if score.window_cer is None
+                            else f"{score.window_cer:.3f}", score.bad_run_chars)
+                log_window_evidence(score, log=logger.info, indent="    ")
     return total
 
 
@@ -1123,6 +1130,11 @@ def worker_loop(model, ctx: Context) -> None:
 @click.option("--keep-transcripts", is_flag=True,
               help="Store the transcript of every checked clip, not just the flagged "
                    "ones (~8 MB per 25k clips).")
+@click.option("--examples", default=1, show_default=True,
+              help="With --defect-mix, how many worked examples to print per defect "
+                   "shape (worst window first), each with the label text of its worst "
+                   "window and what the recognizer heard over the same stretch. 0 for "
+                   "the counts alone.")
 @click.option("--defect-mix", is_flag=True,
               help="Do not transcribe anything: re-read the sidecar rows already on "
                    "disk and report what SHAPE their failures have (loop, overrun, "
@@ -1138,7 +1150,8 @@ def main(stages: tuple[str, ...], model_dir: Path, quantization: str,
          nice_level: int, poll_seconds: float, max_queue: int, cer_threshold: float,
          tail_cer_threshold: float, window_cer_threshold: float,
          bad_run_threshold: int, reference_key: str, backfill: bool, once: bool,
-         summary_every: int, keep_transcripts: bool, defect_mix: bool, out_name: str,
+         summary_every: int, keep_transcripts: bool, defect_mix: bool,
+         examples: int, out_name: str,
          log_file: str) -> None:
     """STT-check a sample of a running stage-05 generation on the spare CPU cores."""
     logger.remove()
@@ -1184,7 +1197,8 @@ def main(stages: tuple[str, ...], model_dir: Path, quantization: str,
         raise click.ClickException("no stage to follow")
 
     if defect_mix:
-        n = report_defect_mix({w.name: w.audio / out_name for w in watches.values()})
+        n = report_defect_mix({w.name: w.audio / out_name for w in watches.values()},
+                              examples=examples)
         if not n:
             logger.warning("no flagged row carried a transcript to classify")
         return
