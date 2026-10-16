@@ -252,6 +252,13 @@ def classify_defect(reference: str, transcript: str) -> str:
         whole-clip CER on a long clip, which is why `window_metrics` exists; separated
         from `wrong_words` because the repair differs (the text is fine, the take is
         not) and because it is the defect v1.3 had to retire clips for.
+
+        `06_hotfixes/04_flag_asr_defects.py` detects the same failure for the
+        exhaustive offline pass, and the two are deliberately NOT one function: that
+        one works word-level and only fires when a SECOND recognizer agrees the phrase
+        is absent, because its output drops clips from the release, while this one is a
+        single-recognizer character metric that only asks for a listen. See that file's
+        header for what would have to be measured before merging them.
     ``wrong_words``
         The same amount of speech, at a normal rate, saying something else. This has
         no acoustic signature by construction, so STT is the only thing that can see

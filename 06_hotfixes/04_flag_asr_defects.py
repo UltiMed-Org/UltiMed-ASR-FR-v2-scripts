@@ -33,6 +33,17 @@ A clip is flagged when, aligning label and hypothesis word by word:
 Mid-sentence misreads (``2 grammes 10 grands cents`` for ``2,10 grammes``) are NOT
 flagged: they cannot be told apart from a Parakeet error without listening.
 
+The live CPU QC (``05_generate_audio/03_qc_cpu_stt.py``) flags the same ``skipped``
+failure from a SINGLE recognizer, character-level: ``window_metrics`` in
+``01_compute_stt.py`` returns the longest contiguous run of missing label characters,
+gated at 30 (~5 French words). The two are not merged on purpose. This file's output
+drops clips from the release, so it waits for two recognizers to agree; the live one
+only asks for a listen, so it can afford one and can therefore run during generation.
+Neither is a superset of the other (a character run catches a skipped phrase the word
+rule rejects as a compound; the word rule catches a skip the run splits in two), and
+the measurement that would settle whether one can replace the other is to run both over
+the same hypotheses file and diff their catches. Until then, do not add a third.
+
 Both texts are compared after lowercasing and dropping punctuation, like the NeMo
 normalizer, which is enough since only whole missing or extra words matter here.
 

@@ -136,10 +136,30 @@ are not decoration).
 ```
 
 Output is one JSON line per clip in `qc_stt_sidecar.jsonl` beside the audio
-(`reason`, `voice`, `cfg_alpha`, `cer`, `wer`, `tail_cer`, `duration`,
-`stt_s`), append-only, and a restart resumes from it. A clip over either gate
-(`--cer-threshold` 0.08, `--tail-cer-threshold` 0.12, stage 06's own numbers)
-is logged at WARNING and keeps its transcript in the row.
+(`reason`, `voice`, `cfg_alpha`, `cer`, `wer`, `tail_cer`, `window_cer`,
+`bad_run_chars`, `duration`, `stt_s`), append-only, and a restart resumes from
+it. A clip over ANY of the four gates is logged at WARNING and keeps its
+transcript in the row:
+
+| gate | default | what it catches |
+| --- | --- | --- |
+| `--cer-threshold` | 0.08 | the clip as a whole is wrong (stage 06's number) |
+| `--tail-cer-threshold` | 0.12 | the clip's last ~30 s are wrong: truncations, derailed endings |
+| `--window-cer-threshold` | 0.15 | any ~15 s stretch is wrong, wherever it sits |
+| `--bad-run-threshold` | 30 chars | a contiguous span of the label is missing, i.e. ~5 words skipped |
+
+The last two exist because the first two average over their whole window, so a
+defect in the MIDDLE of a long clip is diluted away: five words lost is CER
+0.106 on a 20 s clip but 0.044 on a 48 s PARHAF chunk, so the whole-clip gate
+goes blind past ~26 s of audio, which is 9.1% of the dictionary and most of
+PARHAF/PARROT. Their thresholds are measured on the 19,958 v1 clips of
+`06_hotfixes/improved/full.stt.jsonl` (whisper-1 against its own labels, so an
+upper bound on false positives since that model is the weaker one):
+`bad_run_chars` runs p99 5 and max 26 there, against the ~30 characters five
+French words take, so the gate costs 0 false positives in 20k; `window_cer`
+runs p99 0.061 and max 0.211, so 0.15 costs 1 in 20k. Both numbers are stored
+on EVERY row, clean ones included, so the gates can be re-swept over the
+sidecar without transcribing anything again.
 
 The scoring is stage 06's (`06_hotfixes/01_compute_stt.py::normalize_for_scoring`
 and `compute_metrics`), imported rather than reimplemented, so "over the gate"
