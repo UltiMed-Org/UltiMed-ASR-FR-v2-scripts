@@ -195,9 +195,10 @@ and reading those texts is what corrected it. Of 250 flagged dictionary clips
 same rows (73% `wrong_words`, 10% `loop`) was an artefact of the loop detector
 needing three occurrences, while a derailed take most often says a clause
 exactly twice: those landed in `wrong_words` and made the catch look
-acoustically invisible. It mostly is not. A self-similarity pre-filter working
-on the waveform alone could in principle see most of this catch, and nearly all
-of the severe end of it, without transcribing. What remains genuinely
+acoustically invisible. It mostly is not. That is what
+`04_qc_acoustic_loops.py` below acts on: a self-similarity pre-filter on the
+waveform alone keeps 92% of the loops without transcribing, which is why the
+25% sample is no longer the limit on finding them. What remains genuinely
 STT-only is the 36%: fluent speech saying the wrong thing.
 
 **This is not a quality gate.** The default model is fine-tuned on v1 of this
@@ -206,6 +207,83 @@ with audio a neutral listener would reject. Read it as a gross-error detector
 (text dropped, syllables looped, the wrong text spoken, the clip truncated).
 For an impartial read, point `--model-dir` at the base export
 (`parakeet-tdt-0.6b-v3-redux-onnx`) or score with Whisper through stage 06.
+
+## `04_qc_acoustic_loops.py`
+
+The acoustic half of the QC: it decides **which clips are worth
+transcribing**, from the waveform alone. Because it never loads a recognizer it
+runs over **100% of the corpus** instead of the STT QC's 25% sample, at ~23-25
+clips/s on 3-4 workers beside the live generator (~42 ms of one core for a 20 s
+clip, 216 ms for a 68 s one), so the whole 602,885-clip corpus is about **7
+hours on 4 workers**.
+
+It looks for one defect shape, the one the mix above says dominates: a take
+that derails into saying a clause twice. Two renditions of the same clause make
+the clip's self-similarity matrix grow a stripe parallel to its diagonal, and
+the script scores that stripe directly in the lag domain (best box-averaged
+cosine between frame *t* and frame *t+lag*, over every lag that could hold a
+repeat), which costs `O(frames)` memory instead of holding a 2100x2100 matrix
+per worker for a 68 s clip. The front end is deliberately coarse, 64 ms windows
+on a 32 ms hop: the two renditions are *re-generated*, not copied, so they
+drift apart and a 10 ms hop would pull the stripe off its lag. Candidates must
+be voiced over 80% of their length, otherwise two pauses would read as a
+repeat.
+
+Calibrated against the STT sidecar's own shapes on 1279 dictionary clips
+(2026-10-16), the distributions barely overlap (clean median 0.356 / p90 0.464,
+loop p10 0.708 / median 0.848), which is what makes a single gate work:
+
+| gate | recall on `loop` | fires on clean clips |
+| --- | --- | --- |
+| 0.65 | 94.9% | 1.4% |
+| **0.70** (default) | **92.0%** | **0.90%** |
+| 0.75 | 86.4% | 0.40% |
+| 0.80 | 72.2% | 0.10% |
+
+0.90% of the corpus is ~5,400 clips, which the STT QC can confirm in about 2 h
+on one core, against ~230 h to transcribe everything. That is the trade the
+whole thing exists for, and it is why the default errs toward recall: a flag is
+a *routing decision*, not a verdict, and the clip it misses on an unsampled
+take is missed for good. `--calibrate` re-measures the table on any stage, and
+since every row stores `similarity`, moving the gate afterwards is a re-read of
+the sidecar rather than a re-scan.
+
+```bash
+# Score every clip of a stage, appending to qc_acoustic_sidecar.jsonl beside
+# the audio (resumes itself, flags logged at WARNING):
+./04_qc_acoustic_loops.py --stage 01_dictionnary --workers 4
+
+# Measure the gate against the STT sidecar instead of using it:
+./04_qc_acoustic_loops.py --stage 01_dictionnary --calibrate
+
+# Then confirm the flags with an actual transcription, and nothing else:
+./03_qc_cpu_stt.py --stage 01_dictionnary --backfill --once --sample-percent 0 \
+    --stems-from <audio dir>/qc_acoustic_sidecar.jsonl
+```
+
+That last command is the point of the pair: `--stems-from` queues exactly the
+`looped` rows, past the sample hash, and keys them by stem so a flagged clip
+the sample already transcribed is not transcribed twice. Its rows carry
+`reason: "acoustic"`.
+
+What it is blind to, by construction: `wrong_words` (36% of the catch) is
+fluent speech saying the wrong thing, which leaves no stripe, and `truncated` /
+`skipped` likewise. This replaces none of the STT QC; it chooses its work.
+
+A 300-clip smoke scan fired 5 times, and **none of those 5 clips had ever been
+STT-sampled**. Transcribing them confirmed one real loop
+(`000002_0002_a_beta_40`, CER 0.169, "phosphotao a 80 picogrammes par
+millilitres" said twice) that the sample was never going to look at; the other
+4 are labels that repeat a phrase themselves, which the audio then faithfully
+repeats. Lab-value dictation is both where the loops concentrate and where the
+false positives come from, so every row carries `label_rep_s`, the stripe the
+label's own longest repeated phrase accounts for, and a flag whose `stripe_s`
+is no longer than that is one to read before listening to. It is recorded, not
+gated on: requiring the stripe to exceed it costs 8 points of recall for
+nothing (83.6% at a 1.10% clean fire rate, worse on both axes than simply
+raising the gate to 0.75), and it would have suppressed the one confirmed
+defect above, whose label repeats 1.90 s against a 2.05 s stripe. The module
+docstring keeps those numbers so the idea is not retried blind.
 
 ## Nine voices (v2)
 
