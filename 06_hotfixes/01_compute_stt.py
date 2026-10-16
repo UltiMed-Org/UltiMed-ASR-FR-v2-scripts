@@ -581,6 +581,96 @@ def tail_cer(reference: str, hypothesis: str, duration: float) -> float | None:
     return jiwer.cer(ref, hyp)
 
 
+# --- window scoring -----------------------------------------------------------------
+# The whole-clip CER and the tail CER both still dilute a defect that sits in the MIDDLE
+# of a long clip: a voice that skips a phrase inside a lab-value list keeps every other
+# character right, and the average absorbs it. Measured against the 0.08 whole-clip gate,
+# losing five words (~30 normalized characters) scores 0.106 on a 20 s clip (flagged) but
+# 0.044 on a 48 s PARHAF chunk (silent), so the gate stops seeing a dropped phrase past
+# ~26 s of audio, which is 9.1% of the dictionary and most of PARHAF/PARROT. That is the
+# v1.3 failure mode (14 clips retired for a skipped phrase, invisible to the v1 QC).
+#
+# Both metrics below are length-independent by construction, so one threshold covers a
+# 9 s drug sentence and a 68 s dictionary clip:
+#   * window_cer: the worst CER over a sliding window of the reference, i.e. "was any
+#     ~15 s stretch of this clip badly said", rather than "was the clip badly said on
+#     average". The same five-word drop scores ~0.14 wherever it happens.
+#   * bad_run_chars: the longest contiguous run of reference characters the hypothesis
+#     did not get right. This answers "was a span dropped" directly, with no window to
+#     tune: a cleanly skipped phrase IS a run of that phrase's length, while a model that
+#     merely mangles medical vocabulary produces many short runs.
+#
+# Unlike TAIL_CHARS (sized with 02_statistics.py's 0.0603 s per UNNORMALIZED character,
+# which makes its 498-char window really ~35 s of normalized text), the window below is
+# sized with the pace of the text these metrics actually see: 14.2 normalized characters
+# per second, median over the 21,891 v2 dictionary clips the live QC had checked on
+# 2026-10-16, joined to their labels (P10 11.8, P90 16.4, so a single constant slices a
+# window accurately enough). Keep in sync if the voice roster or its speed changes.
+WINDOW_SECONDS = 15.0
+NORM_CHARS_PER_SECOND = 14.2
+WINDOW_CHARS = round(WINDOW_SECONDS * NORM_CHARS_PER_SECOND)  # 213
+
+
+def window_metrics(reference: str, hypothesis: str) -> tuple[float | None, int | None]:
+    """Worst windowed CER and longest mis-said reference run, from one alignment.
+
+    Parameters
+    ----------
+    reference : str
+        The label text, unnormalized (normalized here, like every other metric).
+    hypothesis : str
+        The STT transcript, unnormalized.
+
+    Returns
+    -------
+    window_cer : float or None
+        Worst CER over any window of ``WINDOW_CHARS`` consecutive reference characters,
+        None when the reference has nothing scorable. On a reference shorter than the
+        window this equals the whole-clip CER (there is no dilution left to undo), so it
+        is always >= the whole-clip CER and can be gated on its own.
+    bad_run_chars : int or None
+        Length of the longest contiguous run of reference characters that the hypothesis
+        deleted or substituted, in normalized characters (~14.2 per second of speech).
+
+    Notes
+    -----
+    Both come from a single ``jiwer.process_characters`` call, whose per-chunk alignment
+    is turned into a per-reference-character error count. Insertions own no reference
+    character, so their whole length is charged to the position they were inserted at:
+    that keeps a loop (hundreds of characters repeated at one point) inside the window
+    that contains it instead of spreading it over the clip, and it keeps the metric's
+    numerator identical to the CER's. They are deliberately NOT part of
+    ``bad_run_chars``, which is about reference text that went missing.
+    """
+    ref = normalize_for_scoring(reference or "")
+    hyp = normalize_for_scoring(hypothesis or "")
+    if not ref:
+        return None, None
+    errors = [0] * len(ref)   # CER numerator, charged to a reference position
+    missed = [False] * len(ref)  # reference characters not said correctly
+    for chunk in jiwer.process_characters(ref, hyp).alignments[0]:
+        if chunk.type == "equal":
+            continue
+        if chunk.type == "insert":
+            at = min(chunk.ref_start_idx, len(ref) - 1)
+            errors[at] += chunk.hyp_end_idx - chunk.hyp_start_idx
+            continue
+        for i in range(chunk.ref_start_idx, chunk.ref_end_idx):  # substitute | delete
+            errors[i] += 1
+            missed[i] = True
+    width = min(WINDOW_CHARS, len(ref))
+    total = sum(errors[:width])
+    worst = total
+    for i in range(width, len(ref)):
+        total += errors[i] - errors[i - width]
+        worst = max(worst, total)
+    run = best_run = 0
+    for flag in missed:
+        run = run + 1 if flag else 0
+        best_run = max(best_run, run)
+    return worst / width, best_run
+
+
 def duration_of(rec: dict) -> float:
     """Clip length in seconds from the manifest's `duration` field, 0 if absent
     or unparsable. Used only to drive the audio-time progress bar / ETA."""
