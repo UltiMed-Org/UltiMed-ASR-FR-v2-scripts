@@ -248,8 +248,13 @@ drawn across the 150,011 dictionary clips on disk (2026-10-16), the gate flags
 **1.75%** of them, which is ~10,500 clips corpus-wide; the same sample
 reproduces the clean distribution above (median 0.357, p90 0.464), so the two
 measurements agree, and 1.75% is about what 0.90% of clean clips plus 92% of
-the ~0.6% that really loop predicts. Confirming ~10,500 clips costs ~4 h on one
-CPU core, against ~230 h to transcribe the corpus. That is the trade the whole
+the ~0.6% that really loop predicts. Confirming ~10,500 clips costs **~9-11 h of
+STT** at this host's faster settings (3 threads x 2 workers, 7.9-9.4x
+realtime), or ~23 h at the polite one used beside the generator: measured 7.7 s
+of CPU per flagged clip there, because flagged clips average **27.9 s** against
+the corpus' ~20.6 s, a loop being a clip that says something twice and is
+therefore long. Against ~437 h to transcribe the whole corpus, that is the
+trade. That is the trade the whole
 thing exists for, and it is why the default errs toward recall: a flag is a
 *routing decision*, not a verdict, and the clip it misses on an unsampled take
 is missed for good. Gate 0.75 cuts the flags to ~6,500 and 0.80 to ~4,500, if
@@ -284,12 +289,20 @@ What it is blind to, by construction: `wrong_words` (36% of the catch) is
 fluent speech saying the wrong thing, which leaves no stripe, and `truncated` /
 `skipped` likewise. This replaces none of the STT QC; it chooses its work.
 
-A 300-clip smoke scan fired 5 times, and **none of those 5 clips had ever been
-STT-sampled**. Transcribing them confirmed one real loop
-(`000002_0002_a_beta_40`, CER 0.169, "phosphotao a 80 picogrammes par
-millilitres" said twice) that the sample was never going to look at; the other
-4 are labels that repeat a phrase themselves, which the audio then faithfully
-repeats. Lab-value dictation is both where the loops concentrate and where the
+Measured precision, on the first 700 scanned dictionary clips: the gate fired
+26 times and `--stems-from` confirmed **7 of them (27%), every single one a
+`loop`** (CER 0.146 to 0.333), with evidence as blatant as "isoniazide 5
+milligrammes par kilogrammes par jours" spoken twice in a row. None of the 26
+had been STT-sampled, so all 7 are defects the 25% sample was never going to
+see. Precision on the *shape* is the striking part: when a flag is real it is a
+loop and nothing else, so the second stage only ever has to answer yes or no.
+The confirmed flags score 0.811-0.925 (median 0.900) against 0.710-0.917
+(median 0.806) for the cleared ones, which is why 0.80 is the gate to raise to
+if the confirmation pass is too slow rather than any cleverer rule. They also
+concentrate hard by voice: **5 of the 7 are `h_frf_ptm`**, matching the 76%
+loop rate the STT QC already reported for that voice over 113 flags. The 19
+cleared ones are labels that repeat a phrase themselves, which the audio then
+faithfully repeats. Lab-value dictation is both where the loops concentrate and where the
 false positives come from, so every row carries `label_rep_s`, the stripe the
 label's own longest repeated phrase accounts for, and a flag whose `stripe_s`
 is no longer than that is one to read before listening to. It is recorded, not
