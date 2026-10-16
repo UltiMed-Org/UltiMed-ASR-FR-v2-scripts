@@ -163,6 +163,17 @@ CFG_ALPHA_START=2.0 CFG_ALPHA_STEP=-0.2 CFG_ALPHA_FLOOR=1.2 ./driver.sh
 
 Those three are already the defaults; they are spelled out because the ladder's direction is the thing to not get wrong (see `README_alternating_improvement.md` for the mode alternation, which switches the docker server between the STT and TTS passes).
 
+- **Before stage 99, transcribe EVERYTHING once on the GPU** (planned for when stage 05 finishes, ~2026-10-20; not yet run). The live CPU QC only listens to 25% of clips, and until the windowed gates landed its whole-clip CER was blind to a phrase skipped past ~26 s of audio, so the remaining 75% has never been read by anything but the duration bounds and the code gate. The GPU can close that: the UltiMed int8 export does **0.04-0.06 s per clip batched** (0.16 unbatched) on this corpus's own dictionary clips, i.e. **~7-10 h for all 602,885**, against ~365 h (15 days) for the same work on the CPU at 9x realtime. It cannot run during generation: vLLM holds ~21.9 GB of the 24 GB card, so this waits for stage 05 to end (or for the voxtral container to stop).
+
+  ```bash
+  # from the ultra-onnx sibling checkout; resumable, writes {"audio","hyp"} per line
+  USE_CUDA=1 BATCH=16 DEC_QUANT=fp32 BATCH_SEC=400 LOAD_WORKERS=4 \
+    uv run ../parakeet-tdt-0.6b-v3-ultra-onnx/scripts/drug-rules/transcribe_onnx.py \
+      ../parakeet-tdt-0.6b-v3-UltiMed-onnx int8 /path/to/hyps.jsonl <manifest> [<manifest> ...]
+  ```
+
+  `DEC_QUANT=fp32` matters when batching: the int8 decoder's per-batch activation scale makes a transcript depend on which clips it was batched with, which a reproducible QC pass cannot have (the encoder stays int8, and the precision benchmark of 2026-10-16 found accuracy flat across int8/w4a8/fp32 anyway, so this costs nothing but the decoder's 3.7 GB load). `perso/transcribe_manifests.py` in the NeMo training repo is the alternative, and its docstring warns the run is usually CPU-bound on audio decoding. That one hypotheses file then feeds **both** readers of the same format without transcribing again: `06_hotfixes/04_flag_asr_defects.py` (which produces the drop list stage 99 consumes, item (c) below) and a re-sweep of the live QC's four gates over the whole corpus, since `window_metrics` is pure text work.
+
 The clips that keep their original audio get `--original-cfg-alpha`, which is **2.0** since commit `8faef7d`. That value is written into the `cfg_alpha` column of every non-regenerated row, i.e. the large majority of 600k rows, so running over **v1** audio needs `--original-cfg-alpha 1.3` passed explicitly. The exception is a clip stage 05 drew lower: `original_cfg_alpha_for` resolves the clip, reads `cfg_alpha_sidecar.jsonl` beside it (step 1 item 6) and publishes that rung instead, so the column stays true for the handful of clips that descended the ladder.
 
 
