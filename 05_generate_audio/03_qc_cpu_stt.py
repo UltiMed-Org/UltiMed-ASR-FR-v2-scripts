@@ -68,8 +68,11 @@ One JSON line per checked clip in `qc_stt_sidecar.jsonl`, beside the audio and b
 `cfg_alpha_sidecar.jsonl` (`--out-name` to rename, the file is append-only and a restart
 resumes from it). A clip over either gate is also logged at WARNING with its transcript,
 which is the line to grep for. The row carries `reason` ("retry" or "sample"), `voice`,
-`cfg_alpha`, `cer`, `wer`, `tail_cer`, `duration` and `stt_s`, so the same file answers
-both "which clips are bad" and "is one voice drifting".
+`cfg_alpha`, `cer`, `wer`, `tail_cer`, `window_cer`, `bad_run_chars`, `duration` and
+`stt_s`, so the same file answers both "which clips are bad" and "is one voice
+drifting". The last two are the length-independent pair: they see a defect in the middle
+of a long clip, which the two averages cannot (see the gate constants), and they are
+stored on clean rows too so the gates can be re-swept without transcribing again.
 
 Usage
 -----
@@ -171,10 +174,43 @@ DEFAULT_MODEL_DIR = ROOT.parent / "parakeet-tdt-0.6b-v3-UltiMed-onnx"
 DEFAULT_CER_GATE = 0.08
 DEFAULT_TAIL_CER_GATE = 0.12
 
+#: The WINDOWED gates (`window_metrics` in stage 06), which exist because both gates
+#: above average over the whole clip and so go blind on a long one: five words lost in
+#: the middle of a 48 s PARHAF chunk is CER 0.044, half the gate, and the tail window
+#: only covers the clip's last 30 s. That is the v1.3 failure mode (14 clips retired for
+#: a skipped phrase, none caught by the v1 QC), and 9.1% of the v2 dictionary is long
+#: enough to hide it.
+#:
+#: Both numbers are measured, on the 19,958 v1 clips of `06_hotfixes/improved/full.stt.jsonl`
+#: scored against their labels (2026-10-16). That set is the right calibration: v1 shipped,
+#: so nearly every clip is good, and its transcripts come from whisper-1, a model that is
+#: WORSE on this vocabulary than the one here, which makes the false-positive rates below
+#: an upper bound.
+#:   * `bad_run_chars` p50 1, p90 2, p99 5, p99.9 9, max 26. Five French words are ~30
+#:     normalized characters, so the gate sits above every clean clip in 20k and still
+#:     catches the defect asked about: 0 false positives at 30, and the worst offenders
+#:     at 25-26 are not defects at all but whisper writing "mUI/L" where the label spells
+#:     "milliunites internationales".
+#:   * `window_cer` p99 0.061, p99.9 0.103, max 0.211 -> 1 clip in 20k at 0.15 (0.005%).
+#:     Looser than the tail gate on purpose: the window is 213 characters against the
+#:     tail's 498, so it cuts mid-sentence more often and is noisier.
+#: A drop SHORTER than ~4 words stays under both, which is the honest limit of the
+#: method. Both values are stored on every row, so the thresholds can be re-swept
+#: offline over the sidecar without transcribing anything again.
+DEFAULT_WINDOW_CER_GATE = 0.15
+DEFAULT_BAD_RUN_GATE = 30
+
 
 #: Defect shapes a flagged clip can have, cheapest-to-act-on first. See
 #: `classify_defect` for what separates them and why the split is worth recording.
-DEFECT_SHAPES = ("loop", "overrun", "truncated", "wrong_words")
+DEFECT_SHAPES = ("loop", "overrun", "truncated", "skipped", "wrong_words")
+
+#: Longest contiguous run of missing reference characters that makes a clip a `skipped`
+#: rather than a `wrong_words`. Same number as `DEFAULT_BAD_RUN_GATE` and for the same
+#: reason, but kept separate: that one decides whether to FLAG a clip, this one only
+#: names the shape of a clip already flagged, so a stricter flag gate must not silently
+#: empty the shape.
+_SKIP_RUN_CHARS = 30
 
 #: Immediately-repeating n-gram sizes the loop test looks for. A derailed take
 #: repeats whole words, so word n-grams find it; 2 to 5 covers "de la" through a
@@ -209,7 +245,13 @@ def classify_defect(reference: str, transcript: str) -> str:
         Materially more words than the label, with no single n-gram dominating: the
         model kept talking, inventing new material rather than repeating.
     ``truncated``
-        Materially fewer words: the take stopped early or skipped a span.
+        Materially fewer words: the take stopped early.
+    ``skipped``
+        The right AMOUNT of speech, but a long contiguous span of the label is missing
+        from it: the voice jumped over a phrase and carried on. Invisible to the
+        whole-clip CER on a long clip, which is why `window_metrics` exists; separated
+        from `wrong_words` because the repair differs (the text is fine, the take is
+        not) and because it is the defect v1.3 had to retire clips for.
     ``wrong_words``
         The same amount of speech, at a normal rate, saying something else. This has
         no acoustic signature by construction, so STT is the only thing that can see
@@ -244,6 +286,9 @@ def classify_defect(reference: str, transcript: str) -> str:
     'truncated'
     >>> classify_defect("le patient tousse", "la patiente touche")
     'wrong_words'
+    >>> ref = "le patient tousse " * 8 + "il presente une dyspnee aux efforts moderes"
+    >>> classify_defect(ref, ref.replace("il presente une dyspnee aux efforts ", ""))
+    'skipped'
     """
     # The same normaliser the CER gate scores with, so a shape is judged on exactly
     # the token stream that produced the number that flagged the clip.
@@ -259,6 +304,12 @@ def classify_defect(reference: str, transcript: str) -> str:
         return "truncated"
     if ratio > _LONG_RATIO:
         return "overrun"
+    # Last, because a loop or a truncation also leaves missing spans behind, and those
+    # names are the more actionable ones. Reached only by a clip of the right length,
+    # where a long missing run can mean nothing else.
+    _, bad_run = _stt.window_metrics(reference, transcript)
+    if bad_run is not None and bad_run >= _SKIP_RUN_CHARS:
+        return "skipped"
     return "wrong_words"
 
 
@@ -776,8 +827,12 @@ def check_clip(job: Job, model, watch: StageWatch, ctx: Context) -> None:
 
     wer, cer = _stt.compute_metrics(reference, transcript)
     tail = _stt.tail_cer(reference, transcript, duration)
+    # Length-independent companions to the two averages above: see the gate constants.
+    window_cer, bad_run = _stt.window_metrics(reference, transcript)
     over = ((cer is not None and cer >= cfg.cer_threshold)
-            or (tail is not None and tail >= cfg.tail_cer_threshold))
+            or (tail is not None and tail >= cfg.tail_cer_threshold)
+            or (window_cer is not None and window_cer >= cfg.window_cer_threshold)
+            or (bad_run is not None and bad_run >= cfg.bad_run_threshold))
 
     out_row = {
         "stem": job.stem,
@@ -788,6 +843,11 @@ def check_clip(job: Job, model, watch: StageWatch, ctx: Context) -> None:
         "cer": None if cer is None else round(cer, 4),
         "wer": None if wer is None else round(wer, 4),
         "tail_cer": None if tail is None else round(tail, 4),
+        # Stored on EVERY row, clean ones included: they are two numbers, and keeping
+        # them is what lets the gates be re-swept over the sidecar later without
+        # transcribing 602,885 clips a second time.
+        "window_cer": None if window_cer is None else round(window_cer, 4),
+        "bad_run_chars": bad_run,
         "over_gate": over,
         "stt_s": round(stt_s, 2),
         "ts": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -817,10 +877,12 @@ def check_clip(job: Job, model, watch: StageWatch, ctx: Context) -> None:
         for line in ctx.stats.lines(workers=cfg.workers):
             logger.info(line)
     if over:
-        logger.warning("{} [{}, {}, {}]: CER {} tail {} ({:.1f}s) -> {}",
+        logger.warning("{} [{}, {}, {}]: CER {} tail {} window {} run {} ({:.1f}s) -> {}",
                        job.stem, job.reason, voice, defect,
                        "n/a" if cer is None else f"{cer:.3f}",
                        "n/a" if tail is None else f"{tail:.3f}",
+                       "n/a" if window_cer is None else f"{window_cer:.3f}",
+                       "n/a" if bad_run is None else bad_run,
                        duration, transcript[:160])
 
 
@@ -957,6 +1019,15 @@ def worker_loop(model, ctx: Context) -> None:
 @click.option("--tail-cer-threshold", default=DEFAULT_TAIL_CER_GATE, show_default=True,
               help="Same, for the CER of the clip's last ~30 s, where truncations and "
                    "derailed endings live. Looser, like stage 06's.")
+@click.option("--window-cer-threshold", default=DEFAULT_WINDOW_CER_GATE,
+              show_default=True,
+              help="CER of the worst ~15 s window of the clip at or above which it is "
+                   "flagged. Catches a defect in the MIDDLE of a long clip, which the "
+                   "two gates above average away.")
+@click.option("--bad-run-threshold", default=DEFAULT_BAD_RUN_GATE, show_default=True,
+              help="Longest contiguous run of missing label characters (~14.2 per "
+                   "second of speech) at or above which a clip is flagged. 30 is five "
+                   "French words, and above every clean clip in a 20k calibration.")
 @click.option("--reference-key", default="asr_training_source", show_default=True,
               help="Manifest field holding the text the TTS was asked to say.")
 @click.option("--backfill", is_flag=True,
@@ -984,7 +1055,8 @@ def worker_loop(model, ctx: Context) -> None:
 def main(stages: tuple[str, ...], model_dir: Path, quantization: str,
          sample_percent: float, do_retries: bool, threads: int, workers: int,
          nice_level: int, poll_seconds: float, max_queue: int, cer_threshold: float,
-         tail_cer_threshold: float, reference_key: str, backfill: bool, once: bool,
+         tail_cer_threshold: float, window_cer_threshold: float,
+         bad_run_threshold: int, reference_key: str, backfill: bool, once: bool,
          summary_every: int, keep_transcripts: bool, defect_mix: bool, out_name: str,
          log_file: str) -> None:
     """STT-check a sample of a running stage-05 generation on the spare CPU cores."""
@@ -1010,6 +1082,7 @@ def main(stages: tuple[str, ...], model_dir: Path, quantization: str,
     cfg = SimpleNamespace(
         sample_percent=sample_percent, max_queue=max_queue,
         cer_threshold=cer_threshold, tail_cer_threshold=tail_cer_threshold,
+        window_cer_threshold=window_cer_threshold, bad_run_threshold=bad_run_threshold,
         reference_key=reference_key, out_name=out_name, workers=workers,
         keep_transcripts=keep_transcripts, summary_every=summary_every)
 
@@ -1060,9 +1133,11 @@ def main(stages: tuple[str, ...], model_dir: Path, quantization: str,
     t0 = time.monotonic()
     model = load_cpu_model(model_dir.resolve(), quantization=quantization,
                            threads=threads)
-    logger.info("model loaded in {:.1f}s; sample {}%, retries {}, gates {} / {} (tail)",
+    logger.info("model loaded in {:.1f}s; sample {}%, retries {}, gates {} / {} (tail) "
+                "/ {} (window) / {} chars (missing run)",
                 time.monotonic() - t0, sample_percent,
-                "on" if do_retries else "off", cer_threshold, tail_cer_threshold)
+                "on" if do_retries else "off", cer_threshold, tail_cer_threshold,
+                window_cer_threshold, bad_run_threshold)
 
     def _stop(signum, _frame):
         logger.warning("signal {}, finishing the clip in flight and stopping", signum)
