@@ -240,11 +240,25 @@ loop p10 0.708 / median 0.848), which is what makes a single gate work:
 | 0.75 | 86.4% | 0.40% |
 | 0.80 | 72.2% | 0.10% |
 
-0.90% of the corpus is ~5,400 clips, which the STT QC can confirm in about 2 h
-on one core, against ~230 h to transcribe everything. That is the trade the
-whole thing exists for, and it is why the default errs toward recall: a flag is
-a *routing decision*, not a verdict, and the clip it misses on an unsampled
-take is missed for good. `--calibrate` re-measures the table on any stage, and
+Those two columns are different populations, and the second one is not the
+scan's flag rate: 0.90% is how often the gate fires on a clip the STT QC had
+already passed, i.e. the false positives alone, while a real scan also catches
+the loops it is looking for. Measured on a stride-spread sample of 1200 clips
+drawn across the 150,011 dictionary clips on disk (2026-10-16), the gate flags
+**1.75%** of them, which is ~10,500 clips corpus-wide; the same sample
+reproduces the clean distribution above (median 0.357, p90 0.464), so the two
+measurements agree, and 1.75% is about what 0.90% of clean clips plus 92% of
+the ~0.6% that really loop predicts. Confirming ~10,500 clips costs ~4 h on one
+CPU core, against ~230 h to transcribe the corpus. That is the trade the whole
+thing exists for, and it is why the default errs toward recall: a flag is a
+*routing decision*, not a verdict, and the clip it misses on an unsampled take
+is missed for good. Gate 0.75 cuts the flags to ~6,500 and 0.80 to ~4,500, if
+the confirmation pass is the bottleneck.
+
+The rate is **not** uniform, so budget per stage rather than from one slice: a
+contiguous run of 400 `abces_*` dictionary clips flagged 5.25%, because
+formulaic clinical text repeats phrases and the audio faithfully repeats them
+with it, while the first 300 clips of the same stage flagged 1.67%. `--calibrate` re-measures the table on any stage, and
 since every row stores `similarity`, moving the gate afterwards is a re-read of
 the sidecar rather than a re-scan.
 
