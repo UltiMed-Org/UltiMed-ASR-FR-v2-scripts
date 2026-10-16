@@ -85,6 +85,11 @@ Usage
     # one-shot, manual: check what is on disk now for one stage and exit
     ./03_qc_cpu_stt.py --stage 01_dictionnary --backfill --once
 
+    # Transcribe ONLY the clips the acoustic pre-filter flagged, to confirm or clear
+    # them (see 04_qc_acoustic_loops.py; --sample-percent 0 turns the sample off):
+    ./03_qc_cpu_stt.py --stage 01_dictionnary --backfill --once --sample-percent 0 \
+        --stems-from /path/to/01_dictionnary/generated_audios/qc_acoustic_sidecar.jsonl
+
     # impartial second opinion on the retried clips only, no sample
     ./03_qc_cpu_stt.py --sample-percent 0 \
         --model-dir ../../parakeet-tdt-0.6b-v3-redux-onnx
@@ -564,7 +569,7 @@ class Job:
     stage: str
     stem: str
     path: Path
-    reason: str                     # "retry" or "sample"
+    reason: str                     # "sample", "retry", or "acoustic" (--stems-from)
     key: str                        # dedup key, see StageWatch.handled
     cfg_alpha: float | None = None
     src_ts: str | None = None       # the cfg_alpha sidecar row's timestamp, if any
@@ -877,6 +882,61 @@ def poll_sidecar(watch: StageWatch, ctx: Context) -> None:
                         src_ts=ts or None))
 
 
+def load_stem_requests(paths: tuple[Path, ...]) -> dict[str, set[str]]:
+    """Read "check exactly these clips" lists. Returns stage name -> stems, "" = any.
+
+    This is the second half of the acoustic pre-filter
+    (`04_qc_acoustic_loops.py`): that script scores every clip in the corpus from the
+    waveform alone and flags ~1% of them, and this is how those flags come back here to
+    be confirmed by an actual transcription. Confirming 1% of 602,885 clips costs ~2 h on
+    one core, where transcribing all of them would cost ~230 h, which is the entire reason
+    the pre-filter exists.
+
+    Two input shapes are accepted because both are what a caller actually has: an
+    acoustic sidecar (JSONL, one object per clip) contributes the stems of its `looped`
+    rows and keys them by the row's own `stage`, so a file cannot leak stems into a
+    sibling stage; anything else is read as a plain list of stems, one per line, `#`
+    comments allowed, and applies to every followed stage. A JSONL row with no `looped`
+    key at all still counts, so a hand-filtered file works.
+
+    Parameters
+    ----------
+    paths
+        Files to read. A missing file is a hard error: silently checking nothing would
+        look exactly like a clean corpus.
+
+    Returns
+    -------
+    dict
+        Stage name -> set of stems. The key `""` holds stems that apply to any stage.
+    """
+    requests: dict[str, set[str]] = {}
+    for path in paths:
+        if not path.is_file():
+            raise click.BadParameter(f"--stems-from: no such file {path}")
+        rows = plain = 0
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("{"):
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue                 # torn final line, as everywhere else here
+                stem = row.get("stem")
+                if not stem or ("looped" in row and not row["looped"]):
+                    continue
+                requests.setdefault(row.get("stage") or "", set()).add(stem)
+                rows += 1
+            else:
+                requests.setdefault("", set()).add(line)
+                plain += 1
+        logger.info("{}: {} flagged row(s), {} bare stem(s) to check", path.name, rows,
+                    plain)
+    return requests
+
+
 def poll_audio(watch: StageWatch, ctx: Context) -> int:
     """Queue the sampled clips that appeared in the audio directory since the last poll.
 
@@ -888,6 +948,10 @@ def poll_audio(watch: StageWatch, ctx: Context) -> int:
     except OSError as exc:
         logger.debug("{}: cannot list {} ({})", watch.name, watch.audio, exc)
         return 0
+    # Union of the lists aimed at this stage and the stage-agnostic ones, resolved once
+    # per poll rather than per clip: this loop runs over a 100k-entry directory.
+    requested = (ctx.cfg.stem_requests.get(watch.name, frozenset())
+                 | ctx.cfg.stem_requests.get("", frozenset()))
     fresh = 0
     for name in names:
         if name in watch.seen:
@@ -900,9 +964,14 @@ def poll_audio(watch: StageWatch, ctx: Context) -> int:
             continue
         fresh += 1
         stem = name[: -len(".flac")]
-        if is_sampled(stem, percent=ctx.cfg.sample_percent):
+        # An explicitly requested clip is checked whatever the sample says, which is what
+        # lets --sample-percent 0 mean "only what I asked for". The key stays the stem, so
+        # a clip the sample already transcribed is not transcribed a second time: the
+        # confirmation pass only pays for clips that have never been looked at.
+        asked = stem in requested
+        if asked or is_sampled(stem, percent=ctx.cfg.sample_percent):
             ctx.enqueue(Job(stage=watch.name, stem=stem, path=watch.audio / name,
-                            reason="sample", key=stem))
+                            reason="acoustic" if asked else "sample", key=stem))
     return fresh
 
 
@@ -1214,6 +1283,12 @@ def worker_loop(model, ctx: Context) -> None:
                    "French words, and above every clean clip in a 20k calibration.")
 @click.option("--reference-key", default="asr_training_source", show_default=True,
               help="Manifest field holding the text the TTS was asked to say.")
+@click.option("--stems-from", "stems_from", multiple=True,
+              type=click.Path(path_type=Path),
+              help="Check exactly the clips listed in this file, whatever --sample-percent "
+                   "says: an acoustic sidecar from 04_qc_acoustic_loops.py (its `looped` "
+                   "rows) or a plain list of stems. Repeatable, one per stage. Needs "
+                   "--backfill to reach clips already on disk.")
 @click.option("--backfill", is_flag=True,
               help="Also check the clips (and sidecar rows) ALREADY on disk. Without "
                    "it only clips that appear from now on are checked.")
@@ -1245,7 +1320,8 @@ def main(stages: tuple[str, ...], model_dir: Path, quantization: str,
          sample_percent: float, do_retries: bool, threads: int, workers: int,
          nice_level: int, poll_seconds: float, max_queue: int, cer_threshold: float,
          tail_cer_threshold: float, window_cer_threshold: float,
-         bad_run_threshold: int, reference_key: str, backfill: bool, once: bool,
+         bad_run_threshold: int, reference_key: str, stems_from: tuple[Path, ...],
+         backfill: bool, once: bool,
          summary_every: int, keep_transcripts: bool, defect_mix: bool,
          examples: int, out_name: str,
          log_file: str) -> None:
@@ -1274,7 +1350,8 @@ def main(stages: tuple[str, ...], model_dir: Path, quantization: str,
         cer_threshold=cer_threshold, tail_cer_threshold=tail_cer_threshold,
         window_cer_threshold=window_cer_threshold, bad_run_threshold=bad_run_threshold,
         reference_key=reference_key, out_name=out_name, workers=workers,
-        keep_transcripts=keep_transcripts, summary_every=summary_every)
+        keep_transcripts=keep_transcripts, summary_every=summary_every,
+        stem_requests=load_stem_requests(stems_from))
 
     watches: dict[str, StageWatch] = {}
     for name in names:
@@ -1319,6 +1396,12 @@ def main(stages: tuple[str, ...], model_dir: Path, quantization: str,
                     watch.name, watch.audio, len(watch.seen), resumed,
                     ", backfilling" if backfill else "")
 
+    requested = sum(len(v) for v in cfg.stem_requests.values())
+    if requested and not backfill:
+        # Without --backfill the run is a tail: everything on disk is marked seen and
+        # never polled, so a list of already-generated clips would quietly check nothing.
+        logger.warning("--stems-from given {} stem(s) but not --backfill: only clips "
+                       "generated from now on can match", requested)
     logger.info("loading {} ({}) with {} thread(s) x {} worker(s)...",
                 model_dir.name, quantization, threads, workers)
     t0 = time.monotonic()

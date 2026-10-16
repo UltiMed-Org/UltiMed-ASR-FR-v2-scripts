@@ -61,7 +61,7 @@ def make_cfg(**over) -> SimpleNamespace:
     base = dict(sample_percent=5.0, max_queue=10, cer_threshold=0.08,
                 tail_cer_threshold=0.12, reference_key="asr_training_source",
                 out_name="qc_stt_sidecar.jsonl", workers=1, keep_transcripts=False,
-                summary_every=0)
+                summary_every=0, stem_requests={})
     base.update(over)
     return SimpleNamespace(**base)
 
@@ -126,6 +126,52 @@ def test_poll_audio_draws_clips_only() -> None:
         # Second poll: the directory is unchanged, so nothing is queued twice.
         assert qc.poll_audio(watch, ctx) == 0
         assert len(ctx.samples) == 2
+
+
+def test_stems_from_checks_exactly_what_the_acoustic_filter_flagged() -> None:
+    """--stems-from routes the pre-filter's flags past the sample, and nothing else.
+
+    The economics of the two-stage QC live in this test: with the sample off, a clip is
+    transcribed because the acoustic pass flagged it, and a clip the acoustic pass
+    cleared costs nothing. The `looped: false` row and the stem belonging to another
+    stage are the two ways a caller could accidentally queue the whole corpus.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        watch = make_watch(Path(td))
+        flags = Path(td) / "qc_acoustic_sidecar.jsonl"
+        flags.write_text("\n".join([
+            json.dumps({"stem": "000001_0001_un", "stage": watch.name,
+                        "similarity": 0.91, "looped": True}),
+            json.dumps({"stem": "000002_0001_deux", "stage": watch.name,
+                        "similarity": 0.31, "looped": False}),
+            json.dumps({"stem": "000003_0001_trois", "stage": "04_PARROT",
+                        "similarity": 0.95, "looped": True}),
+            "{ torn",
+        ]) + "\n")
+        requests = qc.load_stem_requests((flags,))
+        assert requests == {watch.name: {"000001_0001_un"},
+                            "04_PARROT": {"000003_0001_trois"}}, requests
+
+        # sample_percent 0: the ONLY reason to transcribe anything is the flag.
+        ctx = qc.Context(make_cfg(sample_percent=0.0, stem_requests=requests),
+                         {watch.name: watch})
+        for stem in ("000001_0001_un", "000002_0001_deux", "000003_0001_trois"):
+            (watch.audio / f"{stem}.flac").write_text("x")
+        assert qc.poll_audio(watch, ctx) == 3            # three clips seen...
+        queued = sorted((j.stem, j.reason) for j in ctx.samples)
+        assert queued == [("000001_0001_un", "acoustic")], queued   # ...one checked
+
+        # A bare stem list applies to whatever stage is being followed.
+        plain = Path(td) / "stems.txt"
+        plain.write_text("# the ones I want\n000002_0001_deux\n\n")
+        watch2 = make_watch(Path(td) / "second")
+        ctx2 = qc.Context(make_cfg(sample_percent=0.0,
+                                   stem_requests=qc.load_stem_requests((plain,))),
+                          {watch2.name: watch2})
+        (watch2.audio / "000002_0001_deux.flac").write_text("x")
+        (watch2.audio / "000009_0001_neuf.flac").write_text("x")
+        qc.poll_audio(watch2, ctx2)
+        assert sorted(j.stem for j in ctx2.samples) == ["000002_0001_deux"]
 
 
 def test_poll_sidecar_queues_every_take_and_survives_a_torn_line() -> None:
