@@ -166,24 +166,39 @@ and `compute_metrics`), imported rather than reimplemented, so "over the gate"
 means the same thing here and in the real QC loop.
 
 A flagged row also carries `defect`, the SHAPE of the failure, from the two
-texts alone and at no extra cost: `loop` (a word n-gram repeats far more than
-the label's own repetition does, i.e. the model derailed into saying the same
-thing over and over), `overrun` (materially more words, new material rather
-than a repeat), `truncated` (materially fewer), `wrong_words` (the same amount
-of speech at a normal rate, saying something else). `--defect-mix` reports the
-mix over the rows already on disk without transcribing anything, so it needs
-neither the model nor the audio and can run while the real QC holds the CPU:
+texts alone and at no extra cost: `loop` (a span repeats more often than the
+label says it, i.e. the model derailed into saying the same thing again),
+`overrun` (materially more words AND no repeated span to explain them),
+`truncated` (materially fewer), `skipped` (the right amount of speech with a
+long contiguous span of the label missing from the middle) and `wrong_words`
+(the same amount of speech at a normal rate, saying something else).
+`--defect-mix` reports the mix over the rows already on disk without
+transcribing anything, so it needs neither the model nor the audio and can run
+while the real QC holds the CPU. It recomputes each shape rather than reading
+the row's stored `defect`, which is what makes it the tool for re-measuring the
+mix after the classifier changes:
 
 ```bash
-./03_qc_cpu_stt.py --stage 01_dictionnary --defect-mix --log-file ""
+./03_qc_cpu_stt.py --stage 01_dictionnary --defect-mix --examples 2 --log-file ""
 ```
 
-The split matters because it bounds what a cheaper detector could ever replace.
-Of the first 51 flagged dictionary clips (2026-10-15), 73% were `wrong_words`,
-which is fluent speech with no acoustic signature at all, so only STT can see
-it. Among the severe ones (CER >= 0.25) it becomes 42% `wrong_words` against
-50% `loop` or `overrun`, which a waveform-only detector can find. Every loop
-and overrun in that batch belonged to one voice, `h_frm_chf`.
+`--examples N` prints, per shape, the N worst clips with the label text of
+their worst 15 s window and what the recognizer heard over the same stretch.
+Both are the normalized forms, i.e. the strings the CER actually scored, so a
+number can be checked against the text that produced it. The live QC logs the
+same two lines under every WARNING.
+
+The mix matters because it bounds what a cheaper detector could ever replace,
+and reading those texts is what corrected it. Of 250 flagged dictionary clips
+(2026-10-16): **63% `loop`, 36% `wrong_words`, 1% `overrun`** overall, and
+**90% `loop`** among the severe ones (CER >= 0.25). The earlier reading of the
+same rows (73% `wrong_words`, 10% `loop`) was an artefact of the loop detector
+needing three occurrences, while a derailed take most often says a clause
+exactly twice: those landed in `wrong_words` and made the catch look
+acoustically invisible. It mostly is not. A self-similarity pre-filter working
+on the waveform alone could in principle see most of this catch, and nearly all
+of the severe end of it, without transcribing. What remains genuinely
+STT-only is the 36%: fluent speech saying the wrong thing.
 
 **This is not a quality gate.** The default model is fine-tuned on v1 of this
 very dataset, so it has been taught this corpus's vocabulary and will agree

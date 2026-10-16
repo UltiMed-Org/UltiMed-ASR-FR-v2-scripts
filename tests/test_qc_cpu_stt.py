@@ -286,6 +286,18 @@ def test_classify_defect_shapes() -> None:
         ref, ref + " Il a egalement signale des nausees, une asthenie marquee, "
         "une anorexie et des sueurs nocturnes abondantes depuis plusieurs jours "
         "sans fievre associee ni perte de poids documentee.") == "overrun"
+    # A clause of 6+ words said TWICE is a loop, even though no n-gram reaches
+    # `_LOOP_MIN_COUNT`: this is the common derailment, and it used to be filed as
+    # `wrong_words` (which is what made the mix read as "mostly no acoustic signature").
+    doubled = ("La patiente recoit deux grammes par jour pendant dix jours "
+               "recoit deux grammes par jour pendant dix jours puis une surveillance.")
+    long_ref = ("La patiente recoit deux grammes par jour pendant dix jours "
+                "puis une surveillance.")
+    assert qc.classify_defect(long_ref, doubled) == "loop"
+    # But the LABEL's own clause-length repetition does not become a loop: a dosage
+    # list that says the clause twice is matched by a take that says it twice.
+    twice = long_ref + " " + long_ref
+    assert qc.classify_defect(twice, twice.replace("recoit", "recevait")) == "wrong_words"
     # Same length, different words: the shape that no acoustic detector can see.
     assert qc.classify_defect("le patient tousse", "la patiente touche") == "wrong_words"
     # An empty transcript is a truncation, not a crash.
@@ -297,8 +309,8 @@ def test_classify_defect_shapes() -> None:
 
 
 def test_defect_mix_report_reads_existing_rows() -> None:
-    """The report classifies rows written before the `defect` field existed, keeps the
-    stored shape when there is one, and survives a torn final line."""
+    """The report classifies rows written before the `defect` field existed, recomputes
+    a stored shape rather than trusting it, and survives a torn final line."""
     rows = [
         # Clean rows are counted but never classified.
         {"stem": "a", "over_gate": False, "cer": 0.01, "voice": "v1"},
@@ -308,7 +320,9 @@ def test_defect_mix_report_reads_existing_rows() -> None:
         {"stem": "c", "over_gate": True, "cer": 0.4, "voice": "v1",
          "reference": "le patient tousse",
          "transcript": "le patient tousse tousse tousse tousse"},
-        # A stored shape is trusted rather than recomputed.
+        # A stored shape is recomputed, not trusted: this row claims `overrun` while
+        # its two texts are identical, so the current rule says `wrong_words`. That is
+        # what lets a classifier change be re-measured over rows already on disk.
         {"stem": "d", "over_gate": True, "cer": 0.3, "voice": "v2",
          "defect": "overrun", "reference": "x y z", "transcript": "x y z"},
         # Below the severity split, so it lands in the overall mix only.
@@ -319,7 +333,14 @@ def test_defect_mix_report_reads_existing_rows() -> None:
         path = Path(td) / "qc_stt_sidecar.jsonl"
         path.write_text("".join(json.dumps(r) + "\n" for r in rows)
                         + '{"stem": "torn", "over_g')
-        assert qc.report_defect_mix({"st": path}) == 3
+        captured: list[str] = []
+        sink = qc.logger.add(lambda message: captured.append(message), level="INFO")
+        try:
+            assert qc.report_defect_mix({"st": path}) == 3
+        finally:
+            qc.logger.remove(sink)
+        # Row "d"'s stored `overrun` must not survive into the printed mix.
+        assert "overrun" not in "".join(captured)
         # A missing file is reported, not fatal.
         assert qc.report_defect_mix({"st": Path(td) / "nope.jsonl"}) == 0
 

@@ -266,6 +266,19 @@ _LOOP_NGRAMS = (2, 3, 4, 5)
 _LOOP_MIN_COUNT = 3
 _LOOP_MARGIN = 1
 
+#: Long-clause arm of the same test, and the much looser count is the point: TWO
+#: occurrences are enough once the repeated span is 6 or more words, because correct
+#: French prose does not say a whole clause over verbatim unless the label does, and
+#: the label's own repetition is the baseline this is measured against (see
+#: `_added_clause_repeat`; the short arm needs 3 because its spans are as generic as
+#: "de la"). Measured on the 2026-10-16 dictionary sidecar: this arm fires on 151 of
+#: 250 flagged clips (60%) and on 0 of 2126 CER-passing ones, so a repeated clause is
+#: a more specific signal than the CER gate it explains. Sizes are sparse
+#: because a 12-word repeat contains a 6-word one; 8 and 10 only add the case where a
+#: clause's 6-word windows all straddle an edit.
+_LOOP_LONG_NGRAMS = (6, 8, 10)
+_LOOP_LONG_MIN_COUNT = 2
+
 #: Transcript-to-label word-count ratios that mean the take did not end where the
 #: text did. Wide on purpose: STT word counts drift a few percent on their own.
 _SHORT_RATIO = 0.75
@@ -278,15 +291,20 @@ def classify_defect(reference: str, transcript: str, *,
 
     The CER gate answers "is this clip wrong"; this answers "wrong how", which is a
     different and cheaper question, and the two disagree about what is worth building
-    next. Four shapes, and only the first two leave a trace in the waveform:
+    next. Five shapes, and only the first two leave a trace in the waveform:
 
     ``loop``
-        A word n-gram repeats more than the label does: the model derailed into
-        saying the same thing over and over. Audible as the repetitive mumbling, and
-        the one shape a self-similarity detector can find without transcribing.
+        A span repeats more often than the label says it: the model derailed into
+        saying the same thing over again. Audible as the repetitive mumbling, and the
+        one shape a self-similarity detector can find without transcribing. Two arms,
+        because loops come in two lengths: a short n-gram (2 to 5 words) has to occur
+        `_LOOP_MIN_COUNT` times, while a clause of 6 or more words counts from the
+        second occurrence, the label's own count of that same clause subtracted.
     ``overrun``
-        Materially more words than the label, with no single n-gram dominating: the
-        model kept talking, inventing new material rather than repeating.
+        Materially more words than the label and no repeated span to explain them: the
+        model kept talking, inventing new material rather than repeating. Rare once
+        the long-clause arm above has taken its share, since a take that will not stop
+        usually stops making up new text and starts repeating.
     ``truncated``
         Materially fewer words: the take stopped early.
     ``skipped``
@@ -305,16 +323,25 @@ def classify_defect(reference: str, transcript: str, *,
     ``wrong_words``
         The same amount of speech, at a normal rate, saying something else. This has
         no acoustic signature by construction, so STT is the only thing that can see
-        it.
+        it. Read the measured share of this shape as a ceiling on what a cheap
+        acoustic pre-filter must leave to STT, and note that the ceiling moved a long
+        way once doubled clauses stopped landing here (below).
 
-    Measured on the first 51 flagged dictionary clips (2026-10-15, `--defect-mix`):
-    73% wrong_words, 16% loop, 8% overrun, 4% truncated. Restricted to the severe ones
-    (CER >= 0.25) it becomes 42% wrong_words against 50% loop or overrun. Every loop
-    and overrun in that first batch belonged to one voice, `h_frm_chf`. That is the
-    whole reason this field exists: it bounds how much of the QC catch a cheap
-    acoustic pre-filter could ever cover, the bound depends on severity, and it points
-    at a voice rather than at the corpus, so the mix has to be watched over time
-    rather than measured once.
+    The mix is the whole reason this field exists: it bounds how much of the QC catch a
+    cheap acoustic pre-filter could ever cover. It has to be watched over time rather
+    than measured once, and the history is the argument for that. On the first 51
+    flagged dictionary clips (2026-10-15) it read 73% wrong_words / 16% loop / 8%
+    overrun / 4% truncated, and the conclusion drawn from it was that most defects have
+    no acoustic signature. That conclusion was an artefact of this function: printing
+    the window texts (`log_window_evidence`) showed clause-length loops filed as
+    wrong_words, because `_LOOP_MIN_COUNT` wanted three occurrences and a derailed take
+    most often says a clause exactly twice. With the long-clause arm added, 250 flagged
+    clips read **63% loop, 36% wrong_words, 1% overrun** overall and **90% loop, 7%
+    wrong_words** among the severe ones (CER >= 0.25), against 10% loop / 79%
+    wrong_words as the old rule labelled the same rows. So a self-similarity pre-filter
+    could in principle see most of the catch, and nearly all of the severe catch,
+    rather than a sixth of it. The mix still points at single voices rather than at the
+    corpus, which is the other reason to keep watching it.
 
     Parameters
     ----------
@@ -354,6 +381,11 @@ def classify_defect(reference: str, transcript: str, *,
     hyp_rep, ref_rep = _max_ngram_count(hyp), _max_ngram_count(ref)
     if hyp_rep >= _LOOP_MIN_COUNT and hyp_rep > ref_rep + _LOOP_MARGIN:
         return "loop"
+    # Before the length ratios on purpose: a take that loops usually also runs long, and
+    # of the two names the loop is the cause and `overrun` the symptom. This is what
+    # moved 26 of the 28 stored `overrun` rows to `loop` on 2026-10-16.
+    if _added_clause_repeat(ref, hyp) is not None:
+        return "loop"
     if ratio < _SHORT_RATIO:
         return "truncated"
     if ratio > _LONG_RATIO:
@@ -381,6 +413,62 @@ def _max_ngram_count(tokens: list[str]) -> int:
             break
         counts = Counter(tuple(tokens[i:i + n]) for i in range(len(tokens) - n + 1))
         best = max(best, counts.most_common(1)[0][1])
+    return best
+
+
+def _added_clause_repeat(reference: list[str],
+                         hypothesis: list[str]) -> tuple[int, str] | None:
+    """The long clause the hypothesis repeats beyond the label's own repetitiveness.
+
+    A clause is only a loop relative to its label, so the test is per n-gram size: the
+    hypothesis's most repeated span of that size must occur at least
+    `_LOOP_LONG_MIN_COUNT` times AND strictly more often than ANY span of that size
+    occurs in the label. The label's own maximum is the baseline rather than its count
+    of that same clause, and the difference is not academic: when a label repeats a
+    clause and the take misreads a word the same way in both copies, the misread clause
+    is a span the label never contains, so a same-clause comparison would call that a
+    loop (it did; see `tests/test_qc_cpu_stt.py`). The baseline form cannot, since the
+    take says it no more often than the label says its own.
+
+    What that costs: a take that loops clause B twice inside a label that legitimately
+    repeats clause A twice is missed. Accepted knowingly, because labels that repeat a
+    6+ word clause at all are 6 of 2295 rows measured (0.26%), and a wrong `loop` on a
+    dosage list would be the more misleading error of the two.
+
+    Parameters
+    ----------
+    reference
+        Normalized label tokens, as `normalize_for_scoring().split()` returns them.
+    hypothesis
+        Normalized transcript tokens.
+
+    Returns
+    -------
+    tuple of (int, str) or None
+        Occurrences in the hypothesis and the clause itself, for the clause with the
+        most occurrences beyond the label's own count; None when nothing qualifies.
+
+    Examples
+    --------
+    >>> label = "la patiente recoit 2 grammes par jours pendant 10 jours".split()
+    >>> _added_clause_repeat(label, label + label[2:])[0]
+    2
+    >>> _added_clause_repeat(label, label) is None     # said once, heard once
+    True
+    >>> _added_clause_repeat(label + label, label + label) is None   # label repeats too
+    True
+    """
+    best: tuple[int, str] | None = None
+    for n in _LOOP_LONG_NGRAMS:
+        if len(hypothesis) < n:
+            break
+        ref_counts = Counter(tuple(reference[i:i + n])
+                             for i in range(len(reference) - n + 1))
+        floor = max(_LOOP_LONG_MIN_COUNT - 1, max(ref_counts.values(), default=0))
+        for gram, count in Counter(tuple(hypothesis[i:i + n])
+                                   for i in range(len(hypothesis) - n + 1)).items():
+            if count > floor and (best is None or count > best[0]):
+                best = (count, " ".join(gram))
     return best
 
 
@@ -955,13 +1043,16 @@ def report_defect_mix(paths: dict[str, Path], *, severe_cer: float = 0.25,
     A pure re-read: it classifies from the `transcript`/`reference` the rows already
     carry, so it needs neither the ONNX model nor the audio, and it costs milliseconds
     over tens of thousands of rows. That is what makes it the right tool for rows
-    written before `classify_defect` existed, and for asking the mix question of a
-    finished stage without re-transcribing anything.
+    written before `classify_defect` existed, for asking the mix question of a finished
+    stage without re-transcribing anything, and for re-measuring the mix after a change
+    to the classifier itself: it recomputes every shape rather than reading the row's
+    stored `defect`, so what it prints is always the current rule's answer, not the one
+    the running QC happened to write.
 
-    The split at `severe_cer` is the point of the report rather than a detail: the mix
-    is dominated by `wrong_words` overall but by `loop`/`overrun` among the severe
-    clips, so one global percentage would answer the question wrongly in both
-    directions.
+    The split at `severe_cer` is the point of the report rather than a detail: the two
+    halves answer the pre-filter question differently, since the mild end is mostly
+    wording and the severe end mostly derailment, and one global percentage would be
+    wrong in both directions.
 
     Parameters
     ----------
@@ -1009,9 +1100,14 @@ def report_defect_mix(paths: dict[str, Path], *, severe_cer: float = 0.25,
             if not row.get("transcript") or not row.get("reference"):
                 continue
             score = _stt.window_score(row["reference"], row["transcript"])
-            shape = row.get("defect") or classify_defect(
-                row["reference"], row["transcript"],
-                bad_run_chars=score.bad_run_chars)
+            # Recomputed, not read from the row: the stored `defect` is a cache written
+            # by whatever rule version was running when the clip was checked, so
+            # trusting it would freeze the mix at the old rule and hide exactly the
+            # change one wants to measure (that is how the long-clause loop arm was
+            # measured over rows already on disk, with no re-transcription). The row's
+            # own field is still what the dataset carries; this report is the live read.
+            shape = classify_defect(row["reference"], row["transcript"],
+                                    bad_run_chars=score.bad_run_chars)
             if examples:
                 rank = score.window_cer or row.get("cer") or 0.0
                 keep = worst.setdefault(shape, [])
