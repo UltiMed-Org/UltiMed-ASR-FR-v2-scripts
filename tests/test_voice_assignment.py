@@ -264,5 +264,73 @@ check("a row with no index field still keys",
       va.assignment_key({"term_index": 9}, field="source_id", mode="row"))
 
 
+# ------------------------------------------- 7. the swap a repair pass draws instead
+# 06_hotfixes gives a clip that failed every redraw to ANOTHER voice (plan item 4), so
+# the swap has to be a different voice, the same one on a re-run (or a resumed pass
+# would ship audio the manifest does not describe), and uniform over the survivors
+# rather than piling the rejects onto whichever name happens to follow in the roster.
+SWAP_KEYS = [str(k) for k in range(9000)]
+swaps = {k: va.swap_voice(k, va.voice_for_key(k, retired=()), retired=())
+         for k in SWAP_KEYS}
+check("a swap is never the voice that already read the clip",
+      all(swaps[k] != va.voice_for_key(k, retired=()) for k in SWAP_KEYS))
+check("a swap is deterministic",
+      all(va.swap_voice(k, va.voice_for_key(k, retired=()), retired=()) == swaps[k]
+          for k in SWAP_KEYS[:200]))
+swap_counts = Counter(swaps.values())
+check("every voice takes swapped clips", len(swap_counts) == len(va.VOICES_FR_V2),
+      str(sorted(swap_counts)))
+# 9000 keys over 9 voices: 1000 land on each, and each one's 1000 rejects spread over
+# the 8 others, so ~1000 per voice again. A 20 pct band catches a collapse without
+# failing on hash noise (observed spread: 974 to 1068).
+lo, hi = min(swap_counts.values()), max(swap_counts.values())
+check("swaps are spread, not dumped on one voice", hi <= 1.2 * lo, f"{lo}..{hi}")
+check("a retired voice is never swapped TO",
+      all(va.swap_voice(k, "fr_female", retired=("h_frf_esm",)) != "h_frf_esm"
+          for k in SWAP_KEYS[:500]))
+
+# `avoid` is the accent spread: the voices already reading the same term. Honoured
+# when the roster can afford it, dropped when it cannot, because a clip that keeps
+# failing needs a different voice more than the term needs its spread.
+avoid_all = va.swap_voice("42", "h_frf_esm", avoid=va.VOICES_FR_V2)
+check("avoid is honoured when there is room",
+      va.swap_voice("42", "h_frf_esm", avoid=("h_frm_nlf",)) != "h_frm_nlf")
+check("avoid is dropped rather than giving up",
+      avoid_all is not None and avoid_all != "h_frf_esm", str(avoid_all))
+check("a one-voice roster has no swap to offer",
+      va.swap_voice("42", "solo", voices=("solo",)) is None)
+check("a swap with no current voice still answers",
+      va.swap_voice("42", None) in va.VOICES_FR_V2)
+
+# --------------------------- 8. read_dir_provenance: the audio dir is all stage 06 has
+with tempfile.TemporaryDirectory() as tmp:
+    audio = Path(tmp) / "data" / "dictionary"
+    audio.mkdir(parents=True)
+    dict_in = Path(tmp) / "01_dictionnary" / "generated_dataset.jsonl"
+    drugs_in = Path(tmp) / "02_drugs" / "generated_dataset.jsonl"
+
+    check("no provenance file means no answer", va.read_dir_provenance(audio) is None)
+
+    va.write_provenance(audio, dict_in, voices=va.VOICES_FR_V2, mode="row",
+                        field="term_index", counts=Counter({"fr_male": 3}))
+    entry = va.read_dir_provenance(audio)
+    check("the one entry in a directory is returned",
+          entry is not None and entry["mode"] == "row"
+          and entry["voices"] == list(va.VOICES_FR_V2), json.dumps(entry))
+
+    # Two stages into one folder is a supported layout, so agreeing entries answer.
+    va.write_provenance(audio, drugs_in, voices=va.VOICES_FR_V2, mode="row",
+                        field="term_index", counts=Counter({"fr_female": 5}))
+    check("two stages that agree still answer",
+          (va.read_dir_provenance(audio) or {}).get("mode") == "row")
+
+    # ...and disagreeing ones answer None rather than picking a roster at random: a
+    # swap drawn over the wrong roster would name a voice that never read anything here.
+    va.write_provenance(audio, Path(tmp) / "03_PARHAF" / "generated_dataset.jsonl",
+                        voices=va.VOICES_FR_V2, mode="group", field="source_id",
+                        counts=Counter({"fr_male": 2}))
+    check("stages that disagree answer None", va.read_dir_provenance(audio) is None)
+
+
 print(f"\n{len(failures)} failed" if failures else "\nall checks passed")
 sys.exit(1 if failures else 0)

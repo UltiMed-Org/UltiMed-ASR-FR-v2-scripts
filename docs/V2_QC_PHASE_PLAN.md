@@ -74,7 +74,7 @@ already fired.
 
 ## The six work items
 
-Each is one commit. Order is dependency order. Items 1, 2 and 3 are done.
+Each is one commit. Order is dependency order. Items 1 to 4 are done.
 
 1. **Window gates in the repair pass.** DONE (9a639de, 231003c). `is_bad()` tested `cer`
    and `tail` only, so a 180 s document that read 170 s correctly and dropped a phrase in
@@ -123,14 +123,33 @@ Each is one commit. Order is dependency order. Items 1, 2 and 3 are done.
    the 0.52% tail stage 05 also rejects, and the log says so per draw and once per clip.
    `AUTO_TOKEN_BUDGET=0` restores the old "only the 327.68 s cap" behaviour.
 
-4. **Voice swap on exhausted.** A clip that fails all 5 draws keeps its original audio
-   today. Instead, redraw it with another of the nine voices, which is legitimate only for
-   the three term stages (`01_dictionnary`, `02_drugs`, `07_acronyms`), where
-   `utils/voice_assignment.py` assigns a voice per clip. `03_PARHAF` and `04_PARROT` assign
-   one voice per document and a swap would break the single-reader property, so they are
-   excluded. Prefer a voice not already reading that term, so the accent spread is kept.
-   Note this changes the distinct-voices-per-term statistics that `99_hf_release` reports.
-   If the swap also fails, the original is kept and listed in the report, as in v1.
+4. **Voice swap on exhausted.** DONE. A clip that failed all 5 draws kept its original
+   audio; it now gets one more round of draws read by another voice of its roster
+   (`VOICE_SWAP=1`, the default). The new voice comes from
+   `utils/voice_assignment.py::swap_voice`, which re-draws from the same assignment hash
+   with the current voice added to the retired list for that one call, so there is no
+   second algorithm to keep in step and a re-run gives the same answer. A voice already
+   reading the same term is avoided when there is room (that index is harvested by the
+   `needs_work` hook, which already visits every row before any worker starts, so it is
+   free), and the preference is dropped rather than refusing to swap.
+   Three things beyond the plan. The eligibility rule reads `mode` from the
+   `voice_assignment.json` beside the audio instead of a hardcoded stage list, so it
+   follows the audio rather than the directory name (`group` stages, i.e. `03_PARHAF` and
+   `04_PARROT`, still never swap). The decision is carried as `improvement.swap_voice` on
+   the row rather than as extra draws inside the TTS pass, which is what makes one
+   mechanism serve `both` mode and the split halves, costs nothing on clips the first
+   round fixes, and caps it at one swap per clip; that also meant `set_improvement` had to
+   be introduced, since the `pending_stt` hop rewrites `improvement` wholesale and would
+   have silently redrawn with the voice that already failed (six literal marker dicts
+   collapsed into it). And `99_hf_release/03_sync_hotfix_results.py` now carries `voice`
+   back into the manifests, because `01_build_nemo_manifest.py` RE-DERIVES that column
+   from the hash and a rebuild would relabel a swapped clip with the voice that never
+   read it; it is written only when stage 06 has one, so a v1 row cannot blank it. The
+   distinct-voices-per-term statistics `99_hf_release` reports therefore change once
+   swaps have happened. If the swap also fails, the original ships `exhausted`, as in v1.
+   Covered by `tests/test_voice_swap.py` (full stt -> tts -> stt alternation, what never
+   swaps, the term index, and the driver + sync chain) and `tests/test_voice_assignment.py`
+   sections 7 and 8.
 
 5. **`rounds.jsonl` and a report.** Nothing writes a per-round history, so "how much did it
    improve" is answered by diffing two Markdown reports by eye. Each pass appends one JSON

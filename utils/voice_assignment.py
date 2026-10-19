@@ -303,6 +303,74 @@ def voice_for_row(row: dict, *, field: str | None = None, mode: str = "group",
                          retired=retired)
 
 
+def swap_voice(key: str, current: str | None, *,
+               voices: tuple[str, ...] | list[str] = VOICES_FR_V2,
+               retired: tuple[str, ...] | list[str] = RETIRED_VOICES_FR_V2,
+               avoid: tuple[str, ...] | list[str] = ()) -> str | None:
+    """Return a DIFFERENT voice for one clip, or None when the roster has no other.
+
+    Parameters
+    ----------
+    key
+        Any string that identifies the clip stably. Unlike `assignment_key` this does
+        NOT have to be the key synthesis hashed: a swap is *recorded* (stage 06 writes
+        the new name on the row and `99_hf_release/03_sync_hotfix_results.py` carries
+        it into the manifests), never re-derived, so the key only has to give the same
+        answer on a re-run. Stage 06 passes the clip stem, which is the one identifier
+        its manifest row and the audio file agree on.
+    current
+        The voice that already read this clip and must not come back. None (v1
+        single-voice audio, nothing recorded) still returns a voice, but the caller
+        usually has no roster to trust in that case.
+    voices
+        The roster, in order. Pass the one the audio was generated with
+        (`read_dir_provenance(...)["voices"]`), not the repo's current
+        `VOICES_FR_V2`, for the same reason stage 99 does.
+    retired
+        Voices that must never be returned; see `voice_for_key`.
+    avoid
+        Voices to skip *if the roster can afford it*: a preference, not a rule. Stage
+        06 passes the voices already reading the same term, so swapping a bad take
+        keeps the term's accent spread instead of collapsing two of its clips onto one
+        voice. When `avoid` would leave nothing, it is dropped and only `current` and
+        `retired` are honoured, because getting a different voice matters more than
+        the spread.
+
+    Returns
+    -------
+    str or None
+        A name from `voices`, never `current` and never in `retired`. None only when
+        that leaves nothing at all (a one-voice roster).
+
+    Uniform over the survivors and deterministic, because it is the same salted
+    re-draw `voice_for_key` uses for a retired voice: `current` (and `avoid`) are
+    simply passed as `retired` for this one call. Nothing is duplicated, and a clip
+    swapped twice in two runs lands on the same voice both times.
+
+    Examples
+    --------
+    >>> voice_for_key("42")
+    'h_frf_esm'
+    >>> swap_voice("42", "h_frf_esm")
+    'h_frm_nlf'
+    >>> swap_voice("42", "h_frf_esm", avoid=("h_frm_nlf",))
+    'h_frf_itm'
+    >>> # `avoid` is a preference: asking it to skip the whole roster still answers.
+    >>> swap_voice("42", "h_frf_esm", avoid=VOICES_FR_V2)
+    'h_frm_nlf'
+    >>> swap_voice("42", "only", voices=("only",)) is None
+    True
+    """
+    # `current` is a hard exclusion like a retirement, `avoid` a soft one, so the two
+    # tiers are the same draw with a longer and a shorter block list.
+    hard = tuple(dict.fromkeys(v for v in (*tuple(retired or ()), current) if v))
+    soft = tuple(dict.fromkeys(v for v in (avoid or ()) if v and v not in hard))
+    for blocked in ((*hard, *soft), hard):
+        if any(v not in blocked for v in voices):
+            return voice_for_key(key, voices, retired=blocked)
+    return None
+
+
 def load_voices(path) -> tuple[str, ...]:
     """Read a roster file: one voice name per line, `#` comments and blanks ignored.
 
@@ -432,3 +500,41 @@ def read_provenance(audio_dir, input_path) -> dict | None:
         return None
     entry = doc.get(provenance_key(input_path))
     return entry if isinstance(entry, dict) else None
+
+
+def read_dir_provenance(audio_dir) -> dict | None:
+    """Return the provenance entry for a directory of clips, when it is unambiguous.
+
+    Parameters
+    ----------
+    audio_dir
+        The directory holding the clips.
+
+    Returns
+    -------
+    dict or None
+        The single entry in that directory's provenance file, or, when several stages
+        generated into it, the first entry *if they all agree* on `voices`, `mode` and
+        `group_field`. None when there is no file, no entry, or the entries disagree.
+
+    `read_provenance` is for a caller that knows which stage it is reading
+    (`99_hf_release` iterates one `generated_dataset.jsonl` at a time). This one is for
+    a caller that has only the audio: `06_hotfixes` works from the published manifest,
+    where a row says which clip and which voice but not which stage's input produced
+    it. Disagreement answers None rather than guessing, because the two facts it is
+    asked for (which roster, and whether the voice was drawn per clip or per document)
+    are exactly what a wrong pick would get wrong.
+    """
+    path = Path(audio_dir) / PROVENANCE_FILENAME
+    try:
+        doc = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    entries = [v for v in doc.values() if isinstance(v, dict)]
+    if not entries:
+        return None
+    shape = {(tuple(e.get("voices") or ()), e.get("mode"), e.get("group_field"))
+             for e in entries}
+    return entries[0] if len(shape) == 1 else None

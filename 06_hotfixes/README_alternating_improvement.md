@@ -410,6 +410,56 @@ now regenerate them in full. Stage 05 applies the same guard when it generates a
 the first place
 (`--max-audio-seconds`), where a truncated clip is not written at all so a resume retries it.
 
+### Another reader for a clip no draw could fix (`VOICE_SWAP`)
+
+A clip that loses all `N_IMPROV` draws is usually not an unlucky seed, it is a text its own
+voice cannot read: a number its accent says in Spanish, a Latin term it stumbles on every
+time. v1 shipped the original audio and labelled it `exhausted`. With `VOICE_SWAP=1` (the
+default) the pass instead hands that clip to **another voice of the roster its audio was
+generated with** and gives it one more round of draws, with the cfg_alpha ladder starting
+over from the top.
+
+How it picks the new voice is the same mechanism that assigned the old one, so there is no
+second algorithm to keep in step: `utils/voice_assignment.py::swap_voice` re-draws from the
+hash with the current voice added to the retired list for that one call, which is uniform
+over the survivors and gives the same answer on a re-run. It also prefers a voice **not
+already reading that term**, so a term that lands twice in the corpus keeps two accents;
+that preference is dropped rather than refusing to swap when every voice is already on the
+term. The index of voices-per-term costs nothing: the `needs_work` hook already visits every
+row of the manifest before any worker starts, including the rows this pass will not touch,
+so it is harvested there.
+
+Three properties worth knowing:
+
+* **Only term stages swap.** `01_dictionnary`, `02_drugs` and `07_acronyms` assign a voice
+  per clip, so another reader is just another reader. `03_PARHAF` and `04_PARROT` assign one
+  reader per document, and swapping one clip would break that single-reader property. The
+  pass does not carry a stage list for this: it reads `mode` out of the
+  `voice_assignment.json` beside the audio, so the rule follows the audio even if a stage is
+  renamed or a directory is moved.
+* **One swap per clip, ever.** The decision is recorded on the row as
+  `improvement.swap_voice` and the pass refuses to swap a clip that already carries one, so
+  a hard clip cannot wander the roster burning five draws per voice. If the new voice also
+  loses every draw, the clip is `exhausted` with its **original** audio, exactly as in v1.
+* **The original audio is untouched until a draw wins.** The swap only queues the clip back
+  into the TTS half (`pending_tts`), so it travels the normal `pending_tts -> pending_stt`
+  alternation and works the same whether the pass runs in `both` mode or as two separate
+  halves. `voice` on the row is rewritten only when a draw actually ships, because that
+  column has to describe the audio on disk.
+
+One consequence outside this stage: `99_hf_release/01_build_nemo_manifest.py` **re-derives**
+the `voice` column from the assignment hash, which cannot know about a swap, so
+`99_hf_release/03_sync_hotfix_results.py` copies the won voice back over that re-derivation
+(exactly as it already does for `duration` and `cfg_alpha`). Run the sync after the
+improvement run and before building the parquet, or the release will name the voice that
+failed. It also means the distinct-voices-per-term numbers the release README reports change
+once swaps have happened.
+
+`VOICE_SWAP=0` restores the v1 behaviour. The swap is covered by
+`tests/test_voice_swap.py` (the full alternation, what never swaps, and the driver + sync
+chain) and `tests/test_voice_assignment.py` section 7 (the draw itself: never the current
+voice, deterministic, spread within 20 pct over the roster).
+
 ### After a scoring-rule change: `RESCORE=1`
 
 A clip that already carries a transcript is normally judged on its **stored** CER, which
@@ -491,6 +541,11 @@ reads clean **loses its marker** (nothing left to fix, no regeneration spent), a
 still reads bad goes back to `pending_tts` with a refreshed `orig_cer`, which is the number
 a new candidate then has to beat. The second command is a plain alternating run: it drafts
 for that queue and judges the results, ending in `improved` or a fresh `exhausted`.
+
+A reopened clip keeps whatever voice swap it already received: the marker travels with the
+row, so the retry draws with the swapped voice and does not spend a second swap. One that
+was exhausted before `VOICE_SWAP` existed carries no marker, so it draws with its original
+voice and can then swap like any other clip.
 
 It is deliberately narrower than `--force`: the clips that passed and the ones already
 improved are left alone, so a retry costs the weak tail (173 clips after the 0.08 / 0.12

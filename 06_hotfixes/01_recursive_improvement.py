@@ -237,6 +237,7 @@ This file was written with Claude Code.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import importlib.util
 import json
@@ -321,6 +322,11 @@ from cfg_sidecar import (  # noqa: E402
     cfg_alpha_for_clip,
     ladder_cfg_alpha,
 )
+# Who reads which clip is decided in one place for the whole repo (stage 05 at synthesis
+# time, stage 99 at release time). This stage only needs the two things that place can
+# tell it: the roster a directory of audio was generated with, and which OTHER voice to
+# hand a clip whose own voice could not read it (see `swap_voice_for`).
+import voice_assignment as _voices  # noqa: E402
 
 
 # How many independent STT readings a bad-CER clip gets before its CER is trusted: the
@@ -428,6 +434,130 @@ def scores_to_state(scores: Scores) -> dict:
     """``scores_from_state``'s inverse, spread into an ``improvement`` marker."""
     return {"orig_cer": scores.cer, "orig_tail": scores.tail,
             "orig_window": scores.window, "orig_bad_run": scores.bad_run}
+
+
+def set_improvement(row: dict, status: str, orig: Scores, **extra) -> dict:
+    """Write ``row['improvement']``, carrying over the marker a state hop must not drop.
+
+    Every state the clip passes through (pending_tts, pending_stt, exhausted, improved)
+    replaces the whole marker, which is what keeps a stale field from a previous round
+    out of the next one. ``swap_voice`` is the one field that has to survive that
+    replacement: the stt pass decides the swap, the tts pass two steps later is what
+    draws with it (`voice_for_row`), and the pending_stt hop in between would otherwise
+    lose it and silently redraw with the voice that already failed.
+    """
+    state = {"status": status, **scores_to_state(orig), **extra}
+    swap = (row.get("improvement") or {}).get("swap_voice")
+    if swap and "swap_voice" not in state:
+        state["swap_voice"] = swap
+    row["improvement"] = state
+    return state
+
+
+def voice_for_redraw(row: dict) -> str | None:
+    """The voice a redraw of this clip must use: its swap voice once one was decided,
+    else the voice that generated it. None on a v1 (single-voice) manifest, where the
+    request simply carries ``--tts-voice`` as before. Named apart from
+    `voice_assignment.voice_for_row`, which answers the different question of which
+    voice a row was ASSIGNED at synthesis time."""
+    return (row.get("improvement") or {}).get("swap_voice") or row.get("voice")
+
+
+@functools.lru_cache(maxsize=None)
+def _swap_roster(audio_dir: str) -> tuple[tuple[str, ...], str] | None:
+    """``(roster, mode)`` for one audio directory, from the ``voice_assignment.json``
+    stage 05 left beside the clips, or None when that file cannot answer.
+
+    Cached per directory (five of them for the whole corpus, against 602k rows) and
+    logged once per directory, so a run says exactly once why a subset will or will not
+    swap voices. Called from worker threads; `lru_cache` only ever recomputes an
+    idempotent read, so a race costs a duplicate log line at worst.
+    """
+    entry = _voices.read_dir_provenance(audio_dir)
+    if entry is None:
+        logger.info(
+            f"{audio_dir}: no usable {_voices.PROVENANCE_FILENAME} (v1 audio, or two "
+            f"stages generated here with different rosters), so no voice swap: an "
+            f"exhausted clip keeps its original audio")
+        return None
+    roster = tuple(entry.get("voices") or ())
+    mode = str(entry.get("mode") or "")
+    if not roster or mode not in _voices.MODES:
+        logger.info(f"{audio_dir}: generated in {mode or 'single'} mode "
+                    f"({len(roster)} voice(s)), so no voice swap here")
+        return None
+    logger.info(f"{audio_dir}: {len(roster)} voice(s), {mode} mode, "
+                f"voice swap {'ON' if mode == 'row' else 'OFF (one reader per document)'}")
+    return roster, mode
+
+
+def swap_voice_for(row: dict, audio_path: Path, cfg: SimpleNamespace) -> str | None:
+    """Another voice to redraw this clip with after every draw failed, or None.
+
+    A clip that fails `--n-improv` draws is a text its own voice cannot read: the draws
+    differ only by noise seed and guidance, so a sixth one of the same kind buys little.
+    A different voice is a genuinely different draw, and it is the one lever left before
+    keeping the known-bad original.
+
+    None, and the clip exhausts as it did in v1, when:
+
+    * ``--no-voice-swap``;
+    * the clip already used its swap (one per clip: `row['improvement']['swap_voice']`),
+      so a clip cannot wander the roster for ever;
+    * the row carries no ``voice`` (v1 single-voice audio);
+    * the audio was generated in ``group`` mode, i.e. one voice per DOCUMENT
+      (`03_PARHAF`, `04_PARROT`). Swapping one chunk there would make a report change
+      reader mid-way, which is a worse defect than the one being repaired. Read from
+      what stage 05 recorded for that directory rather than from a list of stage names
+      here, so the rule follows the audio.
+
+    Otherwise the swap is drawn by `voice_assignment.swap_voice` over the roster THAT
+    directory was generated with, avoiding the voices already reading the same term
+    (`cfg.term_voices`, harvested in `make_hooks`) so the term keeps its accent spread.
+    """
+    if not getattr(cfg, "voice_swap", False):
+        return None
+    imp = row.get("improvement") or {}
+    if imp.get("swap_voice"):
+        return None
+    current = row.get("voice")
+    if not current:
+        return None
+    roster = _swap_roster(str(audio_path.parent))
+    if roster is None or roster[1] != "row":
+        return None
+    avoid = (getattr(cfg, "term_voices", None) or {}).get(row.get("group_id")) or ()
+    # The clip STEM, not the key synthesis hashed: the swap is recorded on the row (and
+    # carried into the manifests by 99_hf_release/03_sync_hotfix_results.py), never
+    # re-derived, so it only has to be stable per clip. See `swap_voice`.
+    return _voices.swap_voice(audio_path.stem, current, voices=roster[0], avoid=avoid)
+
+
+def finish_or_swap(row: dict, result: dict, orig: Scores, imp: dict,
+                   cfg: SimpleNamespace, stats: dict) -> str:
+    """Resolve a clip no draw could repair: one more round with ANOTHER voice when the
+    clip is entitled to one (`swap_voice_for`), else exhausted as in v1.
+
+    Returns the status written, so a caller can tell the two apart. Either way the
+    clip's audio is untouched: a swap only queues more draws, and the original still
+    ships if those fail too. Every state is written through `set_improvement`, so the
+    swap marker survives the pending_stt hop in between.
+    """
+    attempts = imp.get("attempts", 0)
+    audio_path = result.get("audio_path")
+    swap = swap_voice_for(row, Path(audio_path), cfg) if audio_path else None
+    if swap is None:
+        set_improvement(row, "exhausted", orig, attempts=attempts)
+        stats["exhausted"] += 1
+        return "exhausted"
+    set_improvement(row, "pending_tts", orig, swap_voice=swap)
+    stats["swapped"] += 1
+    logger.info(
+        f"SWAP {Path(audio_path).name}: {row.get('voice')} -> {swap} after "
+        f"{attempts} attempt(s) left it at {_fmt_scores(orig)}; queued for one more "
+        f"round of draws with the new voice"
+    )
+    return "pending_tts"
 
 
 def is_bad(scores: Scores, cfg: SimpleNamespace) -> bool:
@@ -1147,7 +1277,12 @@ def combined_worker(pos: int, rec: dict, cfg: SimpleNamespace, model_key: str, i
     # mode), "drafted" (a tts pass persisted candidates), "picked" (an stt pass scored
     # candidates and chose a winner), or None (nothing to do this pass).
     out = {"pos": pos, "entry": entry, "improvement": None, "scores": Scores(),
-           "audio_path": None, "action": None, "drafts": None}
+           "audio_path": None, "action": None, "drafts": None,
+           # The voice every draw of this clip uses this pass: its swap voice once a
+           # prior pass decided one, else the voice that generated it. Carried on the
+           # result (not re-derived) so apply_result records the voice the audio it
+           # promotes was actually read by.
+           "voice": voice_for_redraw(rec)}
 
     audio_path = _stt.resolve_audio(rec, input_file, cfg.audio_key, cfg.audio_root)
     if audio_path is None:
@@ -1171,7 +1306,7 @@ def combined_worker(pos: int, rec: dict, cfg: SimpleNamespace, model_key: str, i
             out["scores"] = scores_from_state(imp_state)
             out["improvement"] = generate_drafts(
                 pos, ident, audio_path, text, out["scores"], cfg,
-                voice=rec.get("voice"),
+                voice=out["voice"],
             )
         return out
 
@@ -1339,7 +1474,7 @@ def combined_worker(pos: int, rec: dict, cfg: SimpleNamespace, model_key: str, i
             and cfg.mode == "both" and not cfg.rescore_only):
         out["improvement"] = run_regeneration(
             pos, ident, audio_path, text, source, target, orig, cfg,
-            voice=rec.get("voice"))
+            voice=out["voice"])
     return out
 
 
@@ -1414,6 +1549,17 @@ def _apply_improvement(
     # was omitted); clips that keep their original audio get --original-cfg-alpha in
     # apply_result instead.
     row["cfg_alpha"] = imp.get("cfg_alpha")
+    # The voice that actually read the audio now on disk. It only ever changes on a
+    # voice swap (see `swap_voice_for`), and recording it here is what keeps the
+    # dataset honest: the manifest's `voice` column is RE-DERIVED from the assignment
+    # hash every time 99_hf_release/01_build_nemo_manifest.py runs, so a swapped clip
+    # is correctly labelled only because 03_sync_hotfix_results.py copies this value
+    # back over that re-derivation, exactly as it does for `duration` and `cfg_alpha`.
+    won_voice = result.get("voice")
+    if won_voice and won_voice != row.get("voice"):
+        logger.info(f"VOICE {audio_path.name}: {row.get('voice')} -> {won_voice} "
+                    f"(the swapped voice read it well enough to ship)")
+        row["voice"] = won_voice
     row["improvement"] = {
         "status": "improved",
         "attempts": imp["attempts"],
@@ -1443,6 +1589,9 @@ def _apply_improvement(
         "audio_path": result["audio_path"],
         "index": index,
         "term": term,
+        # Which voice read the promoted draw, so the audit trail says whether a win
+        # came from another seed or from another reader.
+        "voice": row.get("voice"),
         "orig_cer": orig_cer,
         "new_cer": new.cer,
         "cer_delta": cer_delta,
@@ -1655,6 +1804,11 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
     # is how the driver knows an stt-only (or tts-only) loop has run dry: waiting for
     # the OTHER mode is not a reason to keep spinning.
     stats = {"improved": 0, "exhausted": 0, "deterministic": 0, "queued": 0, "done": 0,
+             # swapped = clips handed to ANOTHER voice after every draw of their own
+             # failed (plan item 4). They are not resolved: each is back in the
+             # pending_tts queue for one more round, and lands on improved or
+             # exhausted after it.
+             "swapped": 0,
              # rescored = scored from the transcript already on the row (no STT request);
              # transcribed = a real server round trip. rescored_bad is the subset that now
              # reads bad under the current rules, i.e. what a rescore actually surfaced.
@@ -1696,16 +1850,15 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
         if action == "drafted":
             drafts = imp.get("drafts") or []
             if drafts:
-                row["improvement"] = {"status": "pending_stt", **scores_to_state(orig),
-                                      "attempts": imp.get("attempts", 0), "drafts": drafts}
+                set_improvement(row, "pending_stt", orig,
+                                attempts=imp.get("attempts", 0), drafts=drafts)
             else:
-                # No usable candidate (unreadable clip / every draw a duplicate): give
-                # up on this clip so the alternation can still converge.
+                # No usable candidate (unreadable clip / every draw a duplicate): try
+                # another voice if the clip has one coming, else give up on it so the
+                # alternation can still converge.
                 if imp.get("all_duplicates"):
                     stats["deterministic"] += 1
-                stats["exhausted"] += 1
-                row["improvement"] = {"status": "exhausted", **scores_to_state(orig),
-                                      "attempts": imp.get("attempts", 0)}
+                finish_or_swap(row, result, orig, imp, cfg, stats)
             return result["entry"]
 
         # stt pass: the candidate set is short of what --n-improv asks for (see
@@ -1713,7 +1866,7 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
         # full rather than being judged on a partial set. The leftover sidecars stay
         # where they are: the next tts pass clears them before regenerating.
         if action == "requeue_tts":
-            row["improvement"] = {"status": "pending_tts", **scores_to_state(orig)}
+            set_improvement(row, "pending_tts", orig)
             stats["incomplete_drafts"] += 1
             return result["entry"]
 
@@ -1731,9 +1884,7 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
                 _apply_improvement(row, result, imp, model_key, improved_records, cfg)
                 stats["improved"] += 1
             else:
-                stats["exhausted"] += 1
-                row["improvement"] = {"status": "exhausted", **scores_to_state(orig),
-                                      "attempts": imp.get("attempts", 0)}
+                finish_or_swap(row, result, orig, imp, cfg, stats)
             for d in result.get("drafts") or []:
                 Path(d["path"]).unlink(missing_ok=True)
             return result["entry"]
@@ -1782,7 +1933,7 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
                 # Back to the queue rather than left resolved, so the next tts pass draws
                 # for it again. The attempt count starts over: what matters downstream is
                 # the score a new candidate has to beat, and that is refreshed here.
-                row["improvement"] = {"status": "pending_tts", **scores_to_state(orig)}
+                set_improvement(row, "pending_tts", orig)
                 stats["requeued"] += 1
             else:
                 row.pop("improvement", None)
@@ -1801,15 +1952,13 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
                 # both mode tried and exhausted inline.
                 if imp.get("all_duplicates"):
                     stats["deterministic"] += 1
-                stats["exhausted"] += 1
                 if tts_bar is not None:
-                    tts_bar.total += 1   # bad clip that could not be repaired: total only
+                    tts_bar.total += 1   # bad clip not repaired (yet): total only
                     tts_bar.refresh()
-                row["improvement"] = {"status": "exhausted", **scores_to_state(orig),
-                                      "attempts": imp.get("attempts", 0)}
+                finish_or_swap(row, result, orig, imp, cfg, stats)
             else:
                 # stt mode: flag the bad clip for the next tts pass to regenerate.
-                row["improvement"] = {"status": "pending_tts", **scores_to_state(orig)}
+                set_improvement(row, "pending_tts", orig)
         elif (cfg.retry_exhausted and not is_bad(orig, cfg)
               and (row.get("improvement") or {}).get("status") == "exhausted"):
             # Reopened, re-read, and it clears the gates now (a scoring change, or a
@@ -1944,9 +2093,30 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
             window, bad_run = best_window_metrics(text, source, target)
         return is_bad(Scores(cer, tail, window, bad_run), cfg)
 
+    # {group_id: {voice, ...}} for the voice swap, or None when no swap can happen
+    # anyway (--no-voice-swap, or a caller whose namespace predates the option): then
+    # the harvest below is skipped entirely rather than paying for 602k set inserts.
+    term_voices = (cfg.term_voices if getattr(cfg, "voice_swap", False)
+                   and getattr(cfg, "term_voices", None) is not None else None)
+
     def counting_needs_work(out_rec):
         """Tally what this pass picks up, so main can tell a pass that found nothing
-        to do from one that did work (see the `queued` / `done` note above)."""
+        to do from one that did work (see the `queued` / `done` note above).
+
+        Also harvests which voices read each term, which is where a voice swap gets its
+        accent spread from (`swap_voice_for`). This is the one hook called on EVERY row
+        of the manifest, and process_file calls it during the scan that happens before
+        any worker starts, so the index is complete and read-only by the time a thread
+        asks for it, and no pass pays for a second parse of 602k rows to learn what
+        this scan already sees. Rows this pass will not touch are harvested too, on
+        purpose: the other variants of a flagged term are usually not in the flagged
+        slice, and they are exactly the voices a swap has to avoid.
+        """
+        if term_voices is not None:
+            voice = out_rec.get("voice")
+            group = out_rec.get("group_id")
+            if voice and group is not None:
+                term_voices.setdefault(group, set()).add(voice)
         if needs_work(out_rec):
             stats["queued"] += 1
             return True
@@ -2066,6 +2236,18 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
                    "(default on, ~500 bytes per 15s draw). It is what lets the code "
                    "gate's thresholds, calibrated on 30 takes, be re-decided later "
                    "without regenerating anything. No effect without --code-dump-dir.")
+@click.option("--voice-swap/--no-voice-swap", default=True,
+              help="ON by default. When every draw of a clip fails, hand the clip to "
+                   "ANOTHER voice from the roster its audio was generated with and give "
+                   "it one more round of draws, instead of keeping the known-bad "
+                   "original. Only for audio generated one voice per CLIP: the roster "
+                   "and the mode are read from the voice_assignment.json beside the "
+                   "clips, so 03_PARHAF / 04_PARROT (one voice per DOCUMENT) are left "
+                   "alone, since a swapped chunk would change reader mid-report. One "
+                   "swap per clip, drawn deterministically and avoiding the voices "
+                   "already reading the same term, and the new voice is written to the "
+                   "row's `voice` only if its draw actually wins (99_hf_release/"
+                   "03_sync_hotfix_results.py carries it into the manifests).")
 @click.option("--refresh-duration/--no-refresh-duration", default=True, help="Re-probe and update each row's `duration` when its audio is replaced (keeps stage-99 splits correct).")
 @click.option("--force", is_flag=True, help="Re-process clips already marked improved/exhausted in a previous run.")
 @click.option("--retry-exhausted", is_flag=True, help="Give the clips marked `exhausted` (flagged bad, no draw good enough) another run: they are treated as if they carried no marker, so a rescore can clear them and an stt pass can send the ones that still read bad back through the tts queue. Unlike --force this leaves the clips that already passed and the ones already improved alone, so a retry costs only the known-weak tail (173 clips after the 0.08 sweep) instead of re-transcribing the corpus. Use it after a scoring-rule change or with a different seed / cfg_alpha ladder.")
@@ -2089,7 +2271,7 @@ def main(
     window_cer_threshold, bad_run_threshold, min_improvement,
     start_seed, speed_jitter,
     cfg_alpha_start, cfg_alpha_step, cfg_alpha_floor, original_cfg_alpha,
-    auto_token_budget, code_dump_dir, store_semantic_codes, refresh_duration,
+    auto_token_budget, code_dump_dir, store_semantic_codes, voice_swap, refresh_duration,
     force, retry_exhausted,
     rescore, rescore_only,
     stt_parallel, tts_parallel, shuffle, flush_every, flush_interval, limit,
@@ -2144,6 +2326,12 @@ def main(
         auto_token_budget=auto_token_budget,
         code_dump_dir=code_dump_dir,
         store_semantic_codes=store_semantic_codes,
+        # Voice swap on exhaustion (see swap_voice_for). `term_voices` is filled during
+        # each file's scan, by the needs_work hook, and is only read afterwards: one
+        # dict per pass, {group_id: {voice, ...}}, so a swap can avoid the voices
+        # already reading the same term.
+        voice_swap=voice_swap,
+        term_voices={},
         refresh_duration=refresh_duration,
         force=force,
         retry_exhausted=retry_exhausted,
@@ -2281,6 +2469,15 @@ def main(
                 f"{out_file.name}: {stats['incomplete_drafts']} clip(s) went back to the tts "
                 f"pass, their candidate set was short of --n-improv ({cfg.n_improv}); they are "
                 f"scored once it has been made in full"
+            )
+        # A swapped clip is neither improved nor exhausted yet: it went back to the
+        # queue with another voice, so it is reported on its own line rather than
+        # inside a total that says resolved.
+        if stats["swapped"]:
+            logger.info(
+                f"{out_file.name}: {stats['swapped']} clip(s) were handed to another "
+                f"voice after every draw of their own failed; they are back in the tts "
+                f"queue for one more round (grep SWAP for the per-clip lines)"
             )
         logger.success(
             f"{out_file.name}: {stats['improved']} improved, {stats['exhausted']} exhausted; "

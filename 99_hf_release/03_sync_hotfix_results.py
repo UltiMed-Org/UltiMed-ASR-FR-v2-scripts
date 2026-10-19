@@ -30,12 +30,21 @@ audio path, writes into every manifest row:
     n_stt_check       how many readings the clip needed (null unless it was rechecked)
     stt_model         which model produced them, spelled out rather than an API alias
     cfg_alpha         TTS guidance the shipped audio was drawn at
+    voice             the voice that actually read the shipped audio (see below)
     regenerated       true if stage 06 replaced this clip
     qc_status         improved / exhausted / original (see below)
 
 ``qc_status`` is ``improved`` when the clip was flagged and a better draw replaced it,
 ``exhausted`` when it was flagged and no draw was good enough (the ORIGINAL audio ships,
 so these are the known-weak clips), and ``original`` when it never tripped a gate.
+
+``voice`` is the one column here that stage 06 can CHANGE rather than measure: a term clip
+no draw of its own voice could fix is redrawn by another voice of the roster
+(``01_recursive_improvement.py --voice-swap``), and ``01_build_nemo_manifest.py``
+RE-DERIVES that column from the assignment hash, which cannot know about the swap. So
+without this copy every manifest rebuild would relabel a swapped clip with the voice that
+never read it. Unlike the QC fields it is written only when stage 06 has one: a missing
+value means "stage 06 does not know" (a v1 row), not "no voice".
 
 Idempotent: re-run it after a rescore or another improvement run and it simply re-copies
 the current values. It refuses to run while a stage-06 pass is alive, since that pass
@@ -132,6 +141,7 @@ def load_hotfix(root: Path, stt_model: str) -> dict[str, dict]:
                 "n_stt_check": reading.get("n_stt_check"),
                 "stt_model": stt_model,
                 "cfg_alpha": row.get("cfg_alpha"),
+                "voice": row.get("voice"),
                 "regenerated": status == "improved",
                 # pending_* means a run was interrupted mid-flight: the clip is whatever
                 # is on disk right now, which is the original, so it ships as one.
@@ -154,10 +164,10 @@ def load_hotfix(root: Path, stt_model: str) -> dict[str, dict]:
     return index
 
 
-def sync_manifest(path: Path, hotfix: dict[str, dict], apply: bool) -> tuple[int, int, int, int]:
-    """Returns (rows, matched, duration changes, field changes) for one manifest."""
+def sync_manifest(path: Path, hotfix: dict[str, dict], apply: bool) -> tuple[int, int, int, int, int]:
+    """Returns (rows, matched, duration changes, voice changes, field changes) for one manifest."""
     rows = read_jsonl(path)
-    matched = redur = changed = 0
+    matched = redur = revoice = changed = 0
     for row in rows:
         rel = row.get("audio_filepath")
         if rel is None:
@@ -171,6 +181,12 @@ def sync_manifest(path: Path, hotfix: dict[str, dict], apply: bool) -> tuple[int
             row["duration"] = qc["duration"]
             redur += 1
             touched = True
+        if qc["voice"] and row.get("voice") != qc["voice"]:
+            # Conditional, unlike QC_FIELDS: a row stage 06 has no voice for keeps the one
+            # the manifest derived, instead of being blanked. See the module docstring.
+            row["voice"] = qc["voice"]
+            revoice += 1
+            touched = True
         for key in QC_FIELDS:
             # Written even when the value is null (a clip too short for a tail score, a
             # clip never rechecked), so every row declares the same keys and the parquet
@@ -181,7 +197,7 @@ def sync_manifest(path: Path, hotfix: dict[str, dict], apply: bool) -> tuple[int
         changed += int(touched)
     if apply and changed:
         write_jsonl(path, rows)
-    return len(rows), matched, redur, changed
+    return len(rows), matched, redur, revoice, changed
 
 
 @click.command()
@@ -217,14 +233,16 @@ def main(manifests: tuple[Path, ...], root: str, stt_model: str, apply: bool) ->
     for path in targets:
         if not path.is_file() or path.name.startswith("."):
             continue
-        rows, matched, redur, changed = sync_manifest(path, hotfix, apply)
+        rows, matched, redur, revoice, changed = sync_manifest(path, hotfix, apply)
         total_rows += rows
         total_matched += matched
         total_changed += changed
         gap = rows - matched
         logger.info(
             f"{path.relative_to(root_path)}: {rows} rows, {matched} matched, "
-            f"{redur} duration(s) refreshed, {changed} row(s) updated"
+            f"{redur} duration(s) refreshed, "
+            + (f"{revoice} voice(s) swapped, " if revoice else "")
+            + f"{changed} row(s) updated"
             + (f", {gap} WITHOUT a stage-06 score" if gap else "")
         )
     logger.info(f"total: {total_matched}/{total_rows} rows matched, {total_changed} updated")

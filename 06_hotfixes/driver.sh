@@ -90,6 +90,14 @@
 #                       utils/frame_budget.py. 0 falls back to MAX_AUDIO_SECONDS alone,
 #                       which only catches the worst runaways, and only after paying ~6
 #                       minutes of GPU for each.
+#   VOICE_SWAP          1 (default) gives a clip that lost all MAX_ATTEMPTS draws one more
+#                       round of draws read by ANOTHER voice of its roster, instead of
+#                       giving up on it. Only term stages qualify (one voice per clip);
+#                       a document stage assigns one reader per document, so swapping
+#                       there would break the single-reader property and the pass skips
+#                       it on its own, reading the mode from the voice_assignment.json
+#                       beside the audio. One swap per clip, ever. 0 keeps v1 behaviour
+#                       (the original audio ships, labelled `exhausted`).
 #   CODE_DUMP_DIR       HOST path of the directory the TTS server writes code dumps into
 #                       (the host side of $VOXTRAL_CODE_DUMP_DIR in the CrispASR compose,
 #                       container /cache/cloning/dumps). Empty by default. Setting it
@@ -260,6 +268,14 @@ case "${AUTO_TOKEN_BUDGET:-1}" in
   *) echo "driver.sh: AUTO_TOKEN_BUDGET must be 0 or 1 (got '${AUTO_TOKEN_BUDGET}')" >&2
      exit 1 ;;
 esac
+# Same `case` hardening, same reason: `(( VOICE_SWAP ))` on `true` would read as an unset
+# NAME and quietly turn the swap off.
+case "${VOICE_SWAP:-1}" in
+  1|true|TRUE|yes|YES|y|Y) VOICE_SWAP=1 ;;
+  0|false|FALSE|no|NO|n|N) VOICE_SWAP=0 ;;
+  *) echo "driver.sh: VOICE_SWAP must be 0 or 1 (got '${VOICE_SWAP}')" >&2
+     exit 1 ;;
+esac
 CODE_DUMP_DIR="${CODE_DUMP_DIR:-}"
 GUARD_ARGS=()
 if (( AUTO_TOKEN_BUDGET )); then
@@ -267,6 +283,12 @@ if (( AUTO_TOKEN_BUDGET )); then
 else
   GUARD_ARGS+=(--no-auto-token-budget)
   echo "driver: per-clip frame budget OFF, draws are only bounded by the server's cap"
+fi
+if (( VOICE_SWAP )); then
+  GUARD_ARGS+=(--voice-swap)
+else
+  GUARD_ARGS+=(--no-voice-swap)
+  echo "driver: voice swap OFF, a clip that loses every draw keeps its original audio"
 fi
 if [[ -n "${CODE_DUMP_DIR}" ]]; then
   GUARD_ARGS+=(--code-dump-dir "${CODE_DUMP_DIR}")
