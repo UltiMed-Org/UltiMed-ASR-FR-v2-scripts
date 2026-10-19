@@ -293,8 +293,15 @@ def test_the_chain_outside_the_pass() -> None:
     driver = (root / "06_hotfixes" / "driver.sh").read_text(encoding="utf-8")
     for flag in ("--voice-swap", "--no-voice-swap"):
         check(f"driver.sh can pass {flag}", flag in driver, "absent")
-    check("VOICE_SWAP is hardened like AUTO_TOKEN_BUDGET, not read as a bare arithmetic "
-          "name", 'case "${VOICE_SWAP:-1}" in' in driver, "no case guard")
+    # `(( VOICE_SWAP ))` on a value like `true` reads `true` as an unset NAME, evaluates
+    # to 0, and turns the swap OFF when the operator just turned it on. Every 0/1 flag of
+    # the driver goes through the `flag` helper for that reason, which also refuses a
+    # value it does not recognise instead of guessing.
+    check("VOICE_SWAP is normalised, not read as a bare arithmetic name",
+          "flag VOICE_SWAP 1" in driver, "not routed through flag()")
+    check("and the helper refuses anything that is not a 0/1 spelling",
+          'must be 0 or 1' in driver and "1|true|TRUE|yes|YES|y|Y) _dst=1" in driver,
+          "the helper accepts junk")
     check("and the flag rides GUARD_ARGS onto the command line",
           'GUARD_ARGS[@]+"${GUARD_ARGS[@]}"' in driver, "absent")
     # The manifest's voice column is RE-DERIVED from the assignment hash on every rebuild

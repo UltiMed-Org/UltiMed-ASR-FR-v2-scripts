@@ -26,10 +26,21 @@
 # the variable names my other tooling already had for that server. Point them at
 # any OpenAI-compatible /v1/audio/transcriptions and it works the same.
 #   CRISPASR_COMPOSE       your CrispASR docker-compose.yml
-#   WDOC_WHISPER_ENDPOINT  STT base URL (/v1/audio/transcriptions is appended)
-#   WDOC_WHISPER_API_KEY   STT bearer token
-#   WDOC_WHISPER_MODEL     STT model name (match how the dataset was transcribed so
-#                          resume reuses the stored transcripts)
+#   WDOC_WHISPER_ENDPOINT  STT base URL (/v1/audio/transcriptions is appended). Defaults
+#                          to http://127.0.0.1:8002, the local CrispASR ASR stack
+#                          switch_server.sh brings up, because the remote endpoint v1 ran
+#                          against now answers 502.
+#   WDOC_WHISPER_API_KEY   STT bearer token (falls back to $CRISPASR_API_KEY). The ASR
+#                          service sets CRISPASR_API_KEYS, so a local run needs one too:
+#                          only /health is public.
+#   STT_MODEL              STT model name, and the KEY the readings are stored under on
+#                          each row, which is what keeps the v2 plan's two judges apart:
+#                          T1 (turbo) and T2 (large-v3) must land in different keys or the
+#                          second opinion overwrites the first. Defaults to
+#                          whisper.cpp/ggml-large-v3-turbo, what the local endpoint
+#                          reports loading. WDOC_WHISPER_MODEL is the older name for the
+#                          same thing and still works. Match how a dataset was already
+#                          transcribed or resume re-transcribes it from scratch.
 # Optional overrides (defaults match the manual runs):
 #   TARGET_USER (defaults to whoever ran sudo) OUTPUT AUDIO_ROOT N_IMPROV
 #   CER_THRESHOLD STT_PARALLEL TTS_PARALLEL TTS_VOICE GPU_POWER_LIMIT
@@ -129,6 +140,31 @@
 #             categories are passed through unchanged and convergence is judged
 #             over the selected categories only, so the loop stops when just
 #             those subsets are done. Empty (default) = the whole dataset.
+#   Optional pre- and post-steps, so one command can do the whole phase (all default OFF;
+#   each is a single call to a script that already exists, run as ${TARGET_USER} at the
+#   same nice level as a pass):
+#   REFRESH_MANIFESTS=1  rebuild the NeMo manifests from the generated audio before any
+#                       pass, which is what picks up the durations of regenerated clips
+#                       (99_hf_release/01_build_nemo_manifest.py --all, then
+#                       02_combine_nemo_manifests.py). Needs PIN_SPLITS_FROM.
+#   PIN_SPLITS_FROM     manifest root of the PREVIOUS generation (v1's NeMO_files/),
+#                       passed to both builders as --pin-splits-from. REQUIRED by
+#                       REFRESH_MANIFESTS and refused when empty, not defaulted: the
+#                       splitter is duration-greedy, so an unpinned rebuild reshuffles
+#                       train/val/test and leaks the old test set into the new train set,
+#                       which silently invalidates every v1-vs-v2 comparison. The path is
+#                       machine-specific, so only you can supply it.
+#   ACOUSTIC_SCAN=1     run the CPU-only acoustic loop scan first
+#                       (05_generate_audio/04_qc_acoustic_loops.py), which scores every
+#                       clip for self-similarity and writes qc_acoustic_sidecar.jsonl
+#                       beside the audio. Free (no GPU, no server), and its sidecar is a
+#                       STEMS_FROM file, so a cheap scan can aim an expensive pass.
+#   ACOUSTIC_WORKERS    worker processes for that scan (default 4).
+#   SYNC_RESULTS=1      after every dataset has converged, carry stage 06's QC columns
+#                       (and a swapped clip's voice) back into the release manifests
+#                       (99_hf_release/03_sync_hotfix_results.py --apply --stt-key
+#                       $STT_MODEL). Without it the manifests still describe the audio as
+#                       it was before this run.
 #   STEMS_FROM space-separated list of files naming the only CLIPS to work on, each
 #             either a QC sidecar jsonl (its flagged rows) or a plain list of stems,
 #             one per line. Same pass-through and convergence semantics as CATEGORY,
@@ -171,7 +207,34 @@ if [[ -z "${TARGET_USER}" || "${TARGET_USER}" == root ]]; then
 fi
 
 : "${CRISPASR_COMPOSE:?set CRISPASR_COMPOSE (sudo -E to carry it, or put it in improve.env)}"
-: "${WDOC_WHISPER_ENDPOINT:?set WDOC_WHISPER_ENDPOINT}"
+# v2 default: the local CrispASR ASR stack switch_server.sh brings up on :8002 (replicas
+# behind the Caddy load balancer). v1 ran against a remote server, which now answers 502,
+# so the local one is the judge and the variable only has to be set to use another.
+WDOC_WHISPER_ENDPOINT="${WDOC_WHISPER_ENDPOINT:-http://127.0.0.1:8002}"
+# That service sets CRISPASR_API_KEYS, so /v1/audio/transcriptions needs a bearer token
+# (only /health is public). $CRISPASR_API_KEY is the name the CrispASR clients already
+# use, so accept it rather than making you set the same secret twice.
+WDOC_WHISPER_API_KEY="${WDOC_WHISPER_API_KEY:-${CRISPASR_API_KEY:-}}"
+if [[ -z "${WDOC_WHISPER_API_KEY}" ]]; then
+  echo "driver: no STT token (WDOC_WHISPER_API_KEY / CRISPASR_API_KEY). If the ASR" >&2
+  echo "  service has CRISPASR_API_KEYS set, every transcription will 401." >&2
+fi
+# Both the model name sent to the server and the key the readings are stored under, which
+# is what keeps the plan's two judges on one row: see the header note.
+STT_MODEL="${STT_MODEL:-${WDOC_WHISPER_MODEL:-whisper.cpp/ggml-large-v3-turbo}}"
+# Say which judge is about to score the corpus, because the defaults above are easy to
+# lose: `.env` is sourced with `set -a` BEFORE them, so a stale line there wins silently.
+# A v1 `.env` pins the old remote endpoint (now 502) and WDOC_WHISPER_MODEL=whisper-1,
+# which would file every v2 reading under the v1 key. One line beats a 401 or a 502 per
+# clip, or a key nobody notices until the sync writes nulls.
+echo "driver.sh: judge ${STT_MODEL} at ${WDOC_WHISPER_ENDPOINT}" \
+     "(readings stored under the key '${STT_MODEL}')"
+case "${WDOC_WHISPER_ENDPOINT}" in
+  *127.0.0.1*|*localhost*) ;;
+  *) echo "driver: that endpoint is not local. Deliberate? The v2 judge is the CrispASR" >&2
+     echo "  stack switch_server.sh starts on :8002; a WDOC_WHISPER_ENDPOINT left over in" >&2
+     echo "  06_hotfixes/.env overrides the default and v1's remote host now answers 502." >&2 ;;
+esac
 
 TARGET_HOME="$(getent passwd "${TARGET_USER}" | cut -d: -f6)"
 # Resolve uv. It lives on ${TARGET_USER}'s PATH (~/.local/bin), not root's, and a
@@ -198,6 +261,35 @@ if [[ -z "${UV_BIN}" ]]; then
 fi
 # PATH forwarded to the passes so uv (and anything it shells out to) resolves.
 USER_PATH="${TARGET_HOME}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# Everything this script runs that is not a container is Python owned by ${TARGET_USER},
+# so it all needs the same four things: drop root, their HOME and PATH, and nice 19. One
+# helper rather than one copy per call site (the passes, the per-dataset report, the pre-
+# and post-steps). `nice -n 40` because nice takes an INCREMENT and sudo may hand us a
+# negative priority; the result clamps at 19. See the long note in run_pass.
+as_user() {
+  runuser -u "${TARGET_USER}" -- \
+    env HOME="${TARGET_HOME}" PATH="${USER_PATH}" nice -n 40 "$@"
+}
+
+# Normalise one 0/1 env flag in place. There are eight of them, hence a helper rather
+# than eight `case` blocks: under `set -u`, `(( VOICE_SWAP ))` on a value like `true`
+# reads `true` as an unset NAME, evaluates to 0, and turns OFF the very thing the
+# operator just turned on. So every flag goes through here, which accepts the usual
+# spellings, treats empty as the default, and refuses anything else outright.
+#   flag VOICE_SWAP 1          -> $VOICE_SWAP becomes 0 or 1
+#   flag RESCORE 0 RESCORE_ON  -> reads $RESCORE, writes $RESCORE_ON, so the operator's
+#                                own value stays readable in the logs and messages
+flag() {
+  local name="$1" default="$2"
+  local -n _src="${name}" _dst="${3:-$1}"
+  case "${_src:-${default}}" in
+    1|true|TRUE|yes|YES|y|Y) _dst=1 ;;
+    0|false|FALSE|no|NO|n|N) _dst=0 ;;
+    *) echo "driver.sh: ${name} must be 0 or 1 (got '${_src}')" >&2
+       exit 1 ;;
+  esac
+}
+
 echo "driver.sh: uv=${UV_BIN}, running passes as ${TARGET_USER}"
 
 # Raise the GPU power limit once at start (root-only; best-effort, never fatal).
@@ -259,23 +351,8 @@ fi
 # to the code_qc_sidecar.jsonl beside the audio. Empty by default, and harmless against
 # a stock server, which writes no dump: that reads as no opinion, never as a rejection.
 # Same variable name and meaning as 05_generate_audio/generate_v2.sh, on purpose.
-# Spelled out the same way RESCORE is below, and for a sharper reason: under `set -u`,
-# `(( AUTO_TOKEN_BUDGET ))` on a value like `true` reads it as an unset NAME, evaluates
-# to 0, and would turn the budget off while the operator believes they turned it on.
-case "${AUTO_TOKEN_BUDGET:-1}" in
-  1|true|TRUE|yes|YES|y|Y) AUTO_TOKEN_BUDGET=1 ;;
-  0|false|FALSE|no|NO|n|N) AUTO_TOKEN_BUDGET=0 ;;
-  *) echo "driver.sh: AUTO_TOKEN_BUDGET must be 0 or 1 (got '${AUTO_TOKEN_BUDGET}')" >&2
-     exit 1 ;;
-esac
-# Same `case` hardening, same reason: `(( VOICE_SWAP ))` on `true` would read as an unset
-# NAME and quietly turn the swap off.
-case "${VOICE_SWAP:-1}" in
-  1|true|TRUE|yes|YES|y|Y) VOICE_SWAP=1 ;;
-  0|false|FALSE|no|NO|n|N) VOICE_SWAP=0 ;;
-  *) echo "driver.sh: VOICE_SWAP must be 0 or 1 (got '${VOICE_SWAP}')" >&2
-     exit 1 ;;
-esac
+flag AUTO_TOKEN_BUDGET 1
+flag VOICE_SWAP 1
 CODE_DUMP_DIR="${CODE_DUMP_DIR:-}"
 GUARD_ARGS=()
 if (( AUTO_TOKEN_BUDGET )); then
@@ -297,8 +374,20 @@ fi
 
 MIN_IMPROVEMENT="${MIN_IMPROVEMENT:-0.02}"
 MAX_AUDIO_SECONDS="${MAX_AUDIO_SECONDS:-327.68}"
-STT_PARALLEL="${STT_PARALLEL:-10}"
-TTS_PARALLEL="${TTS_PARALLEL:-2}"
+# v2 defaults, both raised: the judge is now LOCAL (:8002, several CrispASR replicas
+# behind the Caddy load balancer, see switch_server.sh CRISPASR_STT_SCALE) instead of one
+# remote server, and each replica serialises its own requests, so the only way to keep
+# them all busy is to have more requests than replicas in flight. 20 against 6 replicas
+# leaves a queue of ~3 per replica, enough that no replica idles between clips without
+# making any single clip wait minutes.
+STT_PARALLEL="${STT_PARALLEL:-20}"
+# Measured, not guessed: stage 05 timed the same server on the same clips on 2026-10-14
+# and got 3,860 clips/h at 16 in flight against 4,610 to 4,960 at 32. On a 12,000-clip
+# queue at 5 draws each (60,000 synthesis calls) that is ~13 h at 32 against roughly 10
+# days at v1's 2, which only existed because that server was shared with interactive
+# work. Do NOT raise this above 32: it is the largest captured CUDA graph, past which
+# vLLM falls back to the eager path.
+TTS_PARALLEL="${TTS_PARALLEL:-32}"
 # FALLBACK voice only: a v2 manifest row carries its own `voice` (one of the ten),
 # and the clip is regenerated with that one, because the voice column is re-derived
 # from the group key and cannot follow a regeneration. This value is used for rows
@@ -354,11 +443,7 @@ fi
 # only, for two reasons: the second pass would recompute scores that are already current,
 # and a pass that re-examines every row always reports work done, which would keep a
 # single-mode (MODE=stt) loop from ever reaching its "ran dry" stop (exit 11).
-case "${RESCORE:-0}" in
-  1|true|TRUE|yes|YES|y|Y) RESCORE_ON=1 ;;
-  0|""|false|FALSE|no|NO|n|N) RESCORE_ON=0 ;;
-  *) echo "driver.sh: RESCORE must be 0 or 1 (got '${RESCORE}')" >&2; exit 1 ;;
-esac
+flag RESCORE 0 RESCORE_ON
 if (( RESCORE_ON )); then
   echo "driver: RESCORE=1, the first stt pass of each dataset re-derives every stored score"
   if [[ "${MODE}" == tts ]]; then
@@ -370,11 +455,7 @@ fi
 # the next dataset. It cannot loop (every pass would re-examine the same rows and always
 # report work done), and it makes no server call at all, so the docker switch is skipped
 # and the pass can run while the TTS server is up.
-case "${RESCORE_ONLY:-0}" in
-  1|true|TRUE|yes|YES|y|Y) RESCORE_ONLY_ON=1 ;;
-  0|""|false|FALSE|no|NO|n|N) RESCORE_ONLY_ON=0 ;;
-  *) echo "driver.sh: RESCORE_ONLY must be 0 or 1 (got '${RESCORE_ONLY}')" >&2; exit 1 ;;
-esac
+flag RESCORE_ONLY 0 RESCORE_ONLY_ON
 NO_SWITCH="${RESCORE_ONLY_ON}"
 if (( RESCORE_ONLY_ON )); then
   if [[ "${MODE}" == tts ]]; then
@@ -397,11 +478,7 @@ fi
 # Pairs naturally with RESCORE_ONLY=1: the offline pass re-judges those clips under the
 # current rules, drops the marker on the ones that now read clean, and puts the rest back
 # in the tts queue for a plain `./driver.sh` run to redraw.
-case "${RETRY_EXHAUSTED:-0}" in
-  1|true|TRUE|yes|YES|y|Y) RETRY_EXHAUSTED_ON=1 ;;
-  0|""|false|FALSE|no|NO|n|N) RETRY_EXHAUSTED_ON=0 ;;
-  *) echo "driver.sh: RETRY_EXHAUSTED must be 0 or 1 (got '${RETRY_EXHAUSTED}')" >&2; exit 1 ;;
-esac
+flag RETRY_EXHAUSTED 0 RETRY_EXHAUSTED_ON
 if (( RETRY_EXHAUSTED_ON )); then
   echo "driver: RETRY_EXHAUSTED=1, the first stt pass of each dataset reopens the clips that gave up"
   if [[ "${MODE}" == tts ]]; then
@@ -440,6 +517,57 @@ for _f in ${STEMS_FROM}; do
 done
 if (( ${#STEMS_ARGS[@]} )); then
   echo "driver: restricting work to the clips listed in: ${STEMS_FROM}"
+fi
+
+# Optional pre-steps, in the only order that makes sense: refresh the manifests from the
+# audio on disk FIRST (so the durations the passes read describe the clips as they are
+# now, including anything regenerated since), then scan that audio for acoustic loops
+# (its sidecar is a STEMS_FROM file, so it can aim the expensive passes that follow).
+# Both call a script that already exists, as ${TARGET_USER} and at nice 19 like a pass.
+flag REFRESH_MANIFESTS 0
+flag ACOUSTIC_SCAN 0
+flag SYNC_RESULTS 0
+PIN_SPLITS_FROM="${PIN_SPLITS_FROM:-}"
+ACOUSTIC_WORKERS="${ACOUSTIC_WORKERS:-4}"
+# The repo root, so the pre- and post-steps can reach the other stages. HERE is
+# <root>/06_hotfixes, and the two are kept apart because every path a pass gets is
+# relative to HERE.
+ROOT="$(cd "${HERE}/.." && pwd)"
+
+if (( REFRESH_MANIFESTS )); then
+  if [[ -z "${PIN_SPLITS_FROM}" ]]; then
+    echo "driver.sh: REFRESH_MANIFESTS=1 needs PIN_SPLITS_FROM=<the previous generation's" >&2
+    echo "  manifest root, i.e. v1's NeMO_files/>. Not defaulted on purpose: the splitter" >&2
+    echo "  is duration-greedy, so an unpinned rebuild reshuffles train/val/test and leaks" >&2
+    echo "  the old test set into the new train set, which invalidates every v1-vs-v2" >&2
+    echo "  comparison without any error. See docs/V2_REGENERATION_RUNBOOK.md." >&2
+    exit 1
+  fi
+  if [[ ! -d "${PIN_SPLITS_FROM}" ]]; then
+    echo "driver.sh: PIN_SPLITS_FROM is not a directory: ${PIN_SPLITS_FROM}" >&2
+    exit 1
+  fi
+  echo "=== $(date '+%F %T') pre-step: rebuilding the NeMo manifests," \
+       "splits pinned to ${PIN_SPLITS_FROM} ==="
+  # Fatal if either fails, unlike the scan below: a half-written manifest set is what the
+  # passes then read as the truth about the corpus.
+  as_user "${UV_BIN}" run "${ROOT}/99_hf_release/01_build_nemo_manifest.py" \
+    --all --pin-splits-from "${PIN_SPLITS_FROM}" \
+    || { echo "!!! the per-source manifest rebuild failed, stopping" >&2; exit 1; }
+  as_user "${UV_BIN}" run "${ROOT}/99_hf_release/02_combine_nemo_manifests.py" \
+    --pin-splits-from "${PIN_SPLITS_FROM}" \
+    || { echo "!!! the combined manifest rebuild failed, stopping" >&2; exit 1; }
+fi
+
+if (( ACOUSTIC_SCAN )); then
+  echo "=== $(date '+%F %T') pre-step: acoustic loop scan," \
+       "${ACOUSTIC_WORKERS} CPU worker(s), no GPU and no server ==="
+  # Never fatal: the sidecar is advisory (it says which clips repeat themselves, which
+  # the passes do not need to run), and this scan is minutes to hours of CPU that must
+  # not be able to stop a GPU run that would otherwise work.
+  as_user "${UV_BIN}" run "${ROOT}/05_generate_audio/04_qc_acoustic_loops.py" \
+    --workers "${ACOUSTIC_WORKERS}" \
+    || echo "driver: the acoustic scan failed; continuing without its sidecar" >&2
 fi
 
 # Expand the INPUT list into one (manifest, output dir, audio root) triple per dataset.
@@ -526,18 +654,14 @@ run_pass() {  # $1 = stt|tts ; runs on the CUR_* dataset; returns the pass's exi
   # level: sudo can hand the driver a negative priority (-5 observed here), where +19
   # would land at 14. The result is clamped to 19, so an oversized step pins the floor
   # wherever it starts from. Placed after `env` so it resolves on USER_PATH.
-  runuser -u "${TARGET_USER}" -- \
-    env HOME="${TARGET_HOME}" \
-        PATH="${USER_PATH}" \
-        WDOC_WHISPER_ENDPOINT="${WDOC_WHISPER_ENDPOINT}" \
+  as_user env WDOC_WHISPER_ENDPOINT="${WDOC_WHISPER_ENDPOINT}" \
         WDOC_WHISPER_API_KEY="${WDOC_WHISPER_API_KEY:-}" \
-        WDOC_WHISPER_MODEL="${WDOC_WHISPER_MODEL:-}" \
-        nice -n 40 \
+        WDOC_WHISPER_MODEL="${STT_MODEL}" \
         "${UV_BIN}" run "${HERE}/01_recursive_improvement.py" \
         --mode "${mode}" \
         --input "${CUR_INPUT}" --output "${CUR_OUTPUT}" --audio-root "${CUR_AUDIO_ROOT}" \
         --stt-endpoint "${WDOC_WHISPER_ENDPOINT%/}/v1/audio/transcriptions" \
-        --stt-api-token "${WDOC_WHISPER_API_KEY:-}" --stt-model "${WDOC_WHISPER_MODEL:-}" \
+        --stt-api-token "${WDOC_WHISPER_API_KEY:-}" --stt-model "${STT_MODEL}" \
         --tts-voice "${TTS_VOICE}" \
         --cfg-alpha-start "${CFG_ALPHA_START}" --cfg-alpha-step="${CFG_ALPHA_STEP}" \
         --cfg-alpha-floor "${CFG_ALPHA_FLOOR}" \
@@ -642,7 +766,21 @@ for i in "${!MANIFESTS[@]}"; do
   # after of the whole run in the driver's own log instead of only in the live chatter
   # of each pass. Same table as `./01_recursive_improvement.py --report` from another
   # tab. Never fatal: a missing or unreadable ledger must not fail a finished dataset.
-  runuser -u "${TARGET_USER}" -- env HOME="${TARGET_HOME}" PATH="${USER_PATH}" \
-    "${UV_BIN}" "${HERE}/01_recursive_improvement.py" --report "${CUR_OUTPUT}" || true
+  as_user "${UV_BIN}" run "${HERE}/01_recursive_improvement.py" --report "${CUR_OUTPUT}" || true
 done
+
+# Post-step: carry what stage 06 learned and changed back into the release manifests,
+# which is what makes the run visible to anything downstream of this stage (the QC
+# columns, and the voice of a clip whose reader was swapped). Last, not first: it reads
+# the <output>/*.stt.jsonl every pass above has been writing. --stt-key is ${STT_MODEL}
+# because that is the key the readings were stored under, and the default is v1's
+# ("whisper-1"), which would match nothing and write nulls.
+if (( SYNC_RESULTS )); then
+  echo "=== $(date '+%F %T') post-step: syncing stage 06 results into the manifests ==="
+  as_user "${UV_BIN}" run "${ROOT}/99_hf_release/03_sync_hotfix_results.py" \
+    --apply --stt-key "${STT_MODEL}" \
+    || echo "driver: the manifest sync failed; the audio is fine, re-run" \
+            "99_hf_release/03_sync_hotfix_results.py --apply by hand" >&2
+fi
+
 echo "=== $(date '+%F %T') every dataset converged. Done. ==="

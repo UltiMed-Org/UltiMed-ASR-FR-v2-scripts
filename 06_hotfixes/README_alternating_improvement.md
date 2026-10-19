@@ -123,6 +123,71 @@ group key and so cannot follow a regeneration; `--stt-parallel 10`,
 `CER_THRESHOLD=0.08`, tail threshold `TAIL_CER_THRESHOLD=0.12`, minimum gain to replace a
 clip `MIN_IMPROVEMENT=0.02`).
 
+Two defaults changed for v2, both about concurrency. `STT_PARALLEL` is 20 (was 10): the
+judge is now the LOCAL CrispASR stack on `:8002`, which `switch_server.sh` brings up as
+several replicas behind the Caddy load balancer, and each replica serialises its own
+requests, so the only way to keep six of them busy is to have more than six requests in
+flight. `TTS_PARALLEL` is 32 (was 2), which stage 05 measured on 2026-10-14 on the same
+server and clips: 3,860 clips/h at 16 in flight against 4,610 to 4,960 at 32, i.e. ~13 h
+instead of roughly 10 days for a 12,000-clip queue at 5 draws each. 32 is the ceiling,
+not a starting point: it is the largest captured CUDA graph, and past it vLLM drops to
+the eager path. v1's 2 existed because that server was shared with interactive work.
+
+### The whole phase in one command
+
+The three things that surround the alternation are optional steps of the driver, so a QC
+phase is one invocation rather than a checklist:
+
+```sh
+sudo -E REFRESH_MANIFESTS=1 PIN_SPLITS_FROM=/path/to/v1/NeMO_files \
+        ACOUSTIC_SCAN=1 SYNC_RESULTS=1 ./driver.sh
+```
+
+In order: rebuild the NeMo manifests from the audio on disk (`99_hf_release/01_build_nemo_manifest.py --all`
+then `02_combine_nemo_manifests.py`), scan that audio for acoustic loops
+(`05_generate_audio/04_qc_acoustic_loops.py`, CPU only, `ACOUSTIC_WORKERS` processes,
+default 4), run the alternation to convergence for every dataset, then carry stage 06's
+QC columns back into the release manifests (`99_hf_release/03_sync_hotfix_results.py
+--apply --stt-key $STT_MODEL`). All three default to OFF, so a plain `sudo -E ./driver.sh`
+is exactly what it was before.
+
+`PIN_SPLITS_FROM` is **required** by `REFRESH_MANIFESTS` and has no default on purpose.
+The splitter is duration-greedy, so a rebuild that is not pinned to the previous
+generation's manifest root redraws train/val/test and leaks v1's test set into v2's train
+set, with no error anywhere: the model would then be evaluated on clips it trained on.
+The driver refuses before running a single pass. See `docs/V2_REGENERATION_RUNBOOK.md`.
+
+The manifest rebuild is fatal if it fails (every pass after it reads those files as the
+truth about the corpus); the acoustic scan is not (its sidecar is advisory, and hours of
+CPU must not be able to stop a GPU run that would otherwise work); the sync warns rather
+than failing, because by then the audio is already fixed and the sync can be re-run by
+hand.
+
+### Which judge, and where its reading is stored (`STT_MODEL`)
+
+`STT_MODEL` is both the model name sent to the STT server and the key the reading is
+stored under on each row (`transcriptions[<model>]`). That one variable is what lets the
+v2 plan use two judges on the same corpus: `whisper.cpp/ggml-large-v3-turbo` (the
+default) sweeps all 602k clips, then the slower `whisper.cpp/ggml-large-v3` re-reads only
+what turbo flagged, with `STEMS_FROM` pointing at the flag file. Different key, same row,
+so neither overwrites the other and the two can be compared:
+
+```sh
+sudo -E MODE=stt STT_MODEL=whisper.cpp/ggml-large-v3 STEMS_FROM=flags.txt ./driver.sh
+```
+
+`WDOC_WHISPER_MODEL` is the older name for the same thing and still works.
+`SYNC_RESULTS=1` passes `--stt-key "$STT_MODEL"` for the same reason: that script's own
+default is v1's `whisper-1` alias, which against a v2 row matches nothing and would write
+every QC column empty (it now warns and lists the keys it did find).
+
+The endpoint and token follow from that. `WDOC_WHISPER_ENDPOINT` defaults to
+`http://127.0.0.1:8002`, the local stack, because the remote endpoint v1 ran against now
+answers 502. That service sets `CRISPASR_API_KEYS`, so transcription needs a bearer
+token: `WDOC_WHISPER_API_KEY` falls back to `$CRISPASR_API_KEY`, the name the CrispASR
+clients already use, and the driver warns at startup when neither is set rather than
+letting every clip 401.
+
 ### What differs between the draws of one redo
 
 Two things, and only two. Draw N (from 0) gets seed `--start-seed + N` (43, 44, 45, ...)

@@ -74,7 +74,7 @@ already fired.
 
 ## The six work items
 
-Each is one commit. Order is dependency order. Items 1 to 5 are done.
+Each is one commit. Order is dependency order. All six items are done.
 
 1. **Window gates in the repair pass.** DONE (9a639de, 231003c). `is_bad()` tested `cer`
    and `tail` only, so a 180 s document that read 170 s correctly and dropped a phrase in
@@ -171,12 +171,38 @@ Each is one commit. Order is dependency order. Items 1 to 5 are done.
    distributions and filters, `count_pending` unchanged, round numbering across datasets,
    the report and the driver's call).
 
-6. **One entry point.** `driver.sh` gains two optional pre-steps before the dataset loop,
-   each a single call to a script that already exists: refresh the v2 manifests (stage 99)
-   and run the free CPU acoustic loop scan. It also needs its v2 defaults: the local judge
-   (`http://127.0.0.1:8002` with the bearer key, since the v1 remote endpoint returns 502),
-   `STT_MODEL` so T1 and T2 land in different `transcriptions` keys on the same row, and
-   `TTS_PARALLEL` raised off 2.
+6. **One entry point.** DONE. `driver.sh` now wraps the whole phase:
+   `REFRESH_MANIFESTS=1` (with a REQUIRED `PIN_SPLITS_FROM`, refused when empty because
+   an unpinned rebuild leaks v1's test set into v2's train set) rebuilds the manifests,
+   `ACOUSTIC_SCAN=1` runs the free CPU loop scan, and `SYNC_RESULTS=1` carries the QC
+   columns back into the release manifests after the last dataset converges. The rebuild
+   is fatal on failure, the scan is not, the sync warns. All three default to OFF, so a
+   plain run is byte-identical to before. v2 defaults landed too: the local judge
+   (`http://127.0.0.1:8002`, with `WDOC_WHISPER_API_KEY` falling back to
+   `$CRISPASR_API_KEY`), `STT_PARALLEL` 10 -> 20 (six serialising replicas need a queue),
+   `TTS_PARALLEL` 2 -> 32 (the measurement below; 32 is the ceiling, the largest captured
+   CUDA graph).
+
+   Two things it turned out to need. `STT_MODEL` was **documented but never plumbed**:
+   the header's own example passed it and `run_pass` sent
+   `--stt-model "${WDOC_WHISPER_MODEL:-}"`, i.e. an empty model, which stored every
+   reading under the `"default"` key instead of a per-judge one. It is now one variable
+   used in both places (the name sent to the server and the key the reading lands under),
+   defaulting to `whisper.cpp/ggml-large-v3-turbo`, with `WDOC_WHISPER_MODEL` kept as its
+   older spelling. And `03_sync_hotfix_results.py` gained `--stt-key`, which the driver
+   passes as `$STT_MODEL`: that script's `STT_KEY` default is v1's `whisper-1` alias,
+   which against a v2 row matches nothing and would have written every QC column null, so
+   it now also warns and lists the keys it did find.
+
+   Side effect worth noting: there were five near-identical `case` blocks normalising 0/1
+   env flags, and these three steps would have made eight. They are now one `flag` helper
+   (nameref, so `flag RESCORE 0 RESCORE_ON` keeps the operator's own value readable in
+   messages), and the runuser boilerplate is one `as_user` helper. That also fixed the
+   per-dataset report call, which was `uv script.py` rather than `uv run script.py` and so
+   printed a usage error swallowed by its own `|| true`. Covered by three new cases in
+   `tests/test_driver_alternate_mode.py` (nothing extra runs by default, the unpinned
+   refusal, and the full order: rebuild, combine, scan, pass, sync with the right
+   `--stt-key`).
 
 ## TTS_PARALLEL is the cheapest win available
 

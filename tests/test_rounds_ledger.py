@@ -280,6 +280,11 @@ def test_report(mod) -> None:
               '--report "${CUR_OUTPUT}"' in driver, "absent")
         check("and never lets a missing ledger fail a finished dataset",
               '--report "${CUR_OUTPUT}" || true' in driver, "no || true")
+        # It has to be `uv RUN script.py`: `uv script.py` is not a uv command, so the
+        # report would print nothing but a usage error, swallowed by the `|| true`.
+        check("and invokes it through `uv run`, the only form uv accepts",
+              'run "${HERE}/01_recursive_improvement.py" --report' in driver,
+              "missing `run`")
 
 
 if __name__ == "__main__":

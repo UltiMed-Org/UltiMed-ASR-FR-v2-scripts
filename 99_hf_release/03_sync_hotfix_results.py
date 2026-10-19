@@ -72,7 +72,12 @@ from nemo_manifest import MANIFEST_GLOBS, read_jsonl, resolve_audio, write_jsonl
 # against the CrispASR compose that starts it (`--hf-repo
 # ggerganov/whisper.cpp:ggml-large-v3-turbo.bin`).
 STT_MODEL = "whisper.cpp/ggml-large-v3-turbo"
-# Key under which stage 06 stored that model's readings (the alias, again).
+# Key under which stage 06 stored that model's readings. NOT the same thing as STT_MODEL
+# above: the pass stores a reading under `transcriptions[<its --stt-model> or "default"]`,
+# and v1 ran it with the `whisper-1` alias, hence this default. The v2 driver passes
+# $STT_MODEL instead, so the QC phase's two judges (turbo over everything, then large-v3
+# over what turbo flagged) land in different keys on one row rather than overwriting each
+# other. Use --stt-key to read the other judge.
 STT_KEY = "whisper-1"
 
 # Stage 06's scored outputs. Each was produced from one manifest, so its rows' relative
@@ -119,8 +124,12 @@ def running_passes() -> list[int]:
     return sorted(pids)
 
 
-def load_hotfix(root: Path, stt_model: str) -> dict[str, dict]:
-    """Everything stage 06 knows, keyed by absolute audio path."""
+def load_hotfix(root: Path, stt_model: str, stt_key: str = STT_KEY) -> dict[str, dict]:
+    """Everything stage 06 knows, keyed by absolute audio path.
+
+    ``stt_key`` selects WHICH judge's reading to carry over when a row holds several;
+    ``stt_model`` is only the name written into the manifest.
+    """
     index: dict[str, dict] = {}
     for rel_source, rel_base in HOTFIX_SOURCES:
         source = (root / rel_source).resolve()
@@ -128,9 +137,13 @@ def load_hotfix(root: Path, stt_model: str) -> dict[str, dict]:
             logger.warning(f"{source} not found, skipping (was that dataset never run?)")
             continue
         base = root / rel_base
-        n = pending = 0
+        n = pending = read = 0
+        seen_keys: set[str] = set()
         for row in read_jsonl(source):
-            reading = (row.get("transcriptions") or {}).get(STT_KEY) or {}
+            all_readings = row.get("transcriptions") or {}
+            seen_keys.update(all_readings)
+            reading = all_readings.get(stt_key) or {}
+            read += bool(reading)
             imp = row.get("improvement") or {}
             status = imp.get("status")
             index[resolve_audio(base, row["audio_filepath"])] = {
@@ -150,7 +163,16 @@ def load_hotfix(root: Path, stt_model: str) -> dict[str, dict]:
             n += 1
             if status in ("pending_tts", "pending_stt"):
                 pending += 1
-        logger.info(f"{source.name}: {n} scored rows (base {rel_base})")
+        logger.info(f"{source.name}: {n} scored rows, {read} with a reading under "
+                    f"'{stt_key}' (base {rel_base})")
+        if n and not read:
+            # Every QC column would be written as null, which reads exactly like "this
+            # clip was never judged". Say so instead, and name the keys that ARE there.
+            logger.warning(
+                f"{source.name}: no row carries a reading under '{stt_key}'. The keys "
+                f"present are {sorted(seen_keys) or ['none']}: pass --stt-key with one "
+                f"of those, or the QC columns all get written empty."
+            )
         if pending:
             # These ship their ORIGINAL audio and are labelled `original`, which is true
             # of the audio but hides that the clip is known-weak: stage 06 flagged it and
@@ -207,8 +229,13 @@ def sync_manifest(path: Path, hotfix: dict[str, dict], apply: bool) -> tuple[int
 @click.option("--stt-model", default=STT_MODEL, show_default=True,
               help="Model name written to every row. The default is what the serving "
                    "endpoint reports, not the `whisper-1` alias the client sends.")
+@click.option("--stt-key", default=STT_KEY, show_default=True,
+              help="Which judge's reading to carry over, i.e. the `transcriptions` key "
+                   "stage 06 stored it under, which is the --stt-model that pass ran "
+                   "with. driver.sh passes $STT_MODEL.")
 @click.option("--apply", is_flag=True, help="Write. Without it this is a dry run.")
-def main(manifests: tuple[Path, ...], root: str, stt_model: str, apply: bool) -> None:
+def main(manifests: tuple[Path, ...], root: str, stt_model: str, stt_key: str,
+         apply: bool) -> None:
     """Refresh manifest durations and attach stage 06's QC columns."""
     root_path = Path(root).resolve()
     if apply:
@@ -219,7 +246,7 @@ def main(manifests: tuple[Path, ...], root: str, stt_model: str, apply: bool) ->
                 "will keep writing the very file this reads"
             )
 
-    hotfix = load_hotfix(root_path, stt_model)
+    hotfix = load_hotfix(root_path, stt_model, stt_key)
     if not hotfix:
         raise SystemExit("no stage-06 output found, nothing to sync")
     logger.info(f"{len(hotfix)} scored clips, {sum(1 for q in hotfix.values() if q['regenerated'])} "

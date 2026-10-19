@@ -48,6 +48,18 @@ UV_STUB = """#!/usr/bin/env bash
 # scheduling priority it inherited, then exit with the next code from the plan. Running
 # past the end of the plan means the driver looped more times than the test expected, so
 # answer 99 (an abort) instead of spinning forever.
+# The driver calls uv for the pre- and post-steps too (the manifest rebuild, the
+# acoustic scan, the result sync), which are other scripts entirely. Record the script
+# name and its arguments, then succeed without touching the pass log or the exit plan.
+args="$*"
+script=""
+for arg in "$@"; do
+  if [[ "${arg}" == *.py ]]; then script="${arg##*/}"; break; fi
+done
+if [[ "${script}" != 01_recursive_improvement.py ]]; then
+  echo "${script}|${args}" >> "%(steps)s"
+  exit 0
+fi
 mode=""
 retry=0
 report=0
@@ -83,11 +95,13 @@ def _write_exec(path: Path, text: str) -> Path:
 
 def run_driver(tmp: Path, plan: list[int], env_extra: dict[str, str],
                n_manifests: int = 1,
-               record: list | None = None) -> tuple[int, list[str], list[str], str]:
+               record: list | None = None,
+               steps: list[str] | None = None) -> tuple[int, list[str], list[str], str]:
     """Run driver.sh once with the passes stubbed. Returns (exit code, the --mode of
     each pass in order, the server switches in order, combined output). `record`, if
     given, also receives one [mode, niceness, retry-exhausted] entry per pass, for the
-    cases that care about which flags a pass was handed."""
+    cases that care about which flags a pass was handed. `steps`, if given, receives one
+    "<script>|<args>" line per pre- or post-step, in the order they ran."""
     work = Path(tempfile.mkdtemp(dir=tmp))
     # Run a COPY of driver.sh: it sources `<its dir>/.env`, and the real one holds the
     # user's STT token and would override the test's env.
@@ -95,15 +109,18 @@ def run_driver(tmp: Path, plan: list[int], env_extra: dict[str, str],
     shutil.copy(DRIVER, driver)
 
     pass_log, switch_log = work / "passes.log", work / "switches.log"
+    steps_log = work / "steps.log"
     pass_log.touch()
     switch_log.touch()
+    steps_log.touch()
     (work / "plan.txt").write_text("".join(f"{c}\n" for c in plan), encoding="utf-8")
 
     stub_bin = work / "bin"
     stub_bin.mkdir()
     _write_exec(stub_bin / "runuser", RUNUSER_STUB)
     _write_exec(stub_bin / "nvidia-smi", NVIDIA_SMI_STUB)
-    uv = _write_exec(work / "uv-stub", UV_STUB % {"log": pass_log, "plan": work / "plan.txt"})
+    uv = _write_exec(work / "uv-stub", UV_STUB % {"log": pass_log, "plan": work / "plan.txt",
+                                                  "steps": steps_log})
     switch = _write_exec(work / "switch-stub", SWITCH_STUB % {"log": switch_log})
 
     # driver.sh only checks the manifests exist (and names their outputs after their
@@ -143,6 +160,8 @@ def run_driver(tmp: Path, plan: list[int], env_extra: dict[str, str],
         f"every pass must run at nice 19, got {niceness}\n{proc.stdout}{proc.stderr}")
     if record is not None:
         record.extend(entries)
+    if steps is not None:
+        steps.extend(steps_log.read_text(encoding="utf-8").splitlines())
     return proc.returncode, modes, switches, proc.stdout + proc.stderr
 
 
@@ -243,6 +262,65 @@ def test_retry_exhausted_defaults_off(tmp: Path) -> None:
     print("test_retry_exhausted_defaults_off: OK")
 
 
+def test_no_pre_or_post_steps_by_default(tmp: Path) -> None:
+    """A plain run must still be exactly the passes: the extra steps rebuild manifests
+    and rewrite the release files, so none of them may happen unless asked for."""
+    steps: list[str] = []
+    rc, modes, _switches, out = run_driver(tmp, [10], {"MODE": "alternate"}, steps=steps)
+    assert modes == ["stt"], f"passes ran: {modes}\n{out}"
+    assert steps == [], f"unasked-for steps ran: {steps}\n{out}"
+    assert rc == 0, f"driver exited {rc}\n{out}"
+    print("test_no_pre_or_post_steps_by_default: OK")
+
+
+def test_refresh_manifests_refuses_unpinned_splits(tmp: Path) -> None:
+    """PIN_SPLITS_FROM has no safe default: an unpinned rebuild redraws train/val/test
+    and leaks the old test set into the new train set, silently. So refuse BEFORE any
+    pass runs rather than rebuilding and hoping someone notices."""
+    steps: list[str] = []
+    rc, modes, _switches, out = run_driver(
+        tmp, [10], {"MODE": "alternate", "REFRESH_MANIFESTS": "1"}, steps=steps)
+    assert rc == 1, f"driver exited {rc}, expected a refusal\n{out}"
+    assert "PIN_SPLITS_FROM" in out, out
+    assert modes == [] and steps == [], f"it did work anyway: {modes} {steps}\n{out}"
+
+    # A path that is not a directory is the same mistake one step later.
+    rc, _modes, _switches, out = run_driver(
+        tmp, [10], {"MODE": "alternate", "REFRESH_MANIFESTS": "1",
+                    "PIN_SPLITS_FROM": str(tmp / "nope")})
+    assert rc == 1 and "not a directory" in out, f"exited {rc}\n{out}"
+    print("test_refresh_manifests_refuses_unpinned_splits: OK")
+
+
+def test_the_whole_phase_in_one_command(tmp: Path) -> None:
+    """The point of the item: pre-steps, then the passes, then the sync, in that order.
+    Order is the assertion that matters. The manifests must be rebuilt before anything
+    reads a duration, the scan must see the audio the rebuild described, and the sync
+    must run last because it reads what the passes wrote."""
+    pinned = tmp / "v1_NeMO_files"
+    pinned.mkdir(exist_ok=True)
+    steps: list[str] = []
+    rc, modes, _switches, out = run_driver(
+        tmp, [10], {"MODE": "alternate", "REFRESH_MANIFESTS": "1",
+                    "PIN_SPLITS_FROM": str(pinned), "ACOUSTIC_SCAN": "1",
+                    "ACOUSTIC_WORKERS": "3", "SYNC_RESULTS": "1",
+                    "STT_MODEL": "whisper.cpp/ggml-large-v3"},
+        steps=steps)
+    assert rc == 0, f"driver exited {rc}\n{out}"
+    assert modes == ["stt"], f"passes ran: {modes}\n{out}"
+    scripts = [line.split("|", 1)[0] for line in steps]
+    assert scripts == ["01_build_nemo_manifest.py", "02_combine_nemo_manifests.py",
+                       "04_qc_acoustic_loops.py", "03_sync_hotfix_results.py"], \
+        f"steps ran: {scripts}\n{out}"
+    assert f"--pin-splits-from {pinned}" in steps[0], steps[0]
+    assert f"--pin-splits-from {pinned}" in steps[1], steps[1]
+    assert "--workers 3" in steps[2], steps[2]
+    # The sync must read the key the passes WROTE under, not v1's `whisper-1` default,
+    # or it matches nothing and writes every QC column empty.
+    assert "--apply" in steps[3] and "--stt-key whisper.cpp/ggml-large-v3" in steps[3], steps[3]
+    print("test_the_whole_phase_in_one_command: OK")
+
+
 def main() -> None:
     if shutil.which("unshare") is None and os.geteuid() != 0:
         print("SKIP test_driver_alternate_mode: no `unshare`, cannot fake the root check")
@@ -264,6 +342,9 @@ def main() -> None:
         test_dry_start_on_the_second_dataset(tmp)
         test_retry_exhausted_is_one_shot_per_dataset(tmp)
         test_retry_exhausted_defaults_off(tmp)
+        test_no_pre_or_post_steps_by_default(tmp)
+        test_refresh_manifests_refuses_unpinned_splits(tmp)
+        test_the_whole_phase_in_one_command(tmp)
     print("test_driver_alternate_mode: OK")
 
 
