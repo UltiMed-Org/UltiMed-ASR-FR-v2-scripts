@@ -81,6 +81,35 @@ code=$(sed -n "${n}p" "%(plan)s")
 exit "${code:-99}"
 """
 
+PGREP_STUB = """#!/usr/bin/env bash
+# Stand-in for `pgrep -f PATTERN`: answer from a per-pattern plan file, one call per
+# line, popped as it is read. An exhausted plan therefore means "nothing matches" for
+# every later call, which is what lets one stub serve both the wait gate (a generator
+# that goes away) and the kill (a QC that dies on SIGTERM).
+key=other
+case "$*" in
+  *generate*) key=gen ;;
+  *qc_*)      key=qc ;;
+esac
+plan="%(plans)s/plan.${key}"
+line=""
+if [[ -s "${plan}" ]]; then
+  line="$(head -n 1 "${plan}")"
+  tail -n +2 "${plan}" > "${plan}.rest" && mv "${plan}.rest" "${plan}"
+fi
+echo "pgrep|${key}|${line}" >> "%(events)s"
+[[ -z "${line}" ]] && exit 1
+printf '%%s\n' ${line}
+exit 0
+"""
+
+PKILL_STUB = """#!/usr/bin/env bash
+# Stand-in for `pkill -SIGNAL -f PATTERN`: record which signal went to which pattern
+# and claim success. The pgrep plan above is what decides whether it "worked".
+echo "pkill|$1|${*: -1}" >> "%(events)s"
+exit 0
+"""
+
 SWITCH_STUB = """#!/usr/bin/env bash
 echo "switch $1" >> "%(log)s"
 exit 0
@@ -96,12 +125,23 @@ def _write_exec(path: Path, text: str) -> Path:
 def run_driver(tmp: Path, plan: list[int], env_extra: dict[str, str],
                n_manifests: int = 1,
                record: list | None = None,
-               steps: list[str] | None = None) -> tuple[int, list[str], list[str], str]:
+               steps: list[str] | None = None,
+               gen_plan: list[str] | None = None,
+               qc_plan: list[str] | None = None,
+               signals: list[str] | None = None,
+               events: list[str] | None = None) -> tuple[int, list[str], list[str], str]:
     """Run driver.sh once with the passes stubbed. Returns (exit code, the --mode of
     each pass in order, the server switches in order, combined output). `record`, if
     given, also receives one [mode, niceness, retry-exhausted] entry per pass, for the
     cases that care about which flags a pass was handed. `steps`, if given, receives one
-    "<script>|<args>" line per pre- or post-step, in the order they ran."""
+    "<script>|<args>" line per pre- or post-step, in the order they ran.
+
+    `gen_plan` / `qc_plan` drive the stubbed `pgrep -f`: one line per call, each a
+    space-separated list of PIDs, "" for "nothing matches". They default to empty, so
+    every other test sees a host where stage 05 is already finished and no QC is
+    running, which is the shape the gate must wave through untouched. `signals`, if
+    given, receives the pgrep/pkill calls. It and `steps` come from ONE log, so the
+    order of a kill against a pre-step is observable."""
     work = Path(tempfile.mkdtemp(dir=tmp))
     # Run a COPY of driver.sh: it sources `<its dir>/.env`, and the real one holds the
     # user's STT token and would override the test's env.
@@ -109,7 +149,16 @@ def run_driver(tmp: Path, plan: list[int], env_extra: dict[str, str],
     shutil.copy(DRIVER, driver)
 
     pass_log, switch_log = work / "passes.log", work / "switches.log"
+    # One log for the pre-/post-steps AND the process signals, so their relative order
+    # is a fact the tests can assert on (the QC must stop BEFORE the acoustic scan
+    # starts competing with it for the same cores).
     steps_log = work / "steps.log"
+    plans = work / "plans"
+    plans.mkdir()
+    (plans / "plan.gen").write_text("".join(f"{l}\n" for l in (gen_plan or [])),
+                                    encoding="utf-8")
+    (plans / "plan.qc").write_text("".join(f"{l}\n" for l in (qc_plan or [])),
+                                   encoding="utf-8")
     pass_log.touch()
     switch_log.touch()
     steps_log.touch()
@@ -119,6 +168,8 @@ def run_driver(tmp: Path, plan: list[int], env_extra: dict[str, str],
     stub_bin.mkdir()
     _write_exec(stub_bin / "runuser", RUNUSER_STUB)
     _write_exec(stub_bin / "nvidia-smi", NVIDIA_SMI_STUB)
+    _write_exec(stub_bin / "pgrep", PGREP_STUB % {"plans": plans, "events": steps_log})
+    _write_exec(stub_bin / "pkill", PKILL_STUB % {"events": steps_log})
     uv = _write_exec(work / "uv-stub", UV_STUB % {"log": pass_log, "plan": work / "plan.txt",
                                                   "steps": steps_log})
     switch = _write_exec(work / "switch-stub", SWITCH_STUB % {"log": switch_log})
@@ -141,6 +192,12 @@ def run_driver(tmp: Path, plan: list[int], env_extra: dict[str, str],
         "SWITCH_SERVER": str(switch),
         "CRISPASR_COMPOSE": str(work / "compose.yml"),
         "WDOC_WHISPER_ENDPOINT": "http://127.0.0.1:1",
+        # Keep the gate's own clock out of the suite's runtime. The DEFAULTS (60s poll,
+        # 120s settle, 60s grace) are asserted as text below instead, since a test that
+        # actually sat through them would take minutes.
+        "WAIT_POLL": "1",
+        "WAIT_SETTLE": "0",
+        "KILL_QC_GRACE": "2",
         "INPUT": " ".join(manifests),
         "OUTPUT": str(work / "out"),
     })
@@ -160,8 +217,15 @@ def run_driver(tmp: Path, plan: list[int], env_extra: dict[str, str],
         f"every pass must run at nice 19, got {niceness}\n{proc.stdout}{proc.stderr}")
     if record is not None:
         record.extend(entries)
+    all_events = steps_log.read_text(encoding="utf-8").splitlines()
     if steps is not None:
-        steps.extend(steps_log.read_text(encoding="utf-8").splitlines())
+        steps.extend(e for e in all_events
+                     if not e.startswith("pgrep|") and not e.startswith("pkill|"))
+    if signals is not None:
+        signals.extend(e for e in all_events
+                       if e.startswith("pgrep|") or e.startswith("pkill|"))
+    if events is not None:
+        events.extend(all_events)
     return proc.returncode, modes, switches, proc.stdout + proc.stderr
 
 
@@ -260,6 +324,112 @@ def test_retry_exhausted_defaults_off(tmp: Path) -> None:
     assert [e[2] for e in entries] == ["0"], f"unasked-for retry\n{out}"
     assert rc == 0, f"driver exited {rc}\n{out}"
     print("test_retry_exhausted_defaults_off: OK")
+
+
+def test_it_waits_for_the_generator_then_stops_the_qc(tmp: Path) -> None:
+    """The reason this gate exists: `sudo -E ./driver.sh` is launched while stage 05 is
+    still generating, so the driver must do NOTHING until the generator leaves, then
+    stop the live CPU QC, and only then start its own pre-steps. Getting the order
+    wrong is not cosmetic: the first stt switch stops the TTS container, and the
+    acoustic scan wants the cores the QC is holding."""
+    signals: list[str] = []
+    events: list[str] = []
+    rc, modes, _switches, out = run_driver(
+        tmp, [10], {"MODE": "stt"},
+        gen_plan=["4242 4243", ""], qc_plan=["5150 5151"],
+        signals=signals, events=events)
+    assert rc == 0, f"driver exited {rc}\n{out}"
+    assert "waiting for stage 05 to finish" in out, out
+    assert "stage 05 is done" in out, out
+    assert modes == ["stt"], f"passes ran: {modes}\n{out}"
+    termed = [s for s in signals if s.startswith("pkill|-TERM|")]
+    assert termed, f"the QC was never SIGTERMed: {signals}"
+    assert "qc_cpu_stt" in termed[0], f"SIGTERM went to the wrong pattern: {termed}"
+    assert not [s for s in signals if s.startswith("pkill|-KILL|")], (
+        f"SIGKILLed a QC that had already stopped: {signals}")
+    kill_at = next(i for i, e in enumerate(events) if e.startswith("pkill|-TERM|"))
+    scan_at = next(i for i, e in enumerate(events) if e.startswith("04_qc_acoustic_loops"))
+    assert kill_at < scan_at, f"the acoustic scan started before the QC stopped: {events}"
+    print("test_it_waits_for_the_generator_then_stops_the_qc: OK")
+
+
+def test_a_qc_that_ignores_sigterm_gets_sigkilled(tmp: Path) -> None:
+    """A QC still alive after KILL_QC_GRACE is killed outright. Safe by construction:
+    its sidecar is one appended JSON line per clip and resumes by stem, so the worst
+    case is losing the clips in flight."""
+    signals: list[str] = []
+    rc, _modes, _switches, out = run_driver(
+        tmp, [10], {"MODE": "stt"},
+        qc_plan=["5150", "5150", "5150"], signals=signals)
+    assert rc == 0, f"driver exited {rc}\n{out}"
+    assert [s for s in signals if s.startswith("pkill|-TERM|")], signals
+    assert [s for s in signals if s.startswith("pkill|-KILL|")], (
+        f"a QC that ignored SIGTERM was left running: {signals}")
+    assert "ignored SIGTERM" in out, out
+    print("test_a_qc_that_ignores_sigterm_gets_sigkilled: OK")
+
+
+def test_the_gate_waves_through_a_host_with_nothing_running(tmp: Path) -> None:
+    """The common case once generation is over: no generator, no QC, so the phase must
+    start at once rather than poll for something that will never appear."""
+    signals: list[str] = []
+    rc, modes, _switches, out = run_driver(tmp, [10], {"MODE": "stt"}, signals=signals)
+    assert rc == 0, f"driver exited {rc}\n{out}"
+    assert modes == ["stt"], f"passes ran: {modes}\n{out}"
+    assert "so stage 05 is not running: starting now" in out, out
+    assert "nothing to stop" in out, out
+    assert not [s for s in signals if s.startswith("pkill|")], (
+        f"signalled something on an idle host: {signals}")
+    print("test_the_gate_waves_through_a_host_with_nothing_running: OK")
+
+
+def test_both_halves_of_the_gate_can_be_turned_off(tmp: Path) -> None:
+    """An empty pattern disables each half, for the run that must start NOW and the one
+    that must leave a QC alone. Empty, not 0: the value IS the pattern."""
+    signals: list[str] = []
+    rc, _modes, _switches, out = run_driver(
+        tmp, [10], {"MODE": "stt", "WAIT_FOR_GENERATOR": "", "KILL_QC": ""},
+        gen_plan=["4242"], qc_plan=["5150"], signals=signals)
+    assert rc == 0, f"driver exited {rc}\n{out}"
+    assert "not waiting for stage 05" in out, out
+    assert not [s for s in signals if s.startswith("pkill|")], (
+        f"killed a QC with KILL_QC empty: {signals}")
+    assert not [s for s in signals if s.startswith("pgrep|")], (
+        f"polled with both patterns empty: {signals}")
+    print("test_both_halves_of_the_gate_can_be_turned_off: OK")
+
+
+def test_wait_timeout_refuses_to_start_on_top_of_a_generator(tmp: Path) -> None:
+    """With WAIT_TIMEOUT set, a generator that outlasts it stops the run instead of
+    starting the phase anyway. The failure mode it rules out is the expensive one:
+    stopping the TTS container from under a multi-day generation run."""
+    rc, modes, switches, out = run_driver(
+        tmp, [10], {"MODE": "stt", "WAIT_TIMEOUT": "2"},
+        gen_plan=["4242", "4242", "4242", "4242"])
+    assert rc == 1, f"driver exited {rc}, expected 1\n{out}"
+    assert modes == [], f"ran a pass anyway: {modes}\n{out}"
+    assert switches == [], f"touched docker anyway: {switches}\n{out}"
+    assert "WAIT_TIMEOUT=2s elapsed" in out, out
+    print("test_wait_timeout_refuses_to_start_on_top_of_a_generator: OK")
+
+
+def test_the_gate_defaults_are_the_documented_ones(tmp: Path) -> None:
+    """The suite runs with a 1s poll so it stays fast, so the shipped defaults are
+    pinned as text: 60s between polls, 120s of confirmed absence, 60s of grace, and the
+    two patterns that actually match the v2 generator and the stage 05 QC scripts."""
+    driver = DRIVER.read_text(encoding="utf-8")
+    for want in ('WAIT_FOR_GENERATOR="${WAIT_FOR_GENERATOR-generate_v2\\.sh'
+                 '|01_generate_audio\\.py}"',
+                 'WAIT_POLL="${WAIT_POLL:-60}"',
+                 'WAIT_SETTLE="${WAIT_SETTLE:-120}"',
+                 'KILL_QC="${KILL_QC-03_qc_cpu_stt\\.py|04_qc_acoustic_loops\\.py}"',
+                 'KILL_QC_GRACE="${KILL_QC_GRACE:-60}"'):
+        assert want in driver, f"gate default changed or moved: {want}"
+    # `-` and not `:-`, or an empty pattern would silently fall back to the default and
+    # there would be no way to disable either half.
+    assert 'WAIT_FOR_GENERATOR:-' not in driver, "an empty WAIT_FOR_GENERATOR cannot disable"
+    assert 'KILL_QC:-' not in driver, "an empty KILL_QC cannot disable"
+    print("test_the_gate_defaults_are_the_documented_ones: OK")
 
 
 def test_the_steps_are_on_by_default(tmp: Path) -> None:
@@ -369,6 +539,12 @@ def main() -> None:
         test_every_step_can_be_turned_off(tmp)
         test_an_explicit_refresh_refuses_unpinned_splits(tmp)
         test_the_whole_phase_in_one_command(tmp)
+        test_it_waits_for_the_generator_then_stops_the_qc(tmp)
+        test_a_qc_that_ignores_sigterm_gets_sigkilled(tmp)
+        test_the_gate_waves_through_a_host_with_nothing_running(tmp)
+        test_both_halves_of_the_gate_can_be_turned_off(tmp)
+        test_wait_timeout_refuses_to_start_on_top_of_a_generator(tmp)
+        test_the_gate_defaults_are_the_documented_ones(tmp)
     print("test_driver_alternate_mode: OK")
 
 

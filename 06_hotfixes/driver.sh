@@ -157,6 +157,31 @@
 #                       v1-vs-v2 comparison. When no pin can be derived, an explicit
 #                       REFRESH_MANIFESTS=1 stops the run and a defaulted one skips the
 #                       refresh.
+#   WAIT_FOR_GENERATOR  wait for stage 05 to finish before doing ANYTHING, by polling
+#                       for a process whose command line matches this pattern (pgrep
+#                       -f). Default "generate_v2\.sh|01_generate_audio\.py", i.e. the
+#                       v2 generation run; "" starts immediately. This is what lets you
+#                       launch the whole phase at the tail end of a generation run and
+#                       walk away: the first stt switch STOPS the TTS container, so
+#                       starting early takes the server out from under stage 05, and the
+#                       manifest refresh would describe a half-written corpus.
+#   WAIT_POLL           seconds between those polls (default 60).
+#   WAIT_SETTLE         seconds the generator must stay gone before the phase starts
+#                       (default 120), so a stage boundary, a respawn or a resumed run
+#                       does not read as the end of generation.
+#   WAIT_TIMEOUT        give up and exit 1 after this many seconds of waiting (default
+#                       0, i.e. wait as long as it takes).
+#   WAIT_LOG_EVERY      seconds between "still waiting" lines (default 600).
+#   KILL_QC             stop the live CPU QC before the pre-steps, matching this pattern
+#                       (pgrep -f). Default "03_qc_cpu_stt\.py|04_qc_acoustic_loops\.py",
+#                       "" leaves it running. SIGTERM first (03_qc_cpu_stt.py traps it,
+#                       finishes the clip in flight and prints its per-voice CER table),
+#                       SIGKILL after KILL_QC_GRACE. Its sidecar is append-only and
+#                       resumes by stem, so stopping it costs at most the clips in
+#                       flight, its 25 pct sample is subsumed by the full sweep this
+#                       script runs with a stronger judge, and its cores are exactly
+#                       what the acoustic scan below wants.
+#   KILL_QC_GRACE       seconds to wait for that SIGTERM before SIGKILL (default 60).
 #   ACOUSTIC_SCAN=1     (default) run the CPU-only acoustic loop scan first
 #                       (05_generate_audio/04_qc_acoustic_loops.py), which scores every
 #                       clip for self-similarity and writes qc_acoustic_sidecar.jsonl
@@ -594,6 +619,126 @@ if (( REFRESH_MANIFESTS )) && [[ ! -d "${PIN_SPLITS_FROM}" ]]; then
   echo "driver.sh: PIN_SPLITS_FROM is not a directory: ${PIN_SPLITS_FROM}" >&2
   exit 1
 fi
+# ----------------------------------------------------------------------------------
+# The gate, so that `sudo -E ./driver.sh` can be launched NOW and start by itself the
+# moment stage 05 is done. Two things have to happen before anything else:
+#
+#   1. wait for the generator to leave. The signal is its PROCESS, deliberately: not
+#      the container (the tts passes below need that container up, so its state says
+#      nothing about whether generation is over) and not a lock file (a crashed run
+#      would never release one, and this must not need a human at 3 in the morning).
+#   2. stop the live CPU QC, which has been the early warning DURING generation and is
+#      redundant the moment this script starts reading every clip with a stronger
+#      model. It also wants the same cores as the acoustic scan.
+#
+# Order matters and is the whole point: config errors above are already reported, so
+# the wait only ever happens on a run that is otherwise ready to go.
+WAIT_FOR_GENERATOR="${WAIT_FOR_GENERATOR-generate_v2\.sh|01_generate_audio\.py}"
+WAIT_POLL="${WAIT_POLL:-60}"
+WAIT_SETTLE="${WAIT_SETTLE:-120}"
+WAIT_TIMEOUT="${WAIT_TIMEOUT:-0}"
+WAIT_LOG_EVERY="${WAIT_LOG_EVERY:-600}"
+KILL_QC="${KILL_QC-03_qc_cpu_stt\.py|04_qc_acoustic_loops\.py}"
+KILL_QC_GRACE="${KILL_QC_GRACE:-60}"
+
+# PIDs whose full command line matches $1, one per line, empty when none. Never this
+# script and never its parent: `pgrep -f` matches the WHOLE command line, so a pattern
+# handed around as an argument can match the process doing the asking.
+procs_matching() {
+  pgrep -f "$1" 2>/dev/null | grep -vx -e "$$" -e "${PPID}" || true
+}
+
+# Block until no process matches $1, then return 0. Returns 1 only on WAIT_TIMEOUT.
+wait_for_generator() {
+  local pattern="$1" start=${SECONDS} absent_since="" last_log=${SECONDS} pids elapsed
+  pids="$(procs_matching "${pattern}" | tr '\n' ' ')"
+  if [[ -z "${pids// /}" ]]; then
+    echo "driver: nothing matches '${pattern}', so stage 05 is not running: starting now."
+    echo "  (if it IS running, stop this: the first stt switch stops the TTS container.)"
+    return 0
+  fi
+  echo "=== $(date '+%F %T') waiting for stage 05 to finish before touching anything ==="
+  local listed="${pids% }"
+  echo "driver: generation is still alive, pid(s) ${listed}. Polling every ${WAIT_POLL}s;"
+  echo "  'ps -fp ${listed// /,}' says what they are. Nothing is touched until they exit."
+  while :; do
+    sleep "${WAIT_POLL}"
+    pids="$(procs_matching "${pattern}" | tr '\n' ' ')"
+    elapsed=$(( SECONDS - start ))
+    if [[ -z "${pids// /}" ]]; then
+      if [[ -z "${absent_since}" ]]; then
+        absent_since=${SECONDS}
+        echo "driver: $(date '+%F %T') the generator is gone after ${elapsed}s;" \
+             "confirming it stays gone for ${WAIT_SETTLE}s."
+        # The one case this gate cannot tell apart: a generation INTERRUPTED on purpose
+        # looks exactly like a finished one. Say so while there is still time to act,
+        # because the next thing that happens is the TTS container being stopped.
+        echo "  (if you interrupted stage 05 and mean to resume it, Ctrl-C now:" \
+             "the phase stops the TTS container.)"
+      fi
+      if (( SECONDS - absent_since >= WAIT_SETTLE )); then
+        echo "=== $(date '+%F %T') stage 05 is done (waited ${elapsed}s)," \
+             "the QC phase starts now ==="
+        return 0
+      fi
+    else
+      if [[ -n "${absent_since}" ]]; then
+        echo "driver: a generator process is back (pid(s) ${pids% }), still waiting." >&2
+        absent_since=""
+      fi
+      if (( WAIT_LOG_EVERY > 0 && SECONDS - last_log >= WAIT_LOG_EVERY )); then
+        last_log=${SECONDS}
+        echo "driver: $(date '+%F %T') still waiting on pid(s) ${pids% }," \
+             "${elapsed}s so far."
+      fi
+    fi
+    if (( WAIT_TIMEOUT > 0 && elapsed >= WAIT_TIMEOUT )); then
+      echo "driver.sh: WAIT_TIMEOUT=${WAIT_TIMEOUT}s elapsed and a generator process is" >&2
+      echo "  still alive (pid(s) ${pids% }). Refusing to stop its TTS server from under" >&2
+      echo "  it. Raise WAIT_TIMEOUT, or set WAIT_FOR_GENERATOR= to start anyway." >&2
+      return 1
+    fi
+  done
+}
+
+# SIGTERM everything matching $1, SIGKILL whatever is left after KILL_QC_GRACE.
+kill_qc() {
+  local pattern="$1" pids waited=0
+  pids="$(procs_matching "${pattern}" | tr '\n' ' ')"
+  if [[ -z "${pids// /}" ]]; then
+    echo "driver: no live QC process matches '${pattern}', nothing to stop."
+    return 0
+  fi
+  echo "=== $(date '+%F %T') stopping the live QC, pid(s) ${pids% } ==="
+  # pkill rather than kill on the PIDs just listed, because `uv run` and the python it
+  # exec'd are two processes and a new one can appear between the two calls. Safe to
+  # re-match here and nowhere later: this runs BEFORE the acoustic pre-step starts, so
+  # the pattern cannot match a scan of ours.
+  pkill -TERM -f "${pattern}" 2>/dev/null || true
+  while (( waited < KILL_QC_GRACE )); do
+    sleep 2
+    waited=$(( waited + 2 ))
+    pids="$(procs_matching "${pattern}" | tr '\n' ' ')"
+    if [[ -z "${pids// /}" ]]; then
+      echo "driver: the QC stopped after ${waited}s (its sidecar is complete up to the"
+      echo "  last clip it finished; it resumes by stem if you ever run it again)."
+      return 0
+    fi
+  done
+  echo "driver: pid(s) ${pids% } ignored SIGTERM for ${KILL_QC_GRACE}s, sending SIGKILL." >&2
+  pkill -KILL -f "${pattern}" 2>/dev/null || true
+  return 0
+}
+
+if [[ -n "${WAIT_FOR_GENERATOR}" ]]; then
+  wait_for_generator "${WAIT_FOR_GENERATOR}" || exit 1
+else
+  echo "driver: WAIT_FOR_GENERATOR is empty, not waiting for stage 05."
+fi
+if [[ -n "${KILL_QC}" ]]; then
+  kill_qc "${KILL_QC}"
+fi
+
 
 if (( REFRESH_MANIFESTS )); then
   echo "=== $(date '+%F %T') pre-step: rebuilding the NeMo manifests," \

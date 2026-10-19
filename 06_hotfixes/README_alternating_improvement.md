@@ -143,6 +143,23 @@ instead of roughly 10 days for a 12,000-clip queue at 5 draws each. 32 is the ce
 not a starting point: it is the largest captured CUDA graph, and past it vLLM drops to
 the eager path. v1's 2 existed because that server was shared with interactive work.
 
+### Launch it before generation ends (the gate)
+
+`driver.sh` can be started while stage 05 is still generating. It does nothing until the generator is gone, which means the GPU goes from the last clip of generation straight into the QC phase with no idle night in between and no decision to make at 3 in the morning:
+
+```sh
+sudo -E ./driver.sh            # launch now, it starts itself when stage 05 exits
+```
+
+Two things happen before anything else touches the disk, the GPU or docker:
+
+1. **Wait for the generator.** `WAIT_FOR_GENERATOR` is the `pgrep -f` pattern it polls for, default `generate_v2\.sh|01_generate_audio\.py`, i.e. the stage 05 run and its per-stage worker. Polled every `WAIT_POLL` seconds (default 60), with a `WAIT_SETTLE` window (default 120) of continued absence required before the phase starts, so a stage boundary or a resumed run does not read as the end of generation. `WAIT_TIMEOUT` (default 0, meaning wait as long as it takes) stops the run instead of starting. `WAIT_FOR_GENERATOR=` (empty) disables the gate. The one case it cannot tell apart is a generation **interrupted on purpose**, which looks exactly like a finished one, so it says so during the settle window: Ctrl-C there if you meant to resume stage 05 instead.
+2. **Stop the live CPU QC.** `KILL_QC` is the pattern for that, default `03_qc_cpu_stt\.py|04_qc_acoustic_loops\.py`. SIGTERM first, because `03_qc_cpu_stt.py` traps it, finishes the clip in flight and prints its per-voice CER table on the way out; SIGKILL after `KILL_QC_GRACE` (default 60) for anything that ignored it. Its sidecar is append-only and resumes by stem, so stopping it costs at most the clips in flight. `KILL_QC=` (empty) leaves it running.
+
+Why the process and not the container: the alternation's own tts passes need the TTS container **up**, so the container's state says nothing about whether generation is over. Why not a lock file: a crashed generation would never release one. And why it must wait at all, rather than just starting: the first `switch_server.sh stt` runs `docker compose stop voxtral-tts`, which would take the TTS server out from under a run that has been going for days, and the manifest refresh would describe a corpus that is still half-written.
+
+The order is load-bearing in the other direction too. The QC is stopped **before** the acoustic scan starts, because the two want the same cores, and the stage 05 QC is redundant the moment this script begins: its 25 pct sample is subsumed by a sweep that reads every clip with a stronger judge. Config errors (an undecidable `PIN_SPLITS_FROM`, a missing compose file, no `uv`) are all reported **before** the wait, so the gate only ever blocks a run that is otherwise ready to go.
+
 ### The whole phase in one command
 
 The three things that surround the alternation are steps of the driver, and all three are

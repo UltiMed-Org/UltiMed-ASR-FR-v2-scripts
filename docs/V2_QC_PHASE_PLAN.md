@@ -72,9 +72,9 @@ shorter than one window returns the whole-clip score, and 0.15 is looser than th
 whole-clip gate, so on a short clip the window gate can never fire where `cer` has not
 already fired.
 
-## The six work items
+## The seven work items
 
-Each is one commit. Order is dependency order. All six items are done.
+Each is one commit. Order is dependency order. All seven items are done (item 7 was added on 2026-10-20, after the first six, so that the phase could be launched before generation ended).
 
 1. **Window gates in the repair pass.** DONE (9a639de, 231003c). `is_bad()` tested `cer`
    and `tail` only, so a 180 s document that read 170 s correctly and dropped a phrase in
@@ -211,6 +211,17 @@ Each is one commit. Order is dependency order. All six items are done.
    refusal, and the full order: rebuild, combine, scan, pass, sync with the right
    `--stt-key`).
 
+## 7. The gate, so the phase starts itself (DONE)
+
+`driver.sh` is launched while stage 05 is still generating and starts on its own when the generator exits, so the GPU goes from the last clip of generation into the QC phase with no idle hours and no decision to make in the middle of the night. Two knobs, both patterns for `pgrep -f`, both disabled by an empty value:
+
+* `WAIT_FOR_GENERATOR`, default `generate_v2\.sh|01_generate_audio\.py`: polled every `WAIT_POLL` (60 s), requiring `WAIT_SETTLE` (120 s) of continued absence so a stage boundary or a resumed run does not read as the end of generation, and bounded by `WAIT_TIMEOUT` (0 = forever), which stops the run rather than starting it.
+* `KILL_QC`, default `03_qc_cpu_stt\.py|04_qc_acoustic_loops\.py`: SIGTERM, which `03_qc_cpu_stt.py` traps to finish the clip in flight and print its per-voice CER table, then SIGKILL after `KILL_QC_GRACE` (60 s). Its sidecar is append-only and resumes by stem, so this costs at most the clips in flight.
+
+The signal is the generator's PROCESS on purpose. Not the container, since the alternation's own tts passes need it up, so its state says nothing about whether generation is over; and not a lock file, since a crashed run would never release one. What makes the wait necessary rather than merely tidy: the first `switch_server.sh stt` runs `docker compose stop voxtral-tts`, so starting early takes the TTS server out from under a multi-day run, and the manifest refresh would describe a half-written corpus.
+
+Ordering, all of it load-bearing: config errors are reported BEFORE the wait (so the gate only blocks a run that is otherwise ready), and the QC is stopped BEFORE the acoustic scan (they want the same cores, and the stage 05 QC is redundant once this script reads every clip with a stronger judge). Six new cases in `tests/test_driver_alternate_mode.py`, which now stubs `pgrep`/`pkill` so every other case also proves the gate waves through an idle host.
+
 ## TTS_PARALLEL is the cheapest win available
 
 v1 redrew at `TTS_PARALLEL=2`. Stage 05 measured on 2026-10-14, same server and same clips:
@@ -235,9 +246,10 @@ also drives a display.
 ## How it gets launched
 
 ```bash
-# from 06_hotfixes/, inside the zellij run tab, once generation has finished:
+# from 06_hotfixes/, inside the zellij run tab. Launch it whenever: it waits for stage
+# 05 to finish, stops the CPU QC itself, and runs the whole phase from there.
 sudo -E ./driver.sh                      # T1, then T3, alternating to convergence
-sudo -E MODE=stt STT_MODEL=large-v3 STEMS_FILE=flags.txt ./driver.sh   # T2
+sudo -E MODE=stt STT_MODEL=whisper.cpp/ggml-large-v3 STEMS_FROM=flags.txt ./driver.sh  # T2
 ./01_recursive_improvement.py --report   # any time, from another tab
 ```
 
