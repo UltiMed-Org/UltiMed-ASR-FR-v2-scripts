@@ -105,16 +105,26 @@ Per clip (in the pool):
    out right: a chunk truncated at the TTS output cap keeps ~85% of its text and lands at
    CER ~0.13, under any sane gate. So every clip longer than 30s is also scored over its
    last ~30s (approximated by character count at the corpus median pace, see
-   ``_stt.tail_cer``), stored as ``cer_tail`` on the transcription entry. A clip is bad
-   when EITHER score is over its threshold (``--cer-threshold`` 0.08 /
-   ``--tail-cer-threshold`` 0.12, the latter looser because the window boundary cuts
-   mid-sentence), and the same double gate decides when a regenerated draw is good enough
-   to promote.
+   ``_stt.tail_cer``), stored as ``cer_tail`` on the transcription entry
+   (``--tail-cer-threshold`` 0.12, looser than ``--cer-threshold`` 0.08 because the
+   window boundary cuts mid-sentence).
+1b. Score the WORST STRETCH too, which is what catches a defect in the MIDDLE of a
+   long clip. The tail only looks at the ending and the whole-clip CER averages the
+   defect away: five words dropped out of a 48 s PARHAF chunk are ~30 normalized
+   characters, i.e. CER 0.04, under any gate that does not also flag every clean long
+   clip. So two more scores come from ``_stt.window_metrics``: ``cer_window``, the CER of
+   the worst ~15 s (213-character) window, and ``bad_run_chars``, the longest contiguous
+   run of reference characters the recognizer never said at all. A clip is bad when ANY
+   of the four scores is over its threshold (``--window-cer-threshold`` 0.15,
+   ``--bad-run-threshold`` 30 characters: measured p50 1, p99 5, p99.9 9, max 26 over
+   19,958 v1 clips, so 30 flagged none of them). ``bad_run_chars`` is a count and not a
+   rate on purpose: a skipped phrase has a size, and dividing it by the clip's length is
+   exactly what hides it.
 
-1b. Triple-check a bad CER before trusting it. STT can hallucinate a wildly wrong
+1c. Triple-check a bad reading before trusting it. STT can hallucinate a wildly wrong
    transcript on perfectly fine audio (Whisper's "Sous-titrage ..." caption is the
    classic case), which scores a false-bad CER and would waste a regeneration. So while
-   the CER is >= ``--cer-threshold`` and the clip has been read fewer than
+   the clip reads bad on ANY gate and has been read fewer than
    ``STT_CHECK_TARGET`` (3) times, re-transcribe it, each recheck one step further up the
    ``--stt-recheck-temperature`` ladder (default base 0.5, distinct from
    ``--stt-temperature``, so the two rechecks run at 0.5 then 1.0), and keep whichever
@@ -122,13 +132,13 @@ Per clip (in the pool):
    transcription entry, so a clip still bad afterwards is never re-read again (it proceeds
    to step 2) and a resumed run only tops a partially checked clip back up to 3; a clip a
    recheck rescued drops the marker and is treated as a normal good clip (no regeneration).
-2. If that best CER is >= ``--cer-threshold``, improve it: up to ``--n-improv``
+2. If the clip still reads bad on any of the four gates, improve it: up to ``--n-improv``
    attempts, re-synthesize via the TTS server (seed incremented each attempt,
    TTS ``cfg_alpha`` walked from ``--cfg-alpha-start`` by ``--cfg-alpha-step`` each
-   attempt, optional ``--speed-jitter``), re-transcribe, re-score. The goal is a draw with
-   CER BELOW ``--cer-threshold``: stop early the moment one is reached. If no draw
-   gets under the threshold, keep the lowest-CER draw as long as it still beats the
-   original by ``--min-improvement`` (otherwise keep the original untouched).
+   attempt, optional ``--speed-jitter``), re-transcribe, re-score. The goal is a draw
+   UNDER EVERY GATE: stop early the moment one is reached. If no draw gets there, keep
+   the lowest-CER draw as long as it still beats the original by ``--min-improvement``
+   (otherwise keep the original untouched).
 3. On a win: back the current clip up before overwriting (the first win writes the
    pristine original to ``<clip>.flac.bak``, later wins write the prior version to
    ``<clip>.flac.bak2`` / ``.bak3`` / ..., so every intermediate audio is kept),
@@ -227,6 +237,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import NamedTuple
 
 import click
 import soundfile as sf
@@ -344,26 +355,103 @@ def best_tail_cer(
     return min(vals) if vals else None
 
 
-def is_bad(cer: float | None, tail: float | None, cfg: SimpleNamespace) -> bool:
-    """Whether a reading fails quality: the whole clip is off (``cer >= --cer-threshold``)
-    OR just its ending is (``tail >= --tail-cer-threshold``). The tail gate is looser
-    because its window is ~5x shorter, hence ~5x noisier, than the whole-clip score."""
-    return ((cer is not None and cer >= cfg.cer_threshold)
-            or (tail is not None and tail >= cfg.tail_cer_threshold))
+def best_window_metrics(
+    transcript: str | None, source: str | None, target: str | None
+) -> tuple[float | None, int | None]:
+    """``best_cer``'s treatment of the two WINDOW scores (see ``_stt.window_metrics``):
+    the worst ~15s window's CER, and the longest contiguous run of reference characters
+    the recognizer never said, each taken against whichever reference reads it more
+    favorably. Taken independently of each other, exactly as ``cer`` and ``tail``
+    already are: a defect counts only when NEITHER spelling of the reference explains
+    it."""
+    if not transcript:
+        return None, None
+    pairs = [_stt.window_metrics(ref, transcript) for ref in (source, target) if ref]
+    windows = [w for w, _run in pairs if w is not None]
+    runs = [run for _w, run in pairs if run is not None]
+    return (min(windows) if windows else None), (min(runs) if runs else None)
 
 
-def _fmt_scores(cer: float | None, tail: float | None) -> str:
-    """`cer=0.123 tail=0.456` for the logs, with the tail omitted on short clips."""
-    cer_s = f"{cer:.3f}" if cer is not None else "n/a"
-    return f"cer={cer_s}" + (f" tail={tail:.3f}" if tail is not None else "")
+class Scores(NamedTuple):
+    """Every number one reading of a clip is judged on, travelling as a single value.
+
+    They answer four different questions and no one of them subsumes the others:
+    ``cer`` the whole clip, ``tail`` its last ~30s (an ending cut off at the TTS frame
+    cap keeps ~85% of its text, so it lands at whole-clip CER ~0.13), ``window`` the
+    worst ~15s stretch (five words dropped mid-clip are ~30 normalized characters:
+    0.14 of a 213-char window but 0.04 of a 48s PARHAF chunk) and ``bad_run`` the
+    longest span of reference text that went unsaid, in characters (the SHAPE of a
+    skip rather than an average, which is why it is a count and not a rate).
+
+    Every field is optional because each has a reading that cannot produce it: no
+    transcript at all, a clip too short to have a tail, an empty reference."""
+
+    cer: float | None = None
+    tail: float | None = None
+    window: float | None = None
+    bad_run: int | None = None
 
 
-def badness(cer: float | None, tail: float | None, cfg: SimpleNamespace) -> tuple[bool, float]:
+def score_reading(
+    transcript: str | None, source: str | None, target: str | None, duration: float | None
+) -> Scores:
+    """All four scores of one reading, each against whichever reference reads it best."""
+    window, bad_run = best_window_metrics(transcript, source, target)
+    return Scores(cer=best_cer(transcript, source, target),
+                  tail=best_tail_cer(transcript, source, target, duration),
+                  window=window, bad_run=bad_run)
+
+
+def scores_from_state(state: dict) -> Scores:
+    """The scores a prior pass stored beside a clip's ``improvement`` marker. A key a
+    marker written before that gate existed never carried reads as None, i.e. the same
+    as "this reading cannot produce that score", which costs the clip nothing: the stt
+    pass re-derives all four from the transcript before it judges anything, and these
+    only travel so the tts pass can log what flagged the clip and the promote
+    comparison has a number to beat."""
+    return Scores(cer=state.get("orig_cer"), tail=state.get("orig_tail"),
+                  window=state.get("orig_window"), bad_run=state.get("orig_bad_run"))
+
+
+def scores_to_state(scores: Scores) -> dict:
+    """``scores_from_state``'s inverse, spread into an ``improvement`` marker."""
+    return {"orig_cer": scores.cer, "orig_tail": scores.tail,
+            "orig_window": scores.window, "orig_bad_run": scores.bad_run}
+
+
+def is_bad(scores: Scores, cfg: SimpleNamespace) -> bool:
+    """Whether a reading fails quality: ANY of the four gates. The whole clip is off
+    (``cer >= --cer-threshold``), or only its ending is (``tail >=
+    --tail-cer-threshold``), or only one stretch of it is (``window >=
+    --window-cer-threshold``), or a contiguous span of the reference went unsaid
+    (``bad_run >= --bad-run-threshold``). The three local gates are looser than the
+    whole-clip one because their windows are shorter, hence noisier; ``bad_run`` is a
+    character count rather than a rate because the defect it names (a phrase skipped
+    mid-clip) has a size, and dividing it by the clip's length is exactly what hides
+    it."""
+    return ((scores.cer is not None and scores.cer >= cfg.cer_threshold)
+            or (scores.tail is not None and scores.tail >= cfg.tail_cer_threshold)
+            or (scores.window is not None and scores.window >= cfg.window_cer_threshold)
+            or (scores.bad_run is not None and scores.bad_run >= cfg.bad_run_threshold))
+
+
+def _fmt_scores(scores: Scores) -> str:
+    """`cer=0.123 tail=0.456 window=0.789 bad_run=42` for the logs, each score omitted
+    when the reading could not produce it, and ``bad_run`` also when it is 0 (nothing
+    went missing at all, which is the common case)."""
+    cer_s = f"{scores.cer:.3f}" if scores.cer is not None else "n/a"
+    return (f"cer={cer_s}"
+            + (f" tail={scores.tail:.3f}" if scores.tail is not None else "")
+            + (f" window={scores.window:.3f}" if scores.window is not None else "")
+            + (f" bad_run={scores.bad_run}" if scores.bad_run else ""))
+
+
+def badness(scores: Scores, cfg: SimpleNamespace) -> tuple[bool, float]:
     """Sort key picking the most favorable of several readings / candidate draws: one that
-    passes both gates beats one that does not, and CER breaks the tie within each class.
+    passes every gate beats one that does not, and CER breaks the tie within each class.
     A reading whose only defect is a derailed tail therefore loses to a clean one, which is
     the whole point of re-reading a clip before condemning it."""
-    return (is_bad(cer, tail, cfg), cer if cer is not None else float("inf"))
+    return (is_bad(scores, cfg), scores.cer if scores.cer is not None else float("inf"))
 
 
 def flac_duration(path: Path) -> float | None:
@@ -561,11 +649,11 @@ def _score_audio_file(
     audio_file: Path, cfg: SimpleNamespace, source: str | None, target: str | None,
     duration: float | None = None,
 ) -> dict | None:
-    """Transcribe an audio file and score its best CER, plus the tail CER of its last
-    ~30s when ``duration`` says the draw is long enough (the STT-only half of a
-    regeneration, shared by ``both`` mode's inline loop and ``tts`` mode's draft
-    scoring). Returns ``{"transcript", "cer", "tail", "stt_seconds"}``, or None when the
-    clip transcribed blank.
+    """Transcribe an audio file and score the reading on all four gates
+    (``score_reading``; the tail only when ``duration`` says the draw is long enough):
+    the STT-only half of a regeneration, shared by ``both`` mode's inline loop and
+    ``tts`` mode's draft scoring. Returns ``{"transcript", "scores", "stt_seconds"}``,
+    or None when the clip transcribed blank.
 
     A blank transcription of a fresh DRAW is a bad draw, not the dataset clip: the
     caller discards it and tries the next (the whole point of trying several seeds).
@@ -582,18 +670,18 @@ def _score_audio_file(
             )
     except _stt.EmptyTranscriptError:
         return None
-    return {"transcript": transcript, "cer": best_cer(transcript, source, target),
-            "tail": best_tail_cer(transcript, source, target, duration),
+    return {"transcript": transcript,
+            "scores": score_reading(transcript, source, target, duration),
             "stt_seconds": stt_seconds}
 
 
 def run_regeneration(
     pos: int, ident: str, audio_path: Path, text: str,
-    source: str | None, target: str | None, orig_cer: float, cfg: SimpleNamespace,
-    orig_tail: float | None = None, voice: str | None = None,
+    source: str | None, target: str | None, orig: Scores, cfg: SimpleNamespace,
+    voice: str | None = None,
 ) -> dict:
-    """Regenerate one bad clip, trying up to --n-improv draws to clear BOTH gates (CER
-    under --cer-threshold and tail CER under --tail-cer-threshold), stopping early the
+    """Regenerate one bad clip, trying up to --n-improv draws to clear EVERY gate (CER,
+    tail CER, window CER and the unsaid-run length, see ``is_bad``), stopping early the
     moment a draw does. If no draw clears them, keep the lowest-CER draw when it still
     beats the original by --min-improvement, otherwise keep the original. Returns a dict;
     when a draw wins it carries the winning ``payload`` (bytes) + metadata, else
@@ -613,8 +701,9 @@ def run_regeneration(
     attempts = 0
     best = None  # best draw seen so far (kept if none clears the gates)
     logger.info(
-        f"REDO {ident}: {_fmt_scores(orig_cer, orig_tail)} over threshold "
-        f"({cfg.cer_threshold} / tail {cfg.tail_cer_threshold}), up to {cfg.n_improv} attempt(s)"
+        f"REDO {ident}: {_fmt_scores(orig)} over threshold (cer {cfg.cer_threshold} / "
+        f"tail {cfg.tail_cer_threshold} / window {cfg.window_cer_threshold} / "
+        f"bad_run {cfg.bad_run_threshold}), up to {cfg.n_improv} attempt(s)"
     )
     for attempt in range(cfg.n_improv):
         attempts = attempt + 1
@@ -653,56 +742,57 @@ def run_regeneration(
             )
             continue
 
-        transcript, stt_seconds, cand_cer = scored["transcript"], scored["stt_seconds"], scored["cer"]
-        cand_tail = scored["tail"]
+        transcript, stt_seconds = scored["transcript"], scored["stt_seconds"]
+        cand = scored["scores"]
         # Real-time factor of this draw's transcription (STT seconds / clip seconds).
         rtf_s = f" stt={stt_seconds:.2f}s"
         if dur and dur > 0:
             rtf_s += f" rtf={stt_seconds / dur:.3f}"
-        if cand_cer is None:
+        if cand.cer is None:
             logger.info(f"  {ident} attempt {attempt + 1}/{cfg.n_improv} seed={seed}{alpha_s} -> cer=n/a{rtf_s}")
             continue
         # Keep the best draw so far (one that clears both gates beats one that does not,
         # CER breaks the tie), so we can fall back to it if none clears them.
-        is_best = best is None or badness(cand_cer, cand_tail, cfg) < badness(
-            best["new_cer"], best["new_tail"], cfg)
+        is_best = best is None or badness(cand, cfg) < badness(best["scores"], cfg)
         if is_best:
-            best = {"payload": draft["payload"], "new_transcript": transcript, "new_cer": cand_cer,
-                    "new_tail": cand_tail, "seed": seed, "speed": speed, "cfg_alpha": cfg_alpha}
-        below = not is_bad(cand_cer, cand_tail, cfg)
+            best = {"payload": draft["payload"], "new_transcript": transcript,
+                    "scores": cand, "seed": seed, "speed": speed, "cfg_alpha": cfg_alpha}
+        below = not is_bad(cand, cfg)
         if below:
-            note = f" (under both thresholds, done)"
+            note = " (under every threshold, done)"
         elif is_best:
             note = f" (new best, still over threshold, trying next)"
         else:
             note = " (not better, trying next)"
         logger.info(
             f"  {ident} attempt {attempt + 1}/{cfg.n_improv} seed={seed}{alpha_s} -> "
-            f"{_fmt_scores(cand_cer, cand_tail)}{rtf_s}{note}"
+            f"{_fmt_scores(cand)}{rtf_s}{note}"
         )
         if below:
-            # Goal reached: both gates cleared. Stop early with this draw (which is also
+            # Goal reached: every gate cleared. Stop early with this draw (which is also
             # the best so far, since the original failed at least one gate).
             logger.info(
-                f"IMPROVED {ident} {_fmt_scores(orig_cer, orig_tail)} -> "
-                f"{_fmt_scores(cand_cer, cand_tail)} "
-                f"(attempt {attempt + 1}, seed {seed}, under both thresholds)"
+                f"IMPROVED {ident} {_fmt_scores(orig)} -> "
+                f"{_fmt_scores(cand)} "
+                f"(attempt {attempt + 1}, seed {seed}, under every threshold)"
             )
             return {**best, "attempts": attempts, "all_duplicates": False}
 
     # Exhausted every attempt without clearing the gates. Keep the best draw if it still
     # beats the original by --min-improvement, otherwise leave the original untouched.
-    if best is not None and best["new_cer"] <= orig_cer - cfg.min_improvement:
+    # A missing original CER (nothing scorable) leaves nothing to beat, so the original
+    # stands, which is what `or 0.0` says: no draw can be 0.02 below zero.
+    if best is not None and best["scores"].cer <= (orig.cer or 0.0) - cfg.min_improvement:
         logger.info(
-            f"IMPROVED {ident} {_fmt_scores(orig_cer, orig_tail)} -> "
-            f"{_fmt_scores(best['new_cer'], best['new_tail'])} "
+            f"IMPROVED {ident} {_fmt_scores(orig)} -> "
+            f"{_fmt_scores(best['scores'])} "
             f"(best of {attempts}, still over threshold)"
         )
         return {**best, "attempts": attempts, "all_duplicates": False}
 
     logger.info(
-        f"EXHAUSTED {ident}: kept {_fmt_scores(orig_cer, orig_tail)} after {attempts} attempt(s)"
-        + (f"; best draw {_fmt_scores(best['new_cer'], best['new_tail'])} did not beat it"
+        f"EXHAUSTED {ident}: kept {_fmt_scores(orig)} after {attempts} attempt(s)"
+        + (f"; best draw {_fmt_scores(best['scores'])} did not beat it"
            if best is not None else "")
     )
     if trunc_count:
@@ -733,7 +823,7 @@ def clear_drafts(audio_path: Path) -> None:
 
 
 def generate_drafts(
-    pos: int, ident: str, audio_path: Path, text: str, orig_cer: float, cfg: SimpleNamespace,
+    pos: int, ident: str, audio_path: Path, text: str, orig: Scores, cfg: SimpleNamespace,
     voice: str | None = None,
 ) -> dict:
     """TTS-only half of a split regeneration (``--mode tts``): synthesize up to
@@ -762,7 +852,8 @@ def generate_drafts(
     attempts = 0
     drafts: list[dict] = []
     logger.info(
-        f"REDO {ident}: cer={orig_cer:.3f} >= {cfg.cer_threshold}, generating up to {cfg.n_improv} candidate(s)"
+        f"REDO {ident}: {_fmt_scores(orig)} over threshold, generating up to "
+        f"{cfg.n_improv} candidate(s)"
     )
     for attempt in range(cfg.n_improv):
         attempts = attempt + 1
@@ -801,13 +892,13 @@ def generate_drafts(
 
 def score_and_pick(
     pos: int, ident: str, drafts: list[dict],
-    source: str | None, target: str | None, orig_cer: float, cfg: SimpleNamespace,
-    orig_tail: float | None = None, voice: str | None = None,
+    source: str | None, target: str | None, orig: Scores, cfg: SimpleNamespace,
+    voice: str | None = None,
 ) -> dict:
     """STT-only half of a split regeneration (``--mode stt``): transcribe every
     candidate a prior ``--mode tts`` pass persisted, score each, and pick the best.
     No early stop (all candidates already exist), so we keep the best draw (one clearing
-    both the CER and tail gates beats one that does not, CER breaks the tie) and promote
+    every gate beats one that does not, CER breaks the tie) and promote
     it when it clears them, or when it still beats the original by ``--min-improvement``,
     else keep the original. Returns a dict shaped like ``run_regeneration``'s: a winner
     carries ``payload`` (read back from its draft file) + metadata, else ``payload`` is
@@ -816,7 +907,7 @@ def score_and_pick(
     n = len(drafts)
     logger.info(
         f"SCORE {ident}: {n} candidate(s) from the tts pass, "
-        f"original {_fmt_scores(orig_cer, orig_tail)}"
+        f"original {_fmt_scores(orig)}"
     )
     for i, d in enumerate(drafts):
         draft_path = Path(d["path"])
@@ -829,45 +920,44 @@ def score_and_pick(
         if scored is None:
             logger.info(f"  {ident} candidate {i + 1}/{n} seed={seed}{alpha_s} -> transcribed empty, discarding draw")
             continue
-        transcript, stt_seconds, cand_cer = scored["transcript"], scored["stt_seconds"], scored["cer"]
-        cand_tail = scored["tail"]
+        transcript, stt_seconds = scored["transcript"], scored["stt_seconds"]
+        cand = scored["scores"]
         rtf_s = f" stt={stt_seconds:.2f}s"
         if dur and dur > 0:
             rtf_s += f" rtf={stt_seconds / dur:.3f}"
-        if cand_cer is None:
+        if cand.cer is None:
             logger.info(f"  {ident} candidate {i + 1}/{n} seed={seed}{alpha_s} -> cer=n/a{rtf_s}")
             continue
-        is_best = best is None or badness(cand_cer, cand_tail, cfg) < badness(
-            best["new_cer"], best["new_tail"], cfg)
+        is_best = best is None or badness(cand, cfg) < badness(best["scores"], cfg)
         if is_best:
-            best = {"path": str(draft_path), "new_transcript": transcript, "new_cer": cand_cer,
-                    "new_tail": cand_tail, "seed": seed, "speed": d.get("speed"),
+            best = {"path": str(draft_path), "new_transcript": transcript,
+                    "scores": cand, "seed": seed, "speed": d.get("speed"),
                     "cfg_alpha": cfg_alpha}
-        below = not is_bad(cand_cer, cand_tail, cfg)
-        note = (" (under both thresholds)" if below
+        below = not is_bad(cand, cfg)
+        note = (" (under every threshold)" if below
                 else (" (new best, still over threshold)" if is_best else " (not better)"))
         logger.info(
             f"  {ident} candidate {i + 1}/{n} seed={seed}{alpha_s} -> "
-            f"{_fmt_scores(cand_cer, cand_tail)}{rtf_s}{note}"
+            f"{_fmt_scores(cand)}{rtf_s}{note}"
         )
 
-    # Pick the best candidate: promote it when it clears both gates, or when it still
+    # Pick the best candidate: promote it when it clears every gate, or when it still
     # beats the original by --min-improvement; otherwise keep the original.
-    if best is not None and (not is_bad(best["new_cer"], best["new_tail"], cfg)
-                             or best["new_cer"] <= orig_cer - cfg.min_improvement):
-        reached = not is_bad(best["new_cer"], best["new_tail"], cfg)
+    if best is not None and (not is_bad(best["scores"], cfg)
+                             or best["scores"].cer <= (orig.cer or 0.0) - cfg.min_improvement):
+        reached = not is_bad(best["scores"], cfg)
         logger.info(
-            f"IMPROVED {ident} {_fmt_scores(orig_cer, orig_tail)} -> "
-            f"{_fmt_scores(best['new_cer'], best['new_tail'])} "
-            + (f"(best of {n}, under both thresholds)" if reached
+            f"IMPROVED {ident} {_fmt_scores(orig)} -> "
+            f"{_fmt_scores(best['scores'])} "
+            + (f"(best of {n}, under every threshold)" if reached
                else f"(best of {n}, still over threshold)")
         )
         return {**best, "payload": Path(best["path"]).read_bytes(), "attempts": n,
                 "all_duplicates": False}
 
     logger.info(
-        f"EXHAUSTED {ident}: kept {_fmt_scores(orig_cer, orig_tail)} after {n} candidate(s)"
-        + (f"; best draw {_fmt_scores(best['new_cer'], best['new_tail'])} did not beat it"
+        f"EXHAUSTED {ident}: kept {_fmt_scores(orig)} after {n} candidate(s)"
+        + (f"; best draw {_fmt_scores(best['scores'])} did not beat it"
            if best is not None else "")
     )
     return {"payload": None, "attempts": n, "all_duplicates": False}
@@ -902,7 +992,7 @@ def combined_worker(pos: int, rec: dict, cfg: SimpleNamespace, model_key: str, i
     # transcription, maybe regenerate inline in both mode / flag pending_tts in stt
     # mode), "drafted" (a tts pass persisted candidates), "picked" (an stt pass scored
     # candidates and chose a winner), or None (nothing to do this pass).
-    out = {"pos": pos, "entry": entry, "improvement": None, "orig_cer": None,
+    out = {"pos": pos, "entry": entry, "improvement": None, "scores": Scores(),
            "audio_path": None, "action": None, "drafts": None}
 
     audio_path = _stt.resolve_audio(rec, input_file, cfg.audio_key, cfg.audio_root)
@@ -924,10 +1014,9 @@ def combined_worker(pos: int, rec: dict, cfg: SimpleNamespace, model_key: str, i
     if cfg.mode == "tts":
         if status == "pending_tts" and cfg.n_improv > 0 and text:
             out["action"] = "drafted"
-            out["orig_cer"] = imp_state.get("orig_cer")
-            out["orig_tail"] = imp_state.get("orig_tail")
+            out["scores"] = scores_from_state(imp_state)
             out["improvement"] = generate_drafts(
-                pos, ident, audio_path, text, imp_state.get("orig_cer") or 0.0, cfg,
+                pos, ident, audio_path, text, out["scores"], cfg,
                 voice=rec.get("voice"),
             )
         return out
@@ -951,8 +1040,7 @@ def combined_worker(pos: int, rec: dict, cfg: SimpleNamespace, model_key: str, i
         asked = int(imp_state.get("attempts") or 0)
         if (not drafts) or missing or asked < cfg.n_improv:
             out["action"] = "requeue_tts"
-            out["orig_cer"] = imp_state.get("orig_cer")
-            out["orig_tail"] = imp_state.get("orig_tail")
+            out["scores"] = scores_from_state(imp_state)
             why = (f"{len(missing)} of its {len(drafts)} candidate file(s) are gone"
                    if missing else
                    f"only {asked} draw(s) were tried, --n-improv is {cfg.n_improv}"
@@ -963,12 +1051,10 @@ def combined_worker(pos: int, rec: dict, cfg: SimpleNamespace, model_key: str, i
             )
             return out
         out["action"] = "picked"
-        out["orig_cer"] = imp_state.get("orig_cer")
-        out["orig_tail"] = imp_state.get("orig_tail")
+        out["scores"] = scores_from_state(imp_state)
         out["drafts"] = drafts
         out["improvement"] = score_and_pick(
-            pos, ident, out["drafts"], source, target, imp_state.get("orig_cer") or 0.0, cfg,
-            orig_tail=imp_state.get("orig_tail"),
+            pos, ident, out["drafts"], source, target, out["scores"], cfg,
         )
         return out
 
@@ -996,8 +1082,7 @@ def combined_worker(pos: int, rec: dict, cfg: SimpleNamespace, model_key: str, i
         stt_calls += 1
 
     duration = rec.get("duration") or 0.0
-    orig_cer = best_cer(transcript, source, target)
-    orig_tail = best_tail_cer(transcript, source, target, duration)
+    orig = score_reading(transcript, source, target, duration)
 
     # Triple-check a bad CER at DIFFERENT STT temperatures before trusting it: a
     # hallucinated transcript (e.g. Whisper's "Sous-titrage ...") scores a spuriously high
@@ -1009,7 +1094,7 @@ def combined_worker(pos: int, rec: dict, cfg: SimpleNamespace, model_key: str, i
     # so it is never re-read again (it now genuinely goes to regeneration); one a recheck
     # rescued drops the marker and is treated as the good clip it is.
     checks = max(int(prior.get("n_stt_check") or 0), 1)
-    while (is_bad(orig_cer, orig_tail, cfg)
+    while (is_bad(orig, cfg)
            and checks < STT_CHECK_TARGET and cfg.stt_recheck_temperature is not None
            # An offline rescore never re-reads a clip: a newly-bad score is left on the
            # row and the next normal stt pass does the triple-check.
@@ -1023,32 +1108,35 @@ def combined_worker(pos: int, rec: dict, cfg: SimpleNamespace, model_key: str, i
             # broken dataset clip: keep the reading we have rather than abort the run.
             re_transcript, re_seconds = None, None
         checks += 1
-        re_cer = best_cer(re_transcript, source, target)
-        re_tail = best_tail_cer(re_transcript, source, target, duration)
-        re_s = _fmt_scores(re_cer, re_tail)
-        if re_transcript and badness(re_cer, re_tail, cfg) < badness(orig_cer, orig_tail, cfg):
+        re_scores = score_reading(re_transcript, source, target, duration)
+        re_s = _fmt_scores(re_scores)
+        if re_transcript and badness(re_scores, cfg) < badness(orig, cfg):
             logger.info(
                 f"{ident}  RECHECK {checks}/{STT_CHECK_TARGET} temp={temp}: "
-                f"{_fmt_scores(orig_cer, orig_tail)} -> {re_s} (kept the better reading)"
+                f"{_fmt_scores(orig)} -> {re_s} (kept the better reading)"
             )
-            transcript, orig_cer, orig_tail, stt_seconds = (
-                re_transcript, re_cer, re_tail, re_seconds)
+            transcript, orig, stt_seconds = re_transcript, re_scores, re_seconds
         else:
             logger.info(
                 f"{ident}  RECHECK {checks}/{STT_CHECK_TARGET} temp={temp}: {re_s} "
-                f"no better than {_fmt_scores(orig_cer, orig_tail)} (kept the previous reading)"
+                f"no better than {_fmt_scores(orig)} (kept the previous reading)"
             )
 
     entry["text"] = transcript
-    entry["cer"] = orig_cer
-    if orig_tail is not None:
-        entry["cer_tail"] = orig_tail
-    out["orig_cer"] = orig_cer
-    out["orig_tail"] = orig_tail
+    entry["cer"] = orig.cer
+    # The three local scores under the very keys 01_compute_stt.py writes, and only when
+    # the reading produced one: needs_work reads them back to re-judge a row without
+    # re-deriving anything, so an absent key must mean "this clip cannot fail that gate"
+    # and never "scored under rules that had no such gate".
+    for _key, _value in (("cer_tail", orig.tail), ("cer_window", orig.window),
+                         ("bad_run_chars", orig.bad_run)):
+        if _value is not None:
+            entry[_key] = _value
+    out["scores"] = orig
     # A clip still bad records how many readings it has had, so it is not re-read past
     # STT_CHECK_TARGET (and a later run tops up a partially checked one); a clip that came
     # back good drops the marker.
-    if is_bad(orig_cer, orig_tail, cfg):
+    if is_bad(orig, cfg):
         entry["n_stt_check"] = checks
     # Real-time factor for this clip (STT seconds / audio duration), when we actually
     # transcribed it this run (not on a resumed transcript). process_file rolls these
@@ -1079,10 +1167,10 @@ def combined_worker(pos: int, rec: dict, cfg: SimpleNamespace, model_key: str, i
     # transcript already stored on the row. Tagged in the line itself so a rescore pass
     # is distinguishable from a transcription pass at a glance.
     out["rescored"] = stt_calls == 0
-    scores_s = _fmt_scores(orig_cer, orig_tail)
+    scores_s = _fmt_scores(orig)
     tag = "RESCORED " if out["rescored"] else ""
     logger.info(f"{ident}  {tag}{scores_s}{rtf_s}")
-    if is_bad(orig_cer, orig_tail, cfg):
+    if is_bad(orig, cfg):
         logger.warning(
             f"LOW QUALITY {ident} {scores_s}\n"
             f"  source    : {source}\n"
@@ -1093,11 +1181,11 @@ def combined_worker(pos: int, rec: dict, cfg: SimpleNamespace, model_key: str, i
     # We transcribed / scored the original this pass. apply_result stores the entry
     # and (both mode) regenerates inline, or (stt mode) flags a bad clip pending_tts.
     out["action"] = "scored"
-    if (is_bad(orig_cer, orig_tail, cfg) and cfg.n_improv > 0 and text
+    if (is_bad(orig, cfg) and cfg.n_improv > 0 and text
             and cfg.mode == "both" and not cfg.rescore_only):
         out["improvement"] = run_regeneration(
-            pos, ident, audio_path, text, source, target, orig_cer, cfg,
-            orig_tail=orig_tail, voice=rec.get("voice"))
+            pos, ident, audio_path, text, source, target, orig, cfg,
+            voice=rec.get("voice"))
     return out
 
 
@@ -1149,14 +1237,20 @@ def _apply_improvement(
         if new_dur is not None:
             row["duration"] = round(new_dur, 4)
 
+    new = imp["scores"]
     row["transcriptions"][model_key]["text"] = imp["new_transcript"]
-    row["transcriptions"][model_key]["cer"] = imp["new_cer"]
-    # The winning draw's tail score, or no key at all when it is too short to have one
-    # (a regenerated clip can be shorter than the tail window the original needed).
-    if imp.get("new_tail") is not None:
-        row["transcriptions"][model_key]["cer_tail"] = imp["new_tail"]
-    else:
-        row["transcriptions"][model_key].pop("cer_tail", None)
+    row["transcriptions"][model_key]["cer"] = new.cer
+    # Each local score of the winning draw, or no key at all when the draw cannot produce
+    # one (a regenerated clip can be shorter than the tail window the original needed; an
+    # unsaid run of 0 characters is no run at all). Popped and not merely skipped, because
+    # the ORIGINAL's score is sitting under that key and it is what needs_work would
+    # re-judge this now-replaced clip on.
+    for key, value in (("cer_tail", new.tail), ("cer_window", new.window),
+                       ("bad_run_chars", new.bad_run)):
+        if value is not None:
+            row["transcriptions"][model_key][key] = value
+        else:
+            row["transcriptions"][model_key].pop(key, None)
     # The bad-CER recheck-count marker described the ORIGINAL reading; the clip now has
     # fresh, good audio + transcript, so drop it (harmless if it was never set).
     row["transcriptions"][model_key].pop("n_stt_check", None)
@@ -1169,10 +1263,11 @@ def _apply_improvement(
     row["improvement"] = {
         "status": "improved",
         "attempts": imp["attempts"],
-        "orig_cer": result["orig_cer"],
-        "orig_tail": result.get("orig_tail"),
-        "best_cer": imp["new_cer"],
-        "best_tail": imp.get("new_tail"),
+        **scores_to_state(result["scores"]),
+        "best_cer": new.cer,
+        "best_tail": new.tail,
+        "best_window": new.window,
+        "best_bad_run": new.bad_run,
         "seed": imp["seed"],
         "speed": imp["speed"],
         "cfg_alpha": imp.get("cfg_alpha"),
@@ -1180,8 +1275,9 @@ def _apply_improvement(
 
     now = time.time()
     now_iso = datetime.now(timezone.utc).isoformat()
-    orig_cer = result["orig_cer"]
-    cer_delta = round(orig_cer - imp["new_cer"], 4) if orig_cer is not None else None
+    orig = result["scores"]
+    orig_cer = orig.cer
+    cer_delta = round(orig_cer - new.cer, 4) if orig_cer is not None else None
 
     key = row.get(cfg.audio_key) or result["audio_path"]
     # Merge onto any prior win for this clip so the pristine baseline and first-seen
@@ -1194,8 +1290,17 @@ def _apply_improvement(
         "index": index,
         "term": term,
         "orig_cer": orig_cer,
-        "new_cer": imp["new_cer"],
+        "new_cer": new.cer,
         "cer_delta": cer_delta,
+        # The other three gates' before / after, so the audit trail says which defect a
+        # win actually repaired (a clip flagged for a dropped phrase and a clip flagged
+        # for a bad average are the same row here otherwise).
+        "orig_tail": orig.tail,
+        "new_tail": new.tail,
+        "orig_window": orig.window,
+        "new_window": new.window,
+        "orig_bad_run": orig.bad_run,
+        "new_bad_run": new.bad_run,
         "orig_transcript": orig_transcript,
         "new_transcript": imp["new_transcript"],
         "orig_duration": orig_duration,
@@ -1427,18 +1532,17 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
         row = results[pos]
         action = result.get("action")
         imp = result.get("improvement") or {}
-        orig_cer = result.get("orig_cer")
-        # Carried alongside orig_cer through every state hop, so the tts pass and the
-        # candidate scoring know a clip was flagged for its ENDING, not its whole CER.
-        orig_tail = result.get("orig_tail")
+        # Carried as one value through every state hop, so the tts pass and the
+        # candidate scoring know WHICH gate flagged a clip (its ending, one stretch of
+        # it, a phrase it skipped) and not merely that something was wrong.
+        orig = result.get("scores") or Scores()
 
         # tts pass: candidates were generated for a bad clip. Record them (await the
         # next stt pass to score) and do NOT touch the stored transcription.
         if action == "drafted":
             drafts = imp.get("drafts") or []
             if drafts:
-                row["improvement"] = {"status": "pending_stt", "orig_cer": orig_cer,
-                                      "orig_tail": orig_tail,
+                row["improvement"] = {"status": "pending_stt", **scores_to_state(orig),
                                       "attempts": imp.get("attempts", 0), "drafts": drafts}
             else:
                 # No usable candidate (unreadable clip / every draw a duplicate): give
@@ -1446,8 +1550,7 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
                 if imp.get("all_duplicates"):
                     stats["deterministic"] += 1
                 stats["exhausted"] += 1
-                row["improvement"] = {"status": "exhausted", "orig_cer": orig_cer,
-                                      "orig_tail": orig_tail,
+                row["improvement"] = {"status": "exhausted", **scores_to_state(orig),
                                       "attempts": imp.get("attempts", 0)}
             return result["entry"]
 
@@ -1456,8 +1559,7 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
         # full rather than being judged on a partial set. The leftover sidecars stay
         # where they are: the next tts pass clears them before regenerating.
         if action == "requeue_tts":
-            row["improvement"] = {"status": "pending_tts", "orig_cer": orig_cer,
-                                  "orig_tail": orig_tail}
+            row["improvement"] = {"status": "pending_tts", **scores_to_state(orig)}
             stats["incomplete_drafts"] += 1
             return result["entry"]
 
@@ -1476,9 +1578,8 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
                 stats["improved"] += 1
             else:
                 stats["exhausted"] += 1
-                row["improvement"] = {"status": "exhausted",
-                                      "attempts": imp.get("attempts", 0), "orig_cer": orig_cer,
-                                      "orig_tail": orig_tail}
+                row["improvement"] = {"status": "exhausted", **scores_to_state(orig),
+                                      "attempts": imp.get("attempts", 0)}
             for d in result.get("drafts") or []:
                 Path(d["path"]).unlink(missing_ok=True)
             return result["entry"]
@@ -1490,7 +1591,7 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
         # stored transcript (no server round trip) versus a real transcription.
         if result.get("rescored"):
             stats["rescored"] += 1
-            if is_bad(orig_cer, orig_tail, cfg):
+            if is_bad(orig, cfg):
                 stats["rescored_bad"] += 1
         else:
             stats["transcribed"] += 1
@@ -1523,12 +1624,11 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
         reopened = ("pending_tts", "exhausted") if cfg.retry_exhausted else ("pending_tts",)
         if (cfg.rescore and not regenerates_inline
                 and (row.get("improvement") or {}).get("status") in reopened):
-            if is_bad(orig_cer, orig_tail, cfg):
+            if is_bad(orig, cfg):
                 # Back to the queue rather than left resolved, so the next tts pass draws
                 # for it again. The attempt count starts over: what matters downstream is
                 # the score a new candidate has to beat, and that is refreshed here.
-                row["improvement"] = {"status": "pending_tts", "orig_cer": orig_cer,
-                                      "orig_tail": orig_tail}
+                row["improvement"] = {"status": "pending_tts", **scores_to_state(orig)}
                 stats["requeued"] += 1
             else:
                 row.pop("improvement", None)
@@ -1542,7 +1642,7 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
             if tts_bar is not None:
                 tts_bar.total += 1   # a bad clip, now counted in the backlog...
                 tts_bar.update(1)    # ...and successfully repaired, so fill it
-        elif is_bad(orig_cer, orig_tail, cfg) and cfg.n_improv > 0 and not cfg.rescore_only:
+        elif is_bad(orig, cfg) and cfg.n_improv > 0 and not cfg.rescore_only:
             if cfg.mode == "both":
                 # both mode tried and exhausted inline.
                 if imp.get("all_duplicates"):
@@ -1551,14 +1651,12 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
                 if tts_bar is not None:
                     tts_bar.total += 1   # bad clip that could not be repaired: total only
                     tts_bar.refresh()
-                row["improvement"] = {"status": "exhausted", "orig_cer": orig_cer,
-                                      "orig_tail": orig_tail,
+                row["improvement"] = {"status": "exhausted", **scores_to_state(orig),
                                       "attempts": imp.get("attempts", 0)}
             else:
                 # stt mode: flag the bad clip for the next tts pass to regenerate.
-                row["improvement"] = {"status": "pending_tts", "orig_cer": orig_cer,
-                                      "orig_tail": orig_tail}
-        elif (cfg.retry_exhausted and not is_bad(orig_cer, orig_tail, cfg)
+                row["improvement"] = {"status": "pending_tts", **scores_to_state(orig)}
+        elif (cfg.retry_exhausted and not is_bad(orig, cfg)
               and (row.get("improvement") or {}).get("status") == "exhausted"):
             # Reopened, re-read, and it clears the gates now (a scoring change, or a
             # regenerated clip whose promotion the old rules undersold). Nothing is left
@@ -1655,24 +1753,42 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
             ) is not None
         # Already transcribed: only revisit if it is bad (both mode regenerates inline;
         # stt mode flags it pending_tts). The stored score is READ BACK, not re-derived:
-        # it is exactly what this gate would compute (the worker stores best_cer /
-        # best_tail_cer), and re-deriving it costs ~3 ms per row (normalize + jiwer,
+        # it is exactly what this gate would compute (the worker stores score_reading's
+        # four numbers), and re-deriving it costs ~3 ms per row (normalize + jiwer,
         # against source and target), i.e. ~22 minutes of silence on a 600k-row corpus
         # before a single clip is transcribed. Scores going stale under a scoring-rule
         # change is what --rescore above is for.
-        # The tail is the one thing still derived here, and only when it is MISSING on a
-        # clip long enough to have one: a row scored before the tail gate existed must
-        # not escape it just because the field was never written.
+        # The three LOCAL scores are the only thing still derived here, and only when
+        # one is MISSING: a row scored before its gate existed must not escape that gate
+        # just because the field was never written.
+        source = out_rec.get("asr_training_source")
+        target = out_rec.get("asr_training_target")
         cer = prior.get("cer")
         if cer is None:
-            cer = best_cer(text, out_rec.get("asr_training_source"),
-                           out_rec.get("asr_training_target"))
+            cer = best_cer(text, source, target)
         tail = prior.get("cer_tail")
         if tail is None and (out_rec.get("duration") or 0.0) > _stt.TAIL_SECONDS:
-            tail = best_tail_cer(text, out_rec.get("asr_training_source"),
-                                 out_rec.get("asr_training_target"),
-                                 out_rec.get("duration") or 0.0)
-        return is_bad(cer, tail, cfg)
+            tail = best_tail_cer(text, source, target, out_rec.get("duration") or 0.0)
+        # The two window scores get the same treatment, but gated on "could either of
+        # them even fire?" rather than on the tail's duration, because deriving them
+        # costs ~11 ms per row (jiwer's character alignment), i.e. ~1.8 h of silence on a
+        # 600k-row corpus before the first clip is transcribed, on every pass. Both are
+        # provably redundant on a short reference: the window IS the whole clip once the
+        # reference is no longer than WINDOW_CHARS (`width = min(WINDOW_CHARS, len(ref))`
+        # in window_score), so window_cer == cer there; and an unsaid run of B characters
+        # out of L forces cer >= B / L, so it cannot hide behind a clean CER unless
+        # L > B / cer_gate (375 chars at the defaults, ~26 s of speech). The RAW reference
+        # length bounds the normalized one from above (normalization only ever shrinks
+        # text), so this skips nothing a derivation would have flagged. In practice the
+        # sweep writes both keys on every row it scores, which makes this the safety net
+        # for rows last scored before the window gates existed, not the common path.
+        window, bad_run = prior.get("cer_window"), prior.get("bad_run_chars")
+        ref_len = max(len(source or ""), len(target or ""))
+        if (window is None and bad_run is None
+                and (ref_len > _stt.WINDOW_CHARS
+                     or ref_len * cfg.cer_threshold > cfg.bad_run_threshold)):
+            window, bad_run = best_window_metrics(text, source, target)
+        return is_bad(Scores(cer, tail, window, bad_run), cfg)
 
     def counting_needs_work(out_rec):
         """Tally what this pass picks up, so main can tell a pass that found nothing
@@ -1741,8 +1857,24 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
 @click.option("--mode", type=click.Choice(["both", "stt", "tts"]), default="both",
               help="both = STT+TTS in one pass (needs both servers up, default). Split modes for when the two servers cannot share VRAM: 'stt' transcribes originals, scores any candidates generated by a prior 'tts' pass, and promotes/exhausts them (only STT server up); 'tts' generates candidates for the clips a prior 'stt' pass flagged bad (only TTS server up). Alternate stt/tts runs until 'stt' reports no work left (exit code 10).")
 @click.option("--n-improv", default=5, type=int, help="Max regeneration attempts per bad clip (0 = transcribe only, i.e. behave like 01_compute_stt.py).")
-@click.option("--cer-threshold", default=0.08, type=float, help="A clip is 'bad' (regenerated) when its best CER (vs source or target) is >= this; regeneration also aims to get a draw BELOW this (stops early once one is). This is a SWEEP DEPTH, not a quality verdict: the corpus was first taken to 0.15 (~P99.95, 71 clips of 601k), then to 0.10 (487), and 0.08 is the next ~1550 clips. Below it the diffs are increasingly things no seed can fix (French agreement homophony, Whisper's spelling of rare terms, notation the scorer does not fold), so pair a low gate with --min-improvement or the winner is picked on judge noise rather than on the audio.")
-@click.option("--tail-cer-threshold", default=0.12, type=float, help="Second gate, on the CER of the clip's LAST ~30s only (stored as `cer_tail`, computed on clips longer than that): a clip is 'bad' when EITHER its whole-clip CER reaches --cer-threshold OR its tail CER reaches this. Catches endings a whole-clip average dilutes (truncated at the TTS output cap, derailed, looped). Looser than --cer-threshold on purpose (the window boundary cuts mid-sentence, which adds noise) but only 1.5x: the window is ~500 characters, the size of a whole PARHAF chunk, not a fifth of one. Measured over 23.6k long clips: tail P95 0.076, P99 0.193, so 0.12 sits around P98. Pass a negative value to disable the tail gate.")
+@click.option("--cer-threshold", default=_stt.DEFAULT_CER_GATE, type=float, help="A clip is 'bad' (regenerated) when its best CER (vs source or target) is >= this; regeneration also aims to get a draw BELOW this (stops early once one is). This is a SWEEP DEPTH, not a quality verdict: the corpus was first taken to 0.15 (~P99.95, 71 clips of 601k), then to 0.10 (487), and 0.08 is the next ~1550 clips. Below it the diffs are increasingly things no seed can fix (French agreement homophony, Whisper's spelling of rare terms, notation the scorer does not fold), so pair a low gate with --min-improvement or the winner is picked on judge noise rather than on the audio.")
+@click.option("--tail-cer-threshold", default=_stt.DEFAULT_TAIL_CER_GATE, type=float, help="Second gate, on the CER of the clip's LAST ~30s only (stored as `cer_tail`, computed on clips longer than that): a clip is 'bad' when EITHER its whole-clip CER reaches --cer-threshold OR its tail CER reaches this. Catches endings a whole-clip average dilutes (truncated at the TTS output cap, derailed, looped). Looser than --cer-threshold on purpose (the window boundary cuts mid-sentence, which adds noise) but only 1.5x: the window is ~500 characters, the size of a whole PARHAF chunk, not a fifth of one. Measured over 23.6k long clips: tail P95 0.076, P99 0.193, so 0.12 sits around P98. Pass a negative value to disable the tail gate.")
+@click.option("--window-cer-threshold", default=_stt.DEFAULT_WINDOW_CER_GATE, type=float,
+              help="A clip is also 'bad' when the WORST ~15s window of it scores a CER >= "
+                   "this (see 01_compute_stt.py's window_score). This is the only one of the "
+                   "four gates that sees a phrase dropped in the MIDDLE of a long clip: five "
+                   "lost words are ~30 normalized characters, which is 0.14 of a 213-char "
+                   "window but 0.04 of a 48s PARHAF chunk, so no whole-clip threshold can "
+                   "catch it without flagging every clean long clip too. Looser than "
+                   "--cer-threshold because a ~5x shorter window is ~5x noisier. Pass a "
+                   "negative value to disable this gate.")
+@click.option("--bad-run-threshold", default=_stt.DEFAULT_BAD_RUN_GATE, type=int,
+              help="A clip is also 'bad' when the longest CONTIGUOUS run of reference "
+                   "characters the recognizer never said is >= this many characters. A count, "
+                   "not a rate, because a skipped phrase has a size: dividing it by the clip "
+                   "length is what hides it. Measured on 19,958 v1 clips: p50 1, p99 5, p99.9 "
+                   "9, max 26, so 30 flagged zero clean clips. Pass a negative value to "
+                   "disable this gate.")
 @click.option("--min-improvement", default=0.02, type=float, help="When no draw reaches --cer-threshold, keep the lowest-CER draw only if it beats the original CER by at least this. A draw below the threshold is always kept. Non-zero matters once the gate is low: a clip flagged at 0.09 whose best draw lands at 0.088 was not repaired, it was fitted to the judge, and a clean clip's CER moves that much on Whisper's own spelling choices. Pass 0 to accept any gain.")
 @click.option("--start-seed", default=43, type=int, help="First seed; each attempt uses start-seed + attempt. Always sent (Voxtral respects the request seed).")
 @click.option("--speed-jitter", default=0.0, type=float, help="Optional: also vary speed by +/- this each attempt (e.g. 0.03). Not needed when the seed works.")
@@ -1753,7 +1885,7 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
 @click.option("--refresh-duration/--no-refresh-duration", default=True, help="Re-probe and update each row's `duration` when its audio is replaced (keeps stage-99 splits correct).")
 @click.option("--force", is_flag=True, help="Re-process clips already marked improved/exhausted in a previous run.")
 @click.option("--retry-exhausted", is_flag=True, help="Give the clips marked `exhausted` (flagged bad, no draw good enough) another run: they are treated as if they carried no marker, so a rescore can clear them and an stt pass can send the ones that still read bad back through the tts queue. Unlike --force this leaves the clips that already passed and the ones already improved alone, so a retry costs only the known-weak tail (173 clips after the 0.08 sweep) instead of re-transcribing the corpus. Use it after a scoring-rule change or with a different seed / cfg_alpha ladder.")
-@click.option("--rescore", is_flag=True, help="Re-derive cer / cer_tail for EVERY row that already has a stored transcript, under the current scoring rules, and re-apply the gates. Use after changing normalize_for_scoring or a threshold, which makes every score already on disk stale while leaving the transcripts themselves perfectly valid. Costs no STT call (the stored transcript is reused); only a row that now reads bad and has fewer than 3 readings spends a recheck. Also re-judges the regeneration queue: a pending_tts row that now reads clean drops its marker, one that stays bad gets a refreshed orig_cer.")
+@click.option("--rescore", is_flag=True, help="Re-derive all four scores (cer, cer_tail, cer_window, bad_run_chars) for EVERY row that already has a stored transcript, under the current scoring rules, and re-apply the gates. Use after changing normalize_for_scoring or a threshold, which makes every score already on disk stale while leaving the transcripts themselves perfectly valid. Costs no STT call (the stored transcript is reused); only a row that now reads bad and has fewer than 3 readings spends a recheck. Also re-judges the regeneration queue: a pending_tts row that now reads clean drops its marker, one that stays bad gets a refreshed orig_cer.")
 @click.option("--rescore-only", is_flag=True, help="Offline rescore pass: like --rescore but makes NO request at all (no STT, no TTS), so it runs with both servers down. Only rows that already carry a transcript are touched: scores are refreshed in place, nothing new is flagged for regeneration and nothing is transcribed (rows the OLD rules already queued are re-judged, since that queue is exactly what a rules change invalidates). Run it once after a scoring-rule change, then run the normal passes, which pick up whatever now reads bad. Implies --rescore.")
 # Runtime. STT and TTS run in parallel against their own servers: each has its own
 # concurrency cap so a clip busy on TTS never blocks a transcription slot, and vice
@@ -1769,7 +1901,8 @@ def main(
     stt_endpoint, stt_api_token, stt_model,
     stt_temperature, stt_recheck_temperature, stt_language, stt_response_format, stt_params,
     stt_timeout, stt_max_retries, tts_url, tts_voice, tts_speed, tts_model, tts_format, tts_timeout,
-    tts_max_retries, max_audio_seconds, mode, n_improv, cer_threshold, tail_cer_threshold, min_improvement,
+    tts_max_retries, max_audio_seconds, mode, n_improv, cer_threshold, tail_cer_threshold,
+    window_cer_threshold, bad_run_threshold, min_improvement,
     start_seed, speed_jitter,
     cfg_alpha_start, cfg_alpha_step, cfg_alpha_floor, original_cfg_alpha, refresh_duration,
     force, retry_exhausted,
@@ -1803,8 +1936,11 @@ def main(
         max_audio_seconds=max_audio_seconds,
         tts_max_retries=tts_max_retries, mode=mode,
         n_improv=n_improv, cer_threshold=cer_threshold,
-        # A negative tail threshold disables the tail gate (inf never compares true).
+        # A negative threshold disables that one gate (inf never compares true), which
+        # is how a sweep isolates a single gate without touching the other three.
         tail_cer_threshold=(float("inf") if tail_cer_threshold < 0 else tail_cer_threshold),
+        window_cer_threshold=(float("inf") if window_cer_threshold < 0 else window_cer_threshold),
+        bad_run_threshold=(float("inf") if bad_run_threshold < 0 else bad_run_threshold),
         min_improvement=min_improvement,
         start_seed=start_seed, speed_jitter=speed_jitter,
         # cfg_alpha walks down on each re-attempt; a negative start disables the knob

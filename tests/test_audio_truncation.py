@@ -151,7 +151,7 @@ def test_stage06_discards_a_truncated_draw() -> None:
         audio.write_bytes(b"the original clip")
 
         mod._tts.payload_duration = lambda payload: cap
-        out = mod.generate_drafts(0, "clip", audio, "texte", 0.9, cfg)
+        out = mod.generate_drafts(0, "clip", audio, "texte", mod.Scores(cer=0.9), cfg)
         assert out["drafts"] == [], "a truncated draw must not be persisted as a candidate"
         assert not list(Path(td).glob("*.draft*")), "no draft sidecar on disk either"
         assert out["attempts"] == cfg.n_improv
@@ -159,7 +159,7 @@ def test_stage06_discards_a_truncated_draw() -> None:
 
         # Sanity: with normal-length draws the same call does save candidates.
         mod._tts.payload_duration = lambda payload: 20.0
-        out = mod.generate_drafts(0, "clip", audio, "texte", 0.9, cfg)
+        out = mod.generate_drafts(0, "clip", audio, "texte", mod.Scores(cer=0.9), cfg)
         assert len(out["drafts"]) == cfg.n_improv
     print("OK test_stage06_discards_a_truncated_draw")
 

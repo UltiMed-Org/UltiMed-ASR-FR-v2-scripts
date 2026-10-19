@@ -358,7 +358,8 @@ def improve_cfg(**over) -> SimpleNamespace:
         tts_sem=_NullSem(), speed_jitter=0.0, start_seed=43, n_improv=1,
         cfg_alpha_start=None, cfg_alpha_step=0.0, max_audio_seconds=327.68,
         mode="tts", audio_key="audio_filepath", audio_root=None,
-        cer_threshold=0.08, tail_cer_threshold=0.12, min_improvement=0.02,
+        cer_threshold=0.08, tail_cer_threshold=0.12,
+        window_cer_threshold=0.15, bad_run_threshold=30, min_improvement=0.02,
     )
     cfg.update(over)
     return SimpleNamespace(**cfg)

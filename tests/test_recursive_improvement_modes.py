@@ -92,6 +92,10 @@ def make_cfg(mode, audio_root, n_improv=3, stt_recheck_temperature=None):
         categories=None,
         stem_requests={},
         mode=mode, n_improv=n_improv, cer_threshold=0.4, tail_cer_threshold=0.3,
+        # Loose like the two above (the fixtures here are garbage-vs-exact-text, not
+        # realistic readings), but set, because is_bad reads all four and a cfg missing
+        # one would make every clip look clean.
+        window_cer_threshold=0.5, bad_run_threshold=400,
         min_improvement=0.0,
         start_seed=43, speed_jitter=0.0, cfg_alpha_start=1.3, cfg_alpha_step=0.1,
         cfg_alpha_floor=None,
@@ -306,6 +310,14 @@ def test_tail_gate(mod):
         input_file = root / "manifest.jsonl"
         cfg = make_cfg("stt", root, n_improv=5, stt_recheck_temperature=-1.0)
         cfg.stt_recheck_temperature = None   # isolate the gate from the recheck ladder
+        # And from the window gates: replacing the last 600 characters with "zzzz" is a
+        # window defect and a 600-character unsaid run as well, so with those gates live
+        # this fixture would read bad whatever the tail did. Disabled here exactly as
+        # --window-cer-threshold -1 / --bad-run-threshold -1 do it, so what is asserted
+        # below is the tail gate and nothing else. test_window_gates_catch_a_dropped
+        # _phrase is where those two are the subject.
+        cfg.window_cer_threshold = float("inf")
+        cfg.bad_run_threshold = float("inf")
 
         def row(duration):
             return {"audio_filepath": "clip.flac", "asr_training_source": long_ref,
@@ -314,10 +326,10 @@ def test_tail_gate(mod):
 
         mod._stt.transcribe_timed = lambda path, *a, **k: (derailed, 0.1)
         out = mod.combined_worker(0, row(120.0), cfg, "default", input_file)
-        whole = out["orig_cer"]
+        whole = out["scores"].cer
         assert whole < cfg.cer_threshold, f"whole-clip CER should PASS the gate, got {whole}"
         assert out["entry"]["cer_tail"] > cfg.tail_cer_threshold, "tail CER should be stored and bad"
-        assert_eq(out["orig_tail"], out["entry"]["cer_tail"], "tail carried on the result")
+        assert_eq(out["scores"].tail, out["entry"]["cer_tail"], "tail carried on the result")
         assert_eq(out["entry"]["n_stt_check"], 1, "tail-only failure still counts as bad")
 
         # Same reading on a short clip: no tail key, and the clip is not flagged.
@@ -332,9 +344,93 @@ def test_tail_gate(mod):
         assert "n_stt_check" not in out["entry"], "clean long clip is not flagged"
 
         # badness(): a reading with a clean tail beats one whose only defect is the tail.
-        assert mod.badness(0.02, 0.9, cfg) > mod.badness(0.05, 0.01, cfg), \
+        assert (mod.badness(mod.Scores(cer=0.02, tail=0.9), cfg)
+                > mod.badness(mod.Scores(cer=0.05, tail=0.01), cfg)), \
             "a derailed tail must lose to a slightly worse but clean reading"
     print("test_tail_gate: OK")
+
+
+def test_window_gates_catch_a_dropped_phrase(mod):
+    """The defect neither whole-clip score can see: a phrase dropped in the MIDDLE of a
+    long clip. The CER averages it away and the tail never looks there, so before the two
+    window gates existed such a clip was invisible to the repair pass no matter how many
+    passes ran. Asserted at the SHIPPED gate values, because "fires where the other two
+    do not" is a claim about those numbers and not about this file's loose ones."""
+    sentence = "bonjour le patient prend du paracetamol tous les matins avant le repas. "
+    long_ref = (sentence * 60).strip()
+    # Two sentences (142 characters) skipped a third of the way in, with nothing said in
+    # their place: 142 characters of a 4259-character reference is CER 0.033, under the
+    # 0.08 gate, while the same 142 characters are 0.67 of a 213-character window.
+    cut = len(sentence) * 20
+    dropped = long_ref[:cut] + long_ref[cut + len(sentence) * 2:]
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "clip.flac").write_bytes(b"ORIG")
+        input_file = root / "manifest.jsonl"
+        improved_file = root / "manifest.improved.jsonl"
+        cfg = make_cfg("stt", root, n_improv=5)
+        cfg.stt_recheck_temperature = None   # isolate the gates from the recheck ladder
+        cfg.cer_threshold = mod._stt.DEFAULT_CER_GATE
+        cfg.tail_cer_threshold = mod._stt.DEFAULT_TAIL_CER_GATE
+        cfg.window_cer_threshold = mod._stt.DEFAULT_WINDOW_CER_GATE
+        cfg.bad_run_threshold = mod._stt.DEFAULT_BAD_RUN_GATE
+
+        # The four metrics on that reading: the first two pass, the last two fail.
+        scores = mod.score_reading(dropped, long_ref, long_ref, 120.0)
+        assert scores.cer < cfg.cer_threshold, \
+            f"a dropped phrase must be invisible to the whole-clip CER, got {scores.cer}"
+        assert scores.tail < cfg.tail_cer_threshold, \
+            f"the ending is intact, so the tail must pass, got {scores.tail}"
+        assert scores.window >= cfg.window_cer_threshold, \
+            f"the worst window must fail, got {scores.window}"
+        assert scores.bad_run >= cfg.bad_run_threshold, \
+            f"the unsaid run must fail, got {scores.bad_run}"
+        assert mod.is_bad(scores, cfg), "so the clip reads bad"
+
+        def row(duration=120.0, ref=None):
+            ref = long_ref if ref is None else ref
+            return {"audio_filepath": "clip.flac", "asr_training_source": ref,
+                    "asr_training_target": ref, "duration": duration, "index": 1,
+                    "term": "paracetamol", "transcriptions": {}}
+
+        # Through the worker: the scores are stored under the keys 01_compute_stt.py uses
+        # and the clip is flagged (n_stt_check is only written for a reading that is bad).
+        mod._stt.transcribe_timed = lambda path, *a, **k: (dropped, 0.1)
+        out = mod.combined_worker(0, row(), cfg, "default", input_file)
+        assert_eq(out["entry"]["cer_window"], scores.window, "window CER stored")
+        assert_eq(out["entry"]["bad_run_chars"], scores.bad_run, "unsaid run stored")
+        assert_eq(out["scores"].window, scores.window, "window carried on the result")
+        assert_eq(out["entry"]["n_stt_check"], 1, "a window-only failure counts as bad")
+
+        # A clean reading of the same clip is not flagged, and still stores both scores:
+        # bad_run 0 is a real answer ("nothing went missing"), and the key being PRESENT
+        # is what tells needs_work this row was judged under the window rules at all.
+        mod._stt.transcribe_timed = lambda path, *a, **k: (long_ref, 0.1)
+        out = mod.combined_worker(0, row(), cfg, "default", input_file)
+        assert out["entry"]["cer_window"] < cfg.window_cer_threshold, "clean window stored"
+        assert_eq(out["entry"]["bad_run_chars"], 0, "clean reading stores a zero run")
+        assert "n_stt_check" not in out["entry"], "a clean long clip is not flagged"
+
+        # Each window gate alone is enough, and a clean reading trips none of them.
+        clean = mod.Scores(cer=0.01, tail=0.01, window=0.01, bad_run=0)
+        assert not mod.is_bad(clean, cfg), "nothing wrong, nothing flagged"
+        assert mod.is_bad(clean._replace(window=0.2), cfg), "the window gate alone"
+        assert mod.is_bad(clean._replace(bad_run=30), cfg), "the unsaid-run gate alone"
+
+        # needs_work on a row stored BEFORE these gates existed (no cer_window, no
+        # bad_run_chars): the scores have to be derived there or the clip stays invisible
+        # forever, since nothing else revisits a row whose stored CER reads clean.
+        _w, _a, needs_work, _f, _p, _s, bar = mod.make_hooks(
+            cfg, "default", input_file, improved_file, {})
+        if bar is not None:
+            bar.close()
+        stale = row()
+        stale["transcriptions"]["default"] = {"text": dropped, "cer": scores.cer,
+                                             "cer_tail": scores.tail}
+        assert needs_work(stale), \
+            "a pre-window-gate row with a dropped phrase must be re-queued"
+    print("test_window_gates_catch_a_dropped_phrase: OK")
 
 
 def test_needs_work_rescans_tails_and_counts(mod):
@@ -353,6 +449,11 @@ def test_needs_work_rescans_tails_and_counts(mod):
         # needs one. Existence is all resolve_audio checks; nothing decodes it here.
         (root / "clip.flac").write_bytes(b"not really audio")
         cfg = make_cfg("stt", root, n_improv=5)
+        # The tail is the subject here, so the window gates are off: this fixture's 600
+        # mangled characters would otherwise flag it on bad_run no matter the duration
+        # (the window gates have no duration term, by design).
+        cfg.window_cer_threshold = float("inf")
+        cfg.bad_run_threshold = float("inf")
 
         def scored_row(transcript, duration):
             # No cer_tail key: exactly the shape a pre-tail-gate run left behind.
@@ -462,7 +563,7 @@ def test_recheck(mod):
         out = mod.combined_worker(0, base_row(), cfg, "default", input_file)
         assert_eq(calls[0], 2, "A: transcribed twice (first + one recheck), then stopped")
         assert_eq(out["entry"]["text"], TARGET, "A: kept the rescued transcript")
-        assert out["orig_cer"] < cfg.cer_threshold, "A: rescued CER should clear threshold"
+        assert out["scores"].cer < cfg.cer_threshold, "A: rescued CER should clear threshold"
         assert "n_stt_check" not in out["entry"], "A: rescued clip drops n_stt_check"
         assert out["improvement"] is None, "A: rescued clip is not regenerated"
 
@@ -482,7 +583,7 @@ def test_recheck(mod):
         calls[0] = 0
         out = mod.combined_worker(0, base_row(), cfg, "default", input_file)
         assert_eq(calls[0], 3, "B: transcribed three times (first + two rechecks)")
-        assert out["orig_cer"] >= cfg.cer_threshold, "B: confirmed CER stays bad"
+        assert out["scores"].cer >= cfg.cer_threshold, "B: confirmed CER stays bad"
         assert_eq(out["entry"]["n_stt_check"], 3, "B: confirmed-bad clip records 3 readings")
 
         # --- C: a clip an older run only read twice gets its third reading ---------
@@ -491,7 +592,7 @@ def test_recheck(mod):
         row["transcriptions"]["default"] = {"text": BAD_TRANSCRIPT, "cer": 0.9, "n_stt_check": 2}
         out = mod.combined_worker(0, row, cfg, "default", input_file)
         assert_eq(calls[0], 1, "C: reused stored transcript, topped up with one recheck")
-        assert out["orig_cer"] >= cfg.cer_threshold, "C: still bad"
+        assert out["scores"].cer >= cfg.cer_threshold, "C: still bad"
         assert_eq(out["entry"]["n_stt_check"], 3, "C: reading count reaches the target")
 
         # --- C2: a fully checked clip is NOT re-transcribed again ------------------
@@ -563,9 +664,10 @@ def test_needs_work_reads_the_stored_score(mod):
     """needs_work runs on EVERY row of the manifest before the pass transcribes anything,
     so what it costs per row is what the run costs in silence up front: re-deriving the
     CER there is ~3 ms a row (normalize + jiwer, against source and target), i.e. ~22
-    minutes on a 600k-row corpus. The stored cer / cer_tail are exactly what the gate
-    would recompute, so a plain pass reads them back. Locked with a poisoned best_cer:
-    if this fails, the scan phase went slow again."""
+    minutes on a 600k-row corpus, and the two window scores are another ~11 ms a row on
+    top (~1.8 h). All four stored scores are exactly what the gate would recompute, so a
+    plain pass reads them back. Locked with poisoned derivation functions: if this fails,
+    the scan phase went slow again."""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         (root / "clip.flac").write_bytes(b"not really audio")
@@ -578,25 +680,38 @@ def test_needs_work_reads_the_stored_score(mod):
         def poisoned(*a, **k):
             raise AssertionError("needs_work must not re-derive a score already on the row")
 
-        def row(cer, tail, duration=120.0):
+        def row(cer, tail, duration=120.0, window=0.0, bad_run=0):
             entry = {"text": TARGET, "cer": cer}
             if tail is not None:
                 entry["cer_tail"] = tail
+            if window is not None:
+                entry["cer_window"] = window
+            if bad_run is not None:
+                entry["bad_run_chars"] = bad_run
             return {"audio_filepath": "clip.flac", "asr_training_source": TARGET,
                     "asr_training_target": TARGET, "duration": duration,
                     "transcriptions": {"default": entry}}
 
-        keep = (mod.best_cer, mod.best_tail_cer)
-        mod.best_cer = mod.best_tail_cer = poisoned
+        keep = (mod.best_cer, mod.best_tail_cer, mod.best_window_metrics)
+        mod.best_cer = mod.best_tail_cer = mod.best_window_metrics = poisoned
         try:
             assert not needs_work(row(0.01, 0.01)), "a clean stored score is trusted"
             assert needs_work(row(0.9, 0.01)), "a bad stored CER re-queues"
             assert needs_work(row(0.01, 0.9)), "a bad stored tail re-queues"
+            assert needs_work(row(0.01, 0.01, window=0.9)), \
+                "a bad stored window CER re-queues"
+            assert needs_work(row(0.01, 0.01, bad_run=500)), \
+                "a bad stored unsaid-run length re-queues"
             # A clip too short to have a tail has nothing missing, so nothing to derive.
             assert not needs_work(row(0.01, None, duration=5.0)), \
                 "a short clip has no tail to look for"
+            # Neither window score stored, and this reference (39 characters) is far too
+            # short for either gate to be able to fire: deriving them would be pure cost,
+            # so the cheap path must skip it. See needs_work for the bound.
+            assert not needs_work(row(0.01, 0.01, window=None, bad_run=None)), \
+                "a short reference cannot fail a window gate, so nothing is derived"
         finally:
-            mod.best_cer, mod.best_tail_cer = keep
+            mod.best_cer, mod.best_tail_cer, mod.best_window_metrics = keep
     print("test_needs_work_reads_the_stored_score: OK")
 
 
@@ -889,6 +1004,7 @@ if __name__ == "__main__":
     test_backfill(load_module())
     test_recheck_temperature(load_module())
     test_tail_gate(load_module())
+    test_window_gates_catch_a_dropped_phrase(load_module())
     test_needs_work_rescans_tails_and_counts(load_module())
     test_recheck(load_module())
     test_rescore_keeps_the_rows_data(load_module())
