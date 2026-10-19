@@ -89,10 +89,20 @@ Both servers are services in the same CrispASR `docker-compose.yml`:
 
    ```sh
    CRISPASR_COMPOSE=/abs/path/to/CrispASR/docker-compose.yml   # TODO: your path
-   WDOC_WHISPER_ENDPOINT=...   # STT base URL (you already set these)
-   WDOC_WHISPER_API_KEY=...    # token -> gitignore .env
-   WDOC_WHISPER_MODEL=...      # must match how the dataset was transcribed
+   WDOC_WHISPER_API_KEY=...    # token -> gitignore .env (or set CRISPASR_API_KEY)
+   # Both optional now, and both default to the local v2 stack:
+   # WDOC_WHISPER_ENDPOINT=http://127.0.0.1:8002
+   # STT_MODEL=whisper.cpp/ggml-large-v3-turbo   # must match how the dataset was
+   #                                             # transcribed, and is the key the
+   #                                             # readings are stored under
    ```
+
+   `.env` is sourced with `set -a` **before** those defaults, so a line there always
+   wins. A v1 `.env` therefore keeps pointing at the old remote endpoint (which now
+   answers 502) and keeps `WDOC_WHISPER_MODEL=whisper-1`, which would file every v2
+   reading under the v1 key. Comment both out, or set them to the values above. The
+   driver prints the judge and endpoint it is about to use at startup, and warns when
+   the endpoint is not local, precisely because this is invisible otherwise.
 
 2. **Make the scripts executable:** `chmod +x switch_server.sh driver.sh`.
 
