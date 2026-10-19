@@ -170,7 +170,7 @@ SAMPLE_RESOLUTION = 1_000_000
 
 #: The int8 ONNX export used by default. A sibling of this repo, so the path carries no
 #: username. It is the fine-tuned checkpoint: read the "What this is NOT" note above.
-DEFAULT_MODEL_DIR = ROOT.parent / "parakeet-tdt-0.6b-v3-UltiMed-onnx"
+DEFAULT_MODEL_DIR = ROOT.parent / "parakeet-tdt-0.6b-v3-ultra-UltiMed-onnx"
 
 #: Gates, same numbers stage 06 uses (`--cer-threshold` 0.08, `--tail-cer-threshold`
 #: 0.12, the latter looser because the tail window cuts mid-sentence). Shared values so

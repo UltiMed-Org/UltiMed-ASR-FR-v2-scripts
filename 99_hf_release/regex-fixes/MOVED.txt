@@ -1,5 +1,5 @@
 The UltiMed regex fixes live in the finetuned model's repository:
-https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-UltiMed-onnx/tree/main/regex-fixes
+https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-onnx/tree/main/regex-fixes
 
 They are two lists of regular expressions (drug names, medical terms) that rewrite the
 misspellings a parakeet model still makes on French medical vocabulary, for example
