@@ -247,9 +247,15 @@ def test_backfill(mod):
         ]
         out_file.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
         improved_records = {"d.flac": {"audio_filepath": "d.flac", "cfg_alpha": 1.7}}
-        cfg = SimpleNamespace(audio_key="audio_filepath", original_cfg_alpha=1.3)
+        # audio_root/input_file are what `original_cfg_alpha_for` needs to look for a
+        # per-clip cfg_alpha_sidecar.jsonl beside the audio. None of these clips exist on
+        # disk here, which is the point: the lookup misses and every un-regenerated row
+        # falls back to --original-cfg-alpha, the behaviour asserted below.
+        cfg = SimpleNamespace(audio_key="audio_filepath", original_cfg_alpha=1.3,
+                              audio_root=None)
 
-        n = mod.backfill_cfg_alpha(out_file, improved_records, cfg)
+        n = mod.backfill_cfg_alpha(out_file, improved_records, cfg,
+                                   out_file.parent / "input.jsonl")
         assert_eq(n, 3, "backfill count (c already had cfg_alpha)")
         by = {json.loads(line)["audio_filepath"]: json.loads(line)
               for line in out_file.read_text().splitlines() if line.strip()}
@@ -258,9 +264,12 @@ def test_backfill(mod):
         assert_eq(by["c.flac"]["cfg_alpha"], 1.9, "c untouched")
         assert_eq(by["d.flac"]["cfg_alpha"], 1.7, "d -> audit win cfg_alpha")
         # Idempotent: a second pass sees every row populated and rewrites nothing.
-        assert_eq(mod.backfill_cfg_alpha(out_file, improved_records, cfg), 0, "backfill idempotent")
+        assert_eq(mod.backfill_cfg_alpha(out_file, improved_records, cfg,
+                                         out_file.parent / "input.jsonl"),
+                  0, "backfill idempotent")
         # A missing output file is a no-op (fresh run, nothing to backfill).
-        assert_eq(mod.backfill_cfg_alpha(root / "nope.stt.jsonl", improved_records, cfg), 0,
+        assert_eq(mod.backfill_cfg_alpha(root / "nope.stt.jsonl", improved_records, cfg,
+                                         root / "input.jsonl"), 0,
                   "backfill on missing file")
     print("test_backfill: OK")
 
