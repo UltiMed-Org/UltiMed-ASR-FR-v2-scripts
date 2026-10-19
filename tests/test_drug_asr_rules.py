@@ -1,11 +1,15 @@
+#!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["click", "loguru", "litellm", "tiktoken", "tqdm", "tenacity", "rapidfuzz", "wordfreq"]
+# ///
 """Tests for 08_drug_asr_rules: the doctests of 01_extract_drug_errors.py (tokenizing,
 drug spotting, the character-level mapping inside a multi-word replace, glued elisions)
 and of 02_build_fix_rules.py (pattern bounds, rejection reasons, ordering, apply_rules),
 03_merge_rules.py, 04_drop_unk_variants.py, 05_build_manual_rules.py and
 06_build_convention_fixes.py.
 
-    uv run --with click --with loguru --with litellm --with tiktoken --with tqdm \
-        --with tenacity --with rapidfuzz --with wordfreq tests/test_drug_asr_rules.py
+    uv run tests/test_drug_asr_rules.py
 
 This file was written by Claude Code.
 """

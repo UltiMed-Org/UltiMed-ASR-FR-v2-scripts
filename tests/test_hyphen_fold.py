@@ -68,10 +68,26 @@ def test_en_and_em_dash_are_not_folded_and_stay_forbidden():
 
 
 def test_parse_strips_hyphen_from_paragraph():
+    # The fold runs first, then `apply_label_conventions` has its say, so what comes out
+    # of the parser is the hyphen policy of the CORPUS, not of the fold. `cortico-` is a
+    # combining form and `resistant` an adjective, so the 2026-10-08 convention glues
+    # them (dictionary spelling, and the WER normaliser counts a hyphen and a space as
+    # different tokens). That convention is younger than this test, which asserted
+    # `cortico-resistant` and so broke the day it landed.
     raw = f"<t>Syndrome nephrotique cortico{HYPHEN}resistant chez le nourrisson.</t>"
     (variant,) = parse_asr_training_target(raw, expected=1)
     assert HYPHEN not in variant
-    assert variant == "Syndrome nephrotique cortico-resistant chez le nourrisson."
+    assert variant == "Syndrome nephrotique corticoresistant chez le nourrisson."
+
+    # ...and one where the hyphen is MEANT to survive to the end, which is the half of
+    # this test the conventions cannot move: gluing `anti` to `inflammatoire` would double
+    # the i, so the convention keeps the hyphen. Had the fold left U+2010 in place, the
+    # tokenizer would map it to <unk> and the rewrite gate would reject the chunk, which
+    # is the bug this file exists for (PARHAF chunk 7191).
+    raw = f"<t>Un traitement anti{HYPHEN}inflammatoire bien tolere.</t>"
+    (variant,) = parse_asr_training_target(raw, expected=1)
+    assert HYPHEN not in variant
+    assert variant == "Un traitement anti-inflammatoire bien tolere."
 
 
 def main() -> int:
