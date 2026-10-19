@@ -74,19 +74,30 @@ already fired.
 
 ## The six work items
 
-Each is one commit. Order is dependency order.
+Each is one commit. Order is dependency order. Items 1 and 2 are done.
 
-1. **Window gates in the repair pass.** `01_recursive_improvement.py:340` `is_bad()` tests
-   `cer` and `tail` only, so a 180 s document that reads 170 s correctly and loops 10 s in
-   the middle (`cer` 0.04, `tail` 0.03) passes today. Add `window_cer` and `bad_run_chars`,
-   imported from `01_compute_stt.py` through the existing `_stt` module handle so nothing is
-   duplicated, plus `WINDOW_CER_THRESHOLD` and `BAD_RUN_CHARS_THRESHOLD` in `driver.sh`.
-   `is_bad` is the only call site. Covered by a new test next to `tests/test_window_cer.py`,
-   which already pins the metric itself.
+1. **Window gates in the repair pass.** DONE (9a639de, 231003c). `is_bad()` tested `cer`
+   and `tail` only, so a 180 s document that read 170 s correctly and dropped a phrase in
+   the middle (`cer` 0.04, `tail` 0.03) passed. It now tests all four scores, read from
+   `01_compute_stt.py` through the existing `_stt` handle, with `WINDOW_CER_THRESHOLD` and
+   `BAD_RUN_THRESHOLD` in `driver.sh` (which no longer carries a default for any of the
+   four: unset means the script's own, so the numbers keep one home).
+   `is_bad` was not the only call site after all: the four scores travel through ~40 of
+   them, so they now move as one `Scores` NamedTuple. `needs_work` derives the two window
+   scores only when the stored keys are missing AND the reference is long enough for
+   either gate to be able to fire, which keeps ~1.8 h of scoring off the front of every
+   pass; the bound is exact, see the comment there. Covered by
+   `test_window_gates_catch_a_dropped_phrase` in `tests/test_recursive_improvement
+   _modes.py` (end to end through `combined_worker` and `needs_work`, at the shipped gate
+   values), with `tests/test_window_cer.py` still pinning the metric itself.
 
-2. **`--stems-file`.** A pass can be restricted by `--category` but not to a list of clips,
-   which is what T2 needs (re-judge these 12,000 and nothing else). The 2,000-clip audit
-   needed the same thing and got it from a hacked environment variable.
+2. **`--stems-from`.** DONE (61d9aae). A pass could be restricted by `--category` but not
+   to a list of clips, which is what T2 needs (re-judge these 12,000 and nothing else).
+   The 2,000-clip audit needed the same thing and got it from a hacked environment
+   variable. The list loader is shared with `03_qc_cpu_stt.py` (`utils/stem_requests.py`),
+   and a missing list file is fatal rather than an empty allow-list, since a QC stage that
+   reports a clean corpus because it could not find its input is the worst failure
+   available here.
 
 3. **The v2 generation guards on a redraw.** A redo sends `cfg_alpha` and
    `voxtral_noise_seed` but no frame budget, and checks `max_audio_seconds` only after the
