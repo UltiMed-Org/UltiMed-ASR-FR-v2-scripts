@@ -154,6 +154,7 @@ _audit = _load_module(_HERE / "02_audit_durations.py", "stage05_audit")
 sys.path.insert(0, str(ROOT / "utils"))
 from cfg_sidecar import SIDECAR_FILENAME  # noqa: E402
 from nemo_manifest import parse_clip_name  # noqa: E402
+import stem_requests as _stems  # noqa: E402
 from voice_assignment import group_field, voice_for_row  # noqa: E402
 
 #: Where the per-clip QC rows land, beside the audio and the cfg_alpha sidecar.
@@ -862,6 +863,11 @@ def poll_sidecar(watch: StageWatch, ctx: Context) -> None:
 def load_stem_requests(paths: tuple[Path, ...]) -> dict[str, set[str]]:
     """Read "check exactly these clips" lists. Returns stage name -> stems, "" = any.
 
+    Thin wrapper over `utils/stem_requests.py`, which owns the parsing because stage 06's
+    repair pass reads the same two file shapes: this one only adds the click error type
+    and the loguru line. See that module for what the shapes are and why a missing file
+    is fatal.
+
     This is the second half of the acoustic pre-filter
     (`04_qc_acoustic_loops.py`): that script scores every clip in the corpus from the
     waveform alone and flags ~1% of them, and this is how those flags come back here to
@@ -887,31 +893,16 @@ def load_stem_requests(paths: tuple[Path, ...]) -> dict[str, set[str]]:
     dict
         Stage name -> set of stems. The key `""` holds stems that apply to any stage.
     """
-    requests: dict[str, set[str]] = {}
-    for path in paths:
-        if not path.is_file():
-            raise click.BadParameter(f"--stems-from: no such file {path}")
-        rows = plain = 0
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("{"):
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    continue                 # torn final line, as everywhere else here
-                stem = row.get("stem")
-                if not stem or ("looped" in row and not row["looped"]):
-                    continue
-                requests.setdefault(row.get("stage") or "", set()).add(stem)
-                rows += 1
-            else:
-                requests.setdefault("", set()).add(line)
-                plain += 1
+    def log_one(path: Path, rows: int, plain: int) -> None:
         logger.info("{}: {} flagged row(s), {} bare stem(s) to check", path.name, rows,
                     plain)
-    return requests
+
+    try:
+        return _stems.load_stem_requests(paths, on_file=log_one)
+    except FileNotFoundError as exc:
+        # The shared loader is stdlib-only and cannot raise click's error type, but a
+        # bad path given on this command line should still read as a usage error.
+        raise click.BadParameter(f"--stems-from: {exc}") from exc
 
 
 def poll_audio(watch: StageWatch, ctx: Context) -> int:

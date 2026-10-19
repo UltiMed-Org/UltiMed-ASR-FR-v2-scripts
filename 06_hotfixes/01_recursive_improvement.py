@@ -184,6 +184,15 @@ losing anything. Convergence (the ``stt`` exit 10) is then judged over the selec
 categories only, so the driver's alternating loop stops when just those subsets are done,
 ignoring any pending clips a prior full run left in the other categories.
 
+``--stems-from`` (repeatable) is the same restriction one CLIP at a time: a QC sidecar
+jsonl contributes its flagged rows' stems, anything else is read as a plain list of
+stems, and every row outside the list is passed through unchanged, convergence included.
+It reads the same two file shapes as ``05_generate_audio/03_qc_cpu_stt.py --stems-from``
+(both call ``utils/stem_requests.py``), so one stage's findings are another's worklist.
+That is what makes a second opinion affordable: the v2 plan sweeps all 602k clips with
+the fast whisper model, then re-judges only the ~12k it flagged with the slower,
+stronger one before a single clip is regenerated, which is an hour instead of three days.
+
 Usage (one command does STT + improvement over the whole manifest):
 
     uv run 01_recursive_improvement.py \
@@ -276,6 +285,9 @@ _tts = _load_module(
 # (stdlib-only import, so it costs nothing here).
 sys.path.insert(0, str(_HERE.parent / "utils"))
 from nemo_manifest import parse_clip_name  # noqa: E402
+# "Work on exactly these clips" lists, shared with the live CPU QC that produces them
+# (05_generate_audio/03_qc_cpu_stt.py --stems-from reads the same two file shapes).
+import stem_requests as _stems  # noqa: E402
 # The cfg_alpha ladder and the per-clip sidecar are shared with stage 05 (which walks
 # the same rungs when a take is rejected for its duration): one copy of the numbers, one
 # file format, so the `cfg_alpha` column this stage writes can tell the truth about a
@@ -1336,7 +1348,9 @@ def backfill_cfg_alpha(out_file: Path, improved_records: dict, cfg: SimpleNamesp
     return changed
 
 
-def count_pending(out_file: Path, categories: set[str] | None = None) -> tuple[int, int]:
+def count_pending(out_file: Path, categories: set[str] | None = None,
+                  stem_requests: dict[str, set[str]] | None = None,
+                  audio_key: str = "audio_filepath") -> tuple[int, int]:
     """(pending_tts, pending_stt) counts in a written ``.stt.jsonl``, so the driver /
     main can tell when the alternating passes have fully converged (both zero). A
     pending_tts clip still needs a tts pass to draft candidates; a pending_stt clip
@@ -1344,7 +1358,10 @@ def count_pending(out_file: Path, categories: set[str] | None = None) -> tuple[i
 
     When ``categories`` is given, only rows in those categories are counted, so a
     category-restricted run converges on its own subset and ignores pending clips a
-    prior full run left in other categories (which this run never touches)."""
+    prior full run left in other categories (which this run never touches). A
+    ``stem_requests`` filter does the same thing one clip at a time, and for the same
+    reason: a run restricted to 12k flagged clips must not be held open forever by a
+    pending row it is never going to look at."""
     n_tts = n_stt = 0
     if not out_file.is_file():
         return 0, 0
@@ -1358,6 +1375,9 @@ def count_pending(out_file: Path, categories: set[str] | None = None) -> tuple[i
             except json.JSONDecodeError:
                 continue
             if categories and (rec.get("category") not in categories):
+                continue
+            if stem_requests and not _stems.row_is_requested(
+                    stem_requests, rec.get(audio_key) or ""):
                 continue
             status = (rec.get("improvement") or {}).get("status")
             if status == "pending_tts":
@@ -1555,6 +1575,14 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
         if cfg.categories and (out_rec.get("category") not in cfg.categories):
             return False
 
+        # Clip restriction (--stems-from), the same filter one clip at a time instead of
+        # one subset at a time, and with the same pass-through semantics. It is what lets
+        # a second, stronger judge re-score ONLY what the first one flagged: 12k clips
+        # rather than 602k, which is the difference between an hour and a day and a half.
+        if cfg.stem_requests and not _stems.row_is_requested(
+                cfg.stem_requests, out_rec.get(cfg.audio_key) or ""):
+            return False
+
         # --rescore-only: an OFFLINE pass that re-derives stored scores and opens no
         # connection at all, so it can run with both servers down and finishes in
         # minutes. Only a row that already carries a usable transcript qualifies;
@@ -1680,6 +1708,14 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
                    "(existing transcriptions / CER preserved, never re-run), so a focused run "
                    "does not lose the rest of the dataset's work. Convergence (exit 10) is then "
                    "judged over the selected categories only. Default: all categories.")
+@click.option("--stems-from", "stems_from", multiple=True,
+              type=click.Path(exists=True, path_type=Path),
+              help="Restrict work to the clips named in this file (repeatable): either a "
+                   "QC sidecar jsonl (its flagged rows' `stem`s) or a plain list of stems, "
+                   "one per line. Same two shapes as 03_qc_cpu_stt.py --stems-from, and "
+                   "the same pass-through semantics as --category: every other row keeps "
+                   "what it already has. This is how a second, stronger judge re-scores "
+                   "only what the first one flagged.")
 # STT.
 @click.option("--stt-endpoint", required=True, help="OpenAI-compatible /v1/audio/transcriptions URL.")
 @click.option("--stt-api-token", default="", envvar="STT_API_TOKEN", help="Bearer token; falls back to $STT_API_TOKEN.")
@@ -1729,7 +1765,8 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
 @click.option("--flush-interval", default=0.0, type=float, help="Also flush every this many seconds (e.g. 300 = every 5 min); 0 = disabled.")
 @click.option("--limit", default=0, type=int, help="Process at most this many lines per file (0 = all), for testing.")
 def main(
-    input_path, output_root, audio_root, audio_key, categories, stt_endpoint, stt_api_token, stt_model,
+    input_path, output_root, audio_root, audio_key, categories, stems_from,
+    stt_endpoint, stt_api_token, stt_model,
     stt_temperature, stt_recheck_temperature, stt_language, stt_response_format, stt_params,
     stt_timeout, stt_max_retries, tts_url, tts_voice, tts_speed, tts_model, tts_format, tts_timeout,
     tts_max_retries, max_audio_seconds, mode, n_improv, cer_threshold, tail_cer_threshold, min_improvement,
@@ -1748,6 +1785,11 @@ def main(
         audio_root=audio_root, audio_key=audio_key,
         # Empty tuple -> None so "no filter" is a simple falsy check everywhere.
         categories=(set(categories) or None),
+        stem_requests=_stems.load_stem_requests(
+            stems_from,
+            on_file=lambda path, rows, plain: logger.info(
+                f"--stems-from {path.name}: {rows} flagged row(s), {plain} bare stem(s)"),
+        ),
         stt_endpoint=stt_endpoint, stt_token=stt_api_token, stt_model=stt_model,
         stt_temperature=stt_temperature,
         # A negative recheck temperature disables the bad-CER triple-check.
@@ -1807,6 +1849,12 @@ def main(
         logger.info(
             f"category filter: only {sorted(cfg.categories)} "
             f"(rows in other categories are passed through unchanged)"
+        )
+    if cfg.stem_requests:
+        n_stems = sum(len(s) for s in cfg.stem_requests.values())
+        logger.info(
+            f"clip filter: only {n_stems} stem(s) from --stems-from "
+            f"(every other row is passed through unchanged)"
         )
     if cfg.rescore_only:
         if mode == "tts":
@@ -1913,7 +1961,8 @@ def main(
         total_queued += stats["queued"]
         total_done += stats["done"]
         if cfg.mode != "both":
-            n_tts, n_stt = count_pending(out_file, cfg.categories)
+            n_tts, n_stt = count_pending(out_file, cfg.categories, cfg.stem_requests,
+                                 cfg.audio_key)
             total_pending_tts += n_tts
             total_pending_stt += n_stt
             if n_tts or n_stt:

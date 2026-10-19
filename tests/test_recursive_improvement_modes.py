@@ -85,8 +85,12 @@ def make_cfg(mode, audio_root, n_improv=3, stt_recheck_temperature=None):
         stt_extra_params={}, stt_timeout=1.0, stt_max_retries=1,
         tts_url="http://tts.invalid", tts_voice="fr_female", tts_speed=None,
         tts_model=None, tts_format="flac", tts_timeout=1.0, tts_max_retries=1,
-        # None = no --category filter, the whole dataset (needs_work reads this).
+        # None / empty = no row filter at all, i.e. the whole dataset. Both are read by
+        # needs_work, and the real cfg always carries both, so they are set here rather
+        # than reached for with getattr: a pass that silently skipped its filter because
+        # the attribute was missing would look like a converged dataset.
         categories=None,
+        stem_requests={},
         mode=mode, n_improv=n_improv, cer_threshold=0.4, tail_cer_threshold=0.3,
         min_improvement=0.0,
         start_seed=43, speed_jitter=0.0, cfg_alpha_start=1.3, cfg_alpha_step=0.1,

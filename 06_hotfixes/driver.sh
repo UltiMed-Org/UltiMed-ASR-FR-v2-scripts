@@ -90,6 +90,13 @@
 #             categories are passed through unchanged and convergence is judged
 #             over the selected categories only, so the loop stops when just
 #             those subsets are done. Empty (default) = the whole dataset.
+#   STEMS_FROM space-separated list of files naming the only CLIPS to work on, each
+#             either a QC sidecar jsonl (its flagged rows) or a plain list of stems,
+#             one per line. Same pass-through and convergence semantics as CATEGORY,
+#             one clip at a time instead of one subset at a time. This is the v2
+#             plan's second judge: the fast model sweeps all 602k clips, then the
+#             slower, stronger one is pointed at just the ones it flagged, e.g.
+#                 sudo -E MODE=stt STT_MODEL=large-v3 STEMS_FROM=flags.txt ./driver.sh
 #
 # This file was written with Claude Code.
 set -uo pipefail
@@ -311,6 +318,26 @@ if (( ${#CATEGORY_ARGS[@]} )); then
   echo "driver: restricting work to categories: ${CATEGORY}"
 fi
 
+# Optional CLIP restriction (space-separated list of files, each either a QC sidecar
+# jsonl or a plain list of stems). Same mechanism as CATEGORY one clip at a time, and
+# the reason the v2 plan has a second judge at all: the full sweep scores 602k clips with
+# the fast model, and this is how the slower, stronger one is pointed at just the ~12k it
+# flagged. Each file must exist (the pass refuses a missing one rather than checking
+# nothing, which would read as a clean corpus). Unquoted expansion is intentional
+# word-splitting.
+STEMS_FROM="${STEMS_FROM:-}"
+STEMS_ARGS=()
+for _f in ${STEMS_FROM}; do
+  if [[ ! -f "${_f}" ]]; then
+    echo "driver.sh: STEMS_FROM file not found: ${_f}" >&2
+    exit 1
+  fi
+  STEMS_ARGS+=(--stems-from "${_f}")
+done
+if (( ${#STEMS_ARGS[@]} )); then
+  echo "driver: restricting work to the clips listed in: ${STEMS_FROM}"
+fi
+
 # Expand the INPUT list into one (manifest, output dir, audio root) triple per dataset.
 # The output FILE is named after the manifest stem (<stem>.stt.jsonl), so two manifests
 # both called full.jsonl would fight over one resume file: the first dataset keeps
@@ -417,6 +444,7 @@ run_pass() {  # $1 = stt|tts ; runs on the CUR_* dataset; returns the pass's exi
         --max-audio-seconds "${MAX_AUDIO_SECONDS}" \
         --stt-parallel "${STT_PARALLEL}" --tts-parallel "${TTS_PARALLEL}" \
         ${CATEGORY_ARGS[@]+"${CATEGORY_ARGS[@]}"} \
+      ${STEMS_ARGS[@]+"${STEMS_ARGS[@]}"} \
         ${extra[@]+"${extra[@]}"} \
         --shuffle
 }
