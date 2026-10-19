@@ -172,38 +172,15 @@ SAMPLE_RESOLUTION = 1_000_000
 #: username. It is the fine-tuned checkpoint: read the "What this is NOT" note above.
 DEFAULT_MODEL_DIR = ROOT.parent / "parakeet-tdt-0.6b-v3-ultra-UltiMed-onnx"
 
-#: Gates, same numbers stage 06 uses (`--cer-threshold` 0.08, `--tail-cer-threshold`
-#: 0.12, the latter looser because the tail window cuts mid-sentence). Shared values so
-#: "over the gate" means the same thing in both stages, and the early warning predicts
-#: what the real QC loop will flag rather than inventing a second standard.
-DEFAULT_CER_GATE = 0.08
-DEFAULT_TAIL_CER_GATE = 0.12
-
-#: The WINDOWED gates (`window_metrics` in stage 06), which exist because both gates
-#: above average over the whole clip and so go blind on a long one: five words lost in
-#: the middle of a 48 s PARHAF chunk is CER 0.044, half the gate, and the tail window
-#: only covers the clip's last 30 s. That is the v1.3 failure mode (14 clips retired for
-#: a skipped phrase, none caught by the v1 QC), and 9.1% of the v2 dictionary is long
-#: enough to hide it.
-#:
-#: Both numbers are measured, on the 19,958 v1 clips of `06_hotfixes/improved/full.stt.jsonl`
-#: scored against their labels (2026-10-16). That set is the right calibration: v1 shipped,
-#: so nearly every clip is good, and its transcripts come from whisper-1, a model that is
-#: WORSE on this vocabulary than the one here, which makes the false-positive rates below
-#: an upper bound.
-#:   * `bad_run_chars` p50 1, p90 2, p99 5, p99.9 9, max 26. Five French words are ~30
-#:     normalized characters, so the gate sits above every clean clip in 20k and still
-#:     catches the defect asked about: 0 false positives at 30, and the worst offenders
-#:     at 25-26 are not defects at all but whisper writing "mUI/L" where the label spells
-#:     "milliunites internationales".
-#:   * `window_cer` p99 0.061, p99.9 0.103, max 0.211 -> 1 clip in 20k at 0.15 (0.005%).
-#:     Looser than the tail gate on purpose: the window is 213 characters against the
-#:     tail's 498, so it cuts mid-sentence more often and is noisier.
-#: A drop SHORTER than ~4 words stays under both, which is the honest limit of the
-#: method. Both values are stored on every row, so the thresholds can be re-swept
-#: offline over the sidecar without transcribing anything again.
-DEFAULT_WINDOW_CER_GATE = 0.15
-DEFAULT_BAD_RUN_GATE = 30
+#: The four gates, re-exported from the module that owns the four scores
+#: (`06_hotfixes/01_compute_stt.py`, which carries the measured calibration behind each
+#: number). Read from there rather than restated here so "over the gate" cannot come to
+#: mean two different things in two stages: this early warning exists to predict what the
+#: real QC loop will flag, which it only does while both read the same numbers.
+DEFAULT_CER_GATE = _stt.DEFAULT_CER_GATE
+DEFAULT_TAIL_CER_GATE = _stt.DEFAULT_TAIL_CER_GATE
+DEFAULT_WINDOW_CER_GATE = _stt.DEFAULT_WINDOW_CER_GATE
+DEFAULT_BAD_RUN_GATE = _stt.DEFAULT_BAD_RUN_GATE
 
 
 #: Defect shapes a flagged clip can have, cheapest-to-act-on first. See

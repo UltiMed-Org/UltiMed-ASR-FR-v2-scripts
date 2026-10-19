@@ -48,16 +48,24 @@ answers into the position of judging them. UltiMed keeps its T0 job, where it is
 
 ## Gate values
 
+All four gates live in `06_hotfixes/01_compute_stt.py`, next to the scores they judge,
+and every stage reads them from there:
+
 ```
-CER_THRESHOLD=0.08           # whole clip, v1's second sweep
-TAIL_CER_THRESHOLD=0.12      # last ~30 s
-WINDOW_CER_THRESHOLD=0.15    # worst 15 s window (213 normalized chars)
-BAD_RUN_CHARS_THRESHOLD=50   # longest contiguous dropped reference span. TODO: set from the T1 distribution
-MIN_IMPROVEMENT=0.02         # a 0.09 clip is not fixed by a 0.088 draw
+DEFAULT_CER_GATE        = 0.08   # whole clip
+DEFAULT_TAIL_CER_GATE   = 0.12   # last ~30 s, looser because that window cuts mid-sentence
+DEFAULT_WINDOW_CER_GATE = 0.15   # worst 15 s window (213 normalized chars)
+DEFAULT_BAD_RUN_GATE    = 30     # longest contiguous dropped reference span, in chars
+MIN_IMPROVEMENT=0.02             # a 0.09 clip is not fixed by a 0.088 draw (driver.sh)
 ```
 
-0.15 on the window is one dropped phrase: five words is roughly 30 normalized characters,
-which is 0.14 of a 213-character window. It is the same value the 2,000-clip audit used.
+The two window numbers are measured rather than chosen, on the 19,958 v1 clips of
+`improved/full.stt.jsonl` scored against their labels (2026-10-16): `bad_run_chars` runs
+p50 1, p99 5, p99.9 9, max 26, so a gate at 30 sits above every clean clip in 20k while
+still catching a five-word drop (~30 normalized characters), and `window_cer` runs p99
+0.061, max 0.211, so 0.15 costs 1 false positive in 20k. v1 shipped and its transcripts
+come from whisper-1, which is worse on this vocabulary than the judges v2 uses, so both
+are upper bounds on the false-positive rate.
 
 The window gate needs no special case for short clips. `window_metrics` on a reference
 shorter than one window returns the whole-clip score, and 0.15 is looser than the 0.08
@@ -140,8 +148,6 @@ sudo -E MODE=stt STT_MODEL=large-v3 STEMS_FILE=flags.txt ./driver.sh   # T2
 
 ## Open TODOs
 
-* `BAD_RUN_CHARS_THRESHOLD=50` is a starting value. Measure the distribution on T1 output
-  and set it before T3 spends GPU on it.
 * Re-measure STT throughput on 500 clips against the local endpoint before trusting the
   31 h.
 * `99_hf_release/README.md` still carries four `TODO (v2)` cells, including the distinct

@@ -618,6 +618,43 @@ WINDOW_CHARS = round(WINDOW_SECONDS * NORM_CHARS_PER_SECOND)  # 213
 MISSING_CONTEXT_CHARS = 40
 
 
+#: The four quality gates, defined HERE because this module owns the four scores they
+#: are applied to, and every stage that judges a clip reads them from here: the live CPU
+#: QC during generation (`05_generate_audio/03_qc_cpu_stt.py`), the repair pass
+#: (`01_recursive_improvement.py`), and `02_statistics.py`'s "bad clip" rate. They used
+#: to live in the live QC alone, with stage 06 keeping its own copies as shell defaults
+#: in `driver.sh`, which is two standards for one question.
+#:
+#: Whole clip and tail. The tail is looser because its window cuts mid-sentence.
+DEFAULT_CER_GATE = 0.08
+DEFAULT_TAIL_CER_GATE = 0.12
+
+#: The WINDOWED gates, which exist because both gates above average over the whole clip
+#: and so go blind on a long one: five words lost in the middle of a 48 s PARHAF chunk
+#: is CER 0.044, half the gate, and the tail window only covers the clip's last 30 s.
+#: That is the v1.3 failure mode (14 clips retired for a skipped phrase, none caught by
+#: the v1 QC), and 9.1% of the v2 dictionary is long enough to hide it.
+#:
+#: Both numbers are measured, on the 19,958 v1 clips of `improved/full.stt.jsonl` scored
+#: against their labels (2026-10-16). That set is the right calibration: v1 shipped, so
+#: nearly every clip is good, and its transcripts come from whisper-1, a model WORSE on
+#: this vocabulary than the ones judging v2, which makes the false-positive rates below
+#: an upper bound.
+#:   * `bad_run_chars` p50 1, p90 2, p99 5, p99.9 9, max 26. Five French words are ~30
+#:     normalized characters, so the gate sits above every clean clip in 20k and still
+#:     catches the defect asked about: 0 false positives at 30, and the worst offenders
+#:     at 25-26 are not defects at all but whisper writing "mUI/L" where the label spells
+#:     "milliunites internationales".
+#:   * `window_cer` p99 0.061, p99.9 0.103, max 0.211 -> 1 clip in 20k at 0.15 (0.005%).
+#:     Looser than the tail gate on purpose: the window is 213 characters against the
+#:     tail's 498, so it cuts mid-sentence more often and is noisier.
+#: A drop SHORTER than ~4 words stays under both, which is the honest limit of the
+#: method. All four values are stored on every row, so the thresholds can be re-swept
+#: offline over an existing sidecar without transcribing anything again.
+DEFAULT_WINDOW_CER_GATE = 0.15
+DEFAULT_BAD_RUN_GATE = 30
+
+
 class WindowScore(NamedTuple):
     """What `window_score` found, numbers and the text they came from.
 

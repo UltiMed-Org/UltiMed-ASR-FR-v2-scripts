@@ -62,9 +62,12 @@ SENTENCE = (
     "et une asthenie marquee depuis trois semaines sans fievre ni amaigrissement "
 )
 
-CER_GATE = 0.08           # 03_qc_cpu_stt.py DEFAULT_CER_GATE
-WINDOW_GATE = 0.15        # 03_qc_cpu_stt.py DEFAULT_WINDOW_CER_GATE
-RUN_GATE = 30             # 03_qc_cpu_stt.py DEFAULT_BAD_RUN_GATE
+# The real gates, not copies of them: every stage that judges a clip reads these four
+# from the scorer, so a test that restated the numbers could pass while the shipped gate
+# had moved.
+CER_GATE = stt.DEFAULT_CER_GATE
+WINDOW_GATE = stt.DEFAULT_WINDOW_CER_GATE
+RUN_GATE = stt.DEFAULT_BAD_RUN_GATE
 
 
 def reference(seconds: float) -> str:
