@@ -226,6 +226,61 @@ def test_empty_reference_is_not_scored() -> None:
     assert stt.window_metrics("   ", "") == (None, None)
 
 
+def _entry_for(rec: dict, transcript: str) -> dict:
+    """`compute_entry` on one record, with the HTTP call and the file probe stubbed.
+
+    Both are module globals in `01_compute_stt.py`, so replacing them is enough; the
+    scoring under test is the real thing.
+    """
+    original = (stt.resolve_audio, stt.transcribe_timed)
+    stt.resolve_audio = lambda *a, **k: Path("clip.flac")
+    stt.transcribe_timed = lambda *a, **k: (transcript, 1.0)
+    try:
+        return stt.compute_entry(
+            rec, Path("manifest.jsonl"),
+            endpoint="http://127.0.0.1:8002/v1/audio/transcriptions", token="",
+            model=None, temperature=0.0, language="fr", response_format="json",
+            extra_params={}, timeout=1.0, max_retries=0,
+            audio_key="audio_filepath", reference_key="asr_training_source",
+            audio_root=None, wer_threshold=1.0, cer_threshold=1.0,
+        )
+    finally:
+        stt.resolve_audio, stt.transcribe_timed = original
+
+
+def test_compute_entry_stores_the_window_scores() -> None:
+    """The sweep has to WRITE the two window scores, not merely be able to compute them.
+
+    Stage 05's live QC (`03_qc_cpu_stt.py`) has stored `window_cer` and `bad_run_chars`
+    on every row it scores from the start. Stage 06's sweep stored `cer` and `cer_tail`
+    only, so the repair pass had nothing to gate on and every other consumer had to
+    re-derive them from the transcript, at a measured ~11 ms per clip each time.
+    """
+    ref = reference(48)  # a PARHAF-sized chunk
+    hyp = drop_words(ref, at=len(ref.split()) // 2, count=5)
+    entry = _entry_for(
+        {"audio_filepath": "clip.flac", "duration": 48.0, "asr_training_source": ref}, hyp
+    )
+    expected_window, expected_run = stt.window_metrics(ref, hyp)
+    assert entry["cer_window"] == expected_window, entry
+    assert entry["bad_run_chars"] == expected_run, entry
+    # Why storing them is what matters: this clip passes the whole-clip gate it is
+    # scored against, so with only `cer` and `cer_tail` on the row nothing downstream
+    # could tell it apart from a clean one.
+    assert entry["cer"] < CER_GATE, entry["cer"]
+    assert entry["bad_run_chars"] >= RUN_GATE, entry
+
+
+def test_compute_entry_omits_the_window_scores_when_there_is_no_reference() -> None:
+    """An unscorable row must not grow the keys with empty values: `02_statistics.py`
+    treats "key present and numeric" as the definition of a scored row, so a None here
+    would be counted as coverage the sweep never had."""
+    entry = _entry_for({"audio_filepath": "clip.flac", "duration": 12.0}, "quelque chose")
+    assert "cer_window" not in entry, entry
+    assert "bad_run_chars" not in entry, entry
+    assert entry["error"], "a row with no reference must say why it was not scored"
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

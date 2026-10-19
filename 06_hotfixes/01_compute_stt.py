@@ -913,15 +913,35 @@ def compute_entry(
             t_cer = tail_cer(reference, transcript, dur)
             if t_cer is not None:
                 entry["cer_tail"] = t_cer
+            # And once more over the worst WINDOW_CHARS-long window, the only one of the
+            # three scores that sees a phrase dropped in the MIDDLE of a long clip: five
+            # lost words are ~30 normalized characters, i.e. 0.14 of a 213-char window
+            # but 0.04 of a 48 s PARHAF chunk, so no whole-clip threshold can catch that
+            # without flagging every clean long clip with it.
+            #
+            # Stored, not left to each consumer to re-derive, because there are several
+            # (the repair pass gates on it once per clip per round, 02_statistics reports
+            # it, the T2 flag list is built from it) and it costs a measured 10.9 ms
+            # median / 22.3 ms on the longest clips, which is about what compute_metrics
+            # + tail_cer already cost here (11.4 ms median). Those milliseconds are pure
+            # Python and hold the GIL, so on the full corpus they are roughly 2 h of
+            # wall clock added to a ~31 h sweep rather than 2 h spread over the threads.
+            w_cer, bad_run = window_metrics(reference, transcript)
+            if w_cer is not None:
+                entry["cer_window"] = w_cer
+            if bad_run is not None:
+                entry["bad_run_chars"] = bad_run
             wer_s = f"{wer:.3f}" if wer is not None else "n/a"
             cer_s = f"{cer:.3f}" if cer is not None else "n/a"
             tail_s = f" cer_tail={t_cer:.3f}" if t_cer is not None else ""
-            logger.info(f"{ident}  wer={wer_s} cer={cer_s}{tail_s}{rtf_s}")
+            win_s = f" cer_window={w_cer:.3f}" if w_cer is not None else ""
+            run_s = f" bad_run={bad_run}" if bad_run else ""
+            logger.info(f"{ident}  wer={wer_s} cer={cer_s}{tail_s}{win_s}{run_s}{rtf_s}")
             bad_wer = wer is not None and wer >= wer_threshold
             bad_cer = cer is not None and cer >= cer_threshold
             if bad_wer or bad_cer:
                 logger.warning(
-                    f"LOW QUALITY {ident} wer={wer_s} cer={cer_s}{tail_s}\n"
+                    f"LOW QUALITY {ident} wer={wer_s} cer={cer_s}{tail_s}{win_s}{run_s}\n"
                     f"  reference : {reference}\n"
                     f"  transcript: {transcript}"
                 )
