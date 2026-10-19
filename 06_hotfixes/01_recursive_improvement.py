@@ -41,9 +41,10 @@ cannot share VRAM:
   candidates are short of ``--n-improv`` (the tts pass ran with a smaller one, or a
   sidecar has gone missing) goes back to ``pending_tts`` rather than being judged, and
   settled, on a partial set. "Complete" means the tts pass delivered every draw it was
-  asked for, not one file per draw: a draw it skipped as a duplicate or as frame-cap
-  truncated is skipped deterministically (the seed per attempt is fixed), so demanding
-  a file for it would bounce the clip between the two passes forever.
+  asked for, not one file per draw: a draw it skipped as a duplicate or on one of the
+  generation guards of step 2a is skipped deterministically (the seed per attempt is
+  fixed), so demanding a file for it would bounce the clip between the two passes
+  forever.
 * ``tts`` (only the TTS server up): for every ``pending_tts`` clip, synthesize all
   ``--n-improv`` candidates (no early stop, since scoring needs STT) and persist each
   as a ``<clip>.draft<seed>.<fmt>`` sidecar, marking the clip ``pending_stt``.
@@ -139,6 +140,16 @@ Per clip (in the pool):
    UNDER EVERY GATE: stop early the moment one is reached. If no draw gets there, keep
    the lowest-CER draw as long as it still beats the original by ``--min-improvement``
    (otherwise keep the original untouched).
+2a. Every draw is held to the v2 GENERATION guards before it is worth transcribing, the
+   same three stage 05 generates under and with the same numbers (they live in
+   ``utils/frame_budget.py`` and ``utils/code_loops.py``, called through ``_tts``, never
+   copied): it is sent a per-clip frame budget as ``max_new_tokens``
+   (``--auto-token-budget``, on) and discarded if it comes back past that budget (it was
+   looping, not reading) or below the floor its text can be read in (part of the text was
+   never spoken), and with ``--code-dump-dir`` also if its own semantic codes say it
+   derailed. Before this, a redo sent no budget and only checked the server's global
+   327.68 s cap after the fact, so repairing a looping clip could spend ~6 minutes of GPU
+   producing exactly the failure the generator would have killed at 50 s.
 3. On a win: back the current clip up before overwriting (the first win writes the
    pristine original to ``<clip>.flac.bak``, later wins write the prior version to
    ``<clip>.flac.bak2`` / ``.bak3`` / ..., so every intermediate audio is kept),
@@ -492,6 +503,8 @@ def tts_synthesize(
     timeout: float,
     max_retries: int = 4,
     cfg_alpha: float | None = None,
+    max_new_tokens: int | None = None,
+    dump_tag: str | None = None,
 ) -> bytes:
     """POST one synthesis request and return the raw audio bytes. Unset knobs are
     omitted so the server keeps its startup defaults (same contract as stage 05).
@@ -519,16 +532,32 @@ def tts_synthesize(
     ``cfg_alpha`` under ``default_sampling_params.extra_args``, or vllm-omni
     sets ``has_sampling_extra_args=False`` and drops every per-request extra.
 
+    The two v2 generation guards ride opposite routes, and neither spelling is a
+    style choice either:
+
+    * ``max_new_tokens`` is FLAT. vllm-omni applies it after prompt building, from a
+      generic override gated on ``_SAMPLING_MAX_TOKENS_TTS_MODEL_TYPES``, which does
+      include ``voxtral_tts``, so the flat field is the one that is read (and it is
+      server-capped at 4096 frames, 327.68 s). It is the per-draw frame budget: the
+      server stops a looping draw at ~1.3x its text's plausible duration instead of
+      generating minutes of syllables that the duration check below then throws away.
+    * ``voxtral_dump_codes`` is NESTED, like the other two, and only the forked
+      vllm-omni reads it; it makes the server append the codes stage 0 emitted to
+      ``<VOXTRAL_CODE_DUMP_DIR>/<tag>.i16``. A stock server merges and ignores it, the
+      audio is byte-identical either way, and the absence of a dump has to read as
+      "no opinion" rather than as a rejection (see ``_tts.read_codes``).
+
     Retries transient failures (connection errors, 429, 5xx) with exponential
     backoff, mirroring the STT client. A non-retryable status (e.g. 4xx) stops
     early. On exhaustion raises TTSRequestError so the run aborts rather than
     silently skipping the clip."""
     body: dict = {"input": text, "response_format": response_format}
     for key, value in (("seed", seed), ("voice", voice), ("speed", speed),
-                       ("model", model)):
+                       ("model", model), ("max_new_tokens", max_new_tokens)):
         if value is not None:
             body[key] = value
-    extra = {k: v for k, v in (("cfg_alpha", cfg_alpha), ("voxtral_noise_seed", seed))
+    extra = {k: v for k, v in (("cfg_alpha", cfg_alpha), ("voxtral_noise_seed", seed),
+                               ("voxtral_dump_codes", dump_tag))
              if v is not None}
     if extra:
         body["extra_params"] = extra
@@ -558,13 +587,45 @@ def tts_synthesize(
 def _synthesize_draft(
     attempt: int, cfg: SimpleNamespace, ident: str, text: str,
     orig_len: int, orig_hash: str, seen_hashes: set[str], voice: str | None = None,
+    audio_path: Path | None = None,
 ) -> dict:
     """Synthesize ONE candidate for the given attempt index (the TTS-only half of a
     regeneration, shared by ``both`` mode's inline loop and ``tts`` mode's draft
     generation). Returns ``{"payload", "seed", "speed", "cfg_alpha", "dur",
-    "duplicate", "truncated"}``: ``duplicate`` is True when the draw byte-repeats an
-    earlier one (seeds collided), ``truncated`` when it stopped on the backend's frame
-    cap rather than at the end of the text; either way the caller skips the draw.
+    "duplicate", "reject", "reject_detail"}``: ``duplicate`` is True when the draw
+    byte-repeats an earlier one (seeds collided), and ``reject`` names the guard that
+    threw the draw away before it was worth transcribing, ``None`` when it survived
+    them all. Either way the caller skips the draw; ``reject_detail`` is the numbers
+    behind the verdict, ready to log.
+
+    The three rejections are the v2 GENERATION guards, run here so that a repair pass
+    is held to the same standard as the pass that made the clip (before, a redraw sent
+    no frame budget and checked only the global frame cap after the fact, so repairing
+    a looping clip could spend 327 s of GPU producing the exact failure stage 05 would
+    have killed at 50 s):
+
+    * ``"over"``: the draw ran past the upper bound its text can plausibly take, i.e.
+      it was looping rather than reading. The bound is the per-clip budget when
+      ``--auto-token-budget`` is on (the normal case, and the same number is sent as
+      ``max_new_tokens`` so the server stops there instead of at 327.68 s), else the
+      server's global frame cap, where it means the text is simply too long.
+    * ``"short"``: the draw came back below the floor its text can be read in, so part
+      of the text was never spoken. Checked whether or not the budget is on, since it
+      needs no cooperation from the server, and rejecting here also saves the STT call.
+    * ``"derailed"``: the draw's own semantic codes say it collapsed, held one code or
+      looped a unit, which is the half of the defects a duration check cannot see (a
+      plausible length for its text, and still not a reading). Only when
+      ``--code-dump-dir`` is set AND the server is the patched fork; a missing dump
+      reads as "no opinion" and rejects nothing.
+
+    All three verdicts come from the stage-05 module imported here as ``_tts``, which
+    reads the bands from ``utils/frame_budget.py`` and the code thresholds from
+    ``utils/code_loops.py``. Nothing is re-derived: a draw rejected here is exactly a
+    clip ``05_generate_audio/02_audit_durations.py`` would delete from disk.
+
+    ``audio_path`` is the clip being repaired, used for the dump tag and to put the
+    code-QC row beside the audio (the same ``code_qc_sidecar.jsonl`` stage 05 writes,
+    tagged ``"stage": "redo"``). None skips the sidecar, not the gate.
 
     ``voice`` is the voice THIS clip was originally read by, from the manifest row's
     ``voice`` field (v2 spreads the corpus over nine voices, one per term/document).
@@ -608,13 +669,43 @@ def _synthesize_draft(
         start=getattr(cfg, "cfg_alpha_start", CFG_ALPHA_START), attempt=attempt,
         step=getattr(cfg, "cfg_alpha_step", CFG_ALPHA_STEP),
         floor=getattr(cfg, "cfg_alpha_floor", CFG_ALPHA_FLOOR))
+    # The per-clip duration band this draw is held to, and the frame budget derived
+    # from its slow end. budget_terms / budget_tokens are stage 05's, which read
+    # utils/frame_budget.py: the per-voice bands have ONE home, because a copy here
+    # would drift the day a voice is re-measured, and the two stages would then reject
+    # different clips while both claiming to apply "the" bound.
+    #
+    # getattr rather than cfg.auto_token_budget, defaulting to OFF rather than to the
+    # CLI's ON, exactly as stage 05's build_body does it: a synthetic namespace (a
+    # test, any caller outside main()) must not have to carry the field, and silently
+    # budgeting a caller that never asked for one would change what it sends. main()
+    # always sets it, so a real pass does get the budget.
+    budget_on = getattr(cfg, "auto_token_budget", False)
+    fixed, slow, fast = _tts.budget_terms(cfg, voice or cfg.tts_voice)
+    # The code gate is on only when the operator gave the HOST path of the server's
+    # $VOXTRAL_CODE_DUMP_DIR (the two are different strings for the same directory, so
+    # nothing can derive it). The tag must be unique per ATTEMPT because the server
+    # APPENDS to <tag>.i16: a shared tag would read attempt 2 as attempt 1 twice over
+    # and condemn a clean draw. The seed is in it as well as the attempt index, so a
+    # retry run with a different --start-seed cannot collide with a crashed run's
+    # leftover either, and `redo` keeps these dumps apart from stage 05's
+    # `<stem>__t<attempt>` in the directory both stages share.
+    stem = audio_path.stem if audio_path is not None else _tts.normalize_term(ident)
+    dump_tag = (f"{stem}__redo{attempt}s{seed}"
+                if getattr(cfg, "code_dump_dir", None) else None)
     with cfg.tts_sem:
         payload = tts_synthesize(
             cfg.tts_url, text,
             response_format=cfg.tts_format, seed=seed, voice=voice or cfg.tts_voice,
             speed=speed, model=cfg.tts_model, timeout=cfg.tts_timeout,
             max_retries=cfg.tts_max_retries, cfg_alpha=cfg_alpha,
+            max_new_tokens=(_tts.budget_tokens(text, fixed, slow) if budget_on else None),
+            dump_tag=dump_tag,
         )
+    # Read the dump (which also unlinks it) on every path out of here, including the
+    # two aborts below: at 925 B per second of audio, leaving them behind would cost
+    # ~11.7 GB over a corpus-wide pass and put 600k files in one directory.
+    codes = _tts.read_codes(cfg, dump_tag)
 
     # A generation must never be empty or duration-0: that would mean replacing a
     # real clip with silence / nothing. Abort the run so the user notices.
@@ -624,13 +715,59 @@ def _synthesize_draft(
     if dur is not None and dur <= 0:
         raise GenerationError(f"{ident}: TTS returned duration-0 audio at seed {seed}")
 
-    # Stopped for length, not at the end of the text: /v1/audio/speech has no
-    # finish_reason, so a draw pinned at the backend's frame cap is the only sign that
-    # generation was cut off mid-sentence. Such a draw can never be a valid replacement,
-    # so report it and let the caller skip it (every draw of an over-long text truncates,
-    # so the clip ends up EXHAUSTED and keeps its original, which is the honest outcome:
-    # the fix is re-chunking the text, not another seed).
-    truncated = _tts.is_truncated(dur, cfg.max_audio_seconds)
+    # Both duration bounds, from the one classifier stage 05 and 02_audit_durations.py
+    # use, so a draw rejected here is exactly a clip those two would reject. Why a
+    # duration is the only observable at all: /v1/audio/speech has no finish_reason, so
+    # a draw that stopped for LENGTH is indistinguishable from one that ended on its
+    # own except by where it landed. With the budget on, the bound to compare against
+    # is that per-clip budget and not the server's global cap, which is the whole point:
+    # the clip that ran long for ITS text is the looping one, and the 327.68 s cap only
+    # catches the worst of them. The floor is checked either way, since it needs no
+    # cooperation from the server.
+    cap = _tts.budget_seconds(text, fixed, slow) if budget_on else cfg.max_audio_seconds
+    # max() only to keep the ratio in the message finite when the floor is disabled.
+    floor = max(1e-9, _tts.floor_seconds(text, fast))
+    verdict = _tts.classify_duration(
+        text, dur, budget=None if budget_on else cfg.max_audio_seconds,
+        fixed=fixed, slow_chars_per_second=slow, fast_chars_per_second=fast,
+        tolerance=_tts.TRUNCATION_TOLERANCE_S)
+    derailed = codes is not None and codes[0].is_bad
+    # One sidecar row per attempt, accepted or not, beside the clip and before any
+    # verdict is acted on, in the same file stage 05 writes (`stage` tells them apart).
+    # A file holding only the rejects could not answer "what do the features look like
+    # on the draw that WON", which is the question that lets these thresholds, which
+    # were calibrated on 30 takes, be re-decided later without regenerating anything.
+    if codes is not None and audio_path is not None:
+        _tts.record_code_take(
+            audio_path.parent, stem=audio_path.stem, take=codes[0], attempt=attempt + 1,
+            accepted=(verdict == "ok" and not derailed),
+            track=codes[1] if getattr(cfg, "store_semantic_codes", True) else None,
+            voice=voice or cfg.tts_voice, cfg_alpha=cfg_alpha, stage="redo", seed=seed)
+    # Spelled out because these lines are what a grep over a multi-day log has to
+    # answer with: how far over or under, against which bound, and for how much text.
+    # The ratio is the honest severity measure (2.0x is a loop, 1.05x is a long take).
+    voice_s = voice or cfg.tts_voice or "server default voice"
+    reject = detail = None
+    if verdict == "over":
+        reject, detail = "over", (
+            f"{dur:.2f}s of audio for {len(text)} chars ({voice_s} at {slow:.1f} "
+            f"chars/s), {'budget' if budget_on else 'server frame cap'} {cap:.2f}s "
+            f"({dur / cap:.2f}x), "
+            + ("ran out of frames while still talking, so the draw was looping rather "
+               "than reading" if budget_on else
+               "stopped for length, so the text is too long for the backend to speak "
+               "in full and no seed can fix this clip: re-chunk the source text"))
+    elif verdict == "short":
+        reject, detail = "short", (
+            f"{dur:.2f}s of audio for {len(text)} chars, floor {floor:.2f}s "
+            f"({dur / floor:.2f}x), i.e. {len(text) / max(dur, 1e-9):.0f} chars/s where "
+            f"the fastest take ever measured for {voice_s} reaches {fast / 1.45:.1f}, "
+            f"so part of the text was not spoken")
+    elif derailed:
+        reject, detail = "derailed", (
+            f"its own codes say {','.join(codes[0].verdicts)} over "
+            f"{codes[0].duration_s:.2f}s of audio for {len(text)} chars: a plausible "
+            f"length for the text and still not a reading of it")
 
     # Seed check: only bother hashing when the length matches the original (a cheap
     # gate). A byte-identical regen means the seed did not take effect, so we crash
@@ -642,7 +779,32 @@ def _synthesize_draft(
     if not duplicate:
         seen_hashes.add(h)
     return {"payload": payload, "seed": seed, "speed": speed, "cfg_alpha": cfg_alpha,
-            "dur": dur, "duplicate": duplicate, "truncated": truncated}
+            "dur": dur, "duplicate": duplicate, "reject": reject,
+            "reject_detail": detail}
+
+
+#: The guards ``_synthesize_draft`` can throw a draw away on, in the order it checks
+#: them. Used to build the per-clip tallies, so adding a guard cannot leave a counter
+#: behind that nobody increments.
+REJECT_KINDS = ("over", "short", "derailed")
+
+
+def reject_summary(ident: str, counts: dict[str, int], attempts: int) -> str | None:
+    """One line for the draws a redo threw away before they were ever scored, or None
+    when every draw survived the guards.
+
+    Worth its own line rather than being left to the per-draw warnings: the per-draw
+    ones say what happened to one seed, this one says whether the clip is repairable
+    at all. Five "over" rejections out of five attempts is not bad luck, it is a clip
+    whose text no seed can fit, and the operator reading a multi-day log needs that
+    distinction without counting WARNING lines by hand."""
+    total = sum(counts.get(kind, 0) for kind in REJECT_KINDS)
+    if not total:
+        return None
+    detail = ", ".join(f"{counts[kind]} {kind}" for kind in REJECT_KINDS
+                       if counts.get(kind))
+    return (f"{ident}: {total}/{attempts} draw(s) discarded by the generation guards "
+            f"({detail}); see the per-draw lines above for the numbers")
 
 
 def _score_audio_file(
@@ -697,7 +859,7 @@ def run_regeneration(
 
     seen_hashes = {orig_hash}
     dup_count = 0
-    trunc_count = 0
+    rejects = dict.fromkeys(REJECT_KINDS, 0)
     attempts = 0
     best = None  # best draw seen so far (kept if none clears the gates)
     logger.info(
@@ -711,15 +873,14 @@ def run_regeneration(
         # byte-identical to the original abort the run (GenerationError /
         # SeedDeterminismError); a draw that merely repeats an earlier one is skipped.
         draft = _synthesize_draft(attempt, cfg, ident, text, orig_len, orig_hash,
-                                  seen_hashes, voice=voice)
+                                  seen_hashes, voice=voice, audio_path=audio_path)
         seed, speed, cfg_alpha, dur = draft["seed"], draft["speed"], draft["cfg_alpha"], draft["dur"]
         alpha_s = f" alpha={cfg_alpha}" if cfg_alpha is not None else ""
-        if draft["truncated"]:
-            trunc_count += 1
+        if draft["reject"]:
+            rejects[draft["reject"]] += 1
             logger.warning(
                 f"  {ident} attempt {attempt + 1}/{cfg.n_improv} seed={seed}{alpha_s} -> "
-                f"{dur:.2f}s, stopped at the TTS frame cap ({cfg.max_audio_seconds:.2f}s): "
-                f"cut off mid-sentence, discarding draw"
+                f"{draft['reject']}: {draft['reject_detail']}, discarding draw"
             )
             continue
         if draft["duplicate"]:
@@ -795,12 +956,9 @@ def run_regeneration(
         + (f"; best draw {_fmt_scores(best['scores'])} did not beat it"
            if best is not None else "")
     )
-    if trunc_count:
-        logger.warning(
-            f"{ident}: {trunc_count}/{attempts} draw(s) hit the TTS frame cap "
-            f"({cfg.max_audio_seconds:.2f}s). Its text is too long for the backend to "
-            f"speak in full, so no seed can fix this clip: re-chunk the source text."
-        )
+    summary = reject_summary(ident, rejects, attempts)
+    if summary:
+        logger.warning(summary)
     return {"payload": None, "attempts": attempts,
             "all_duplicates": bool(dup_count and dup_count == attempts)}
 
@@ -848,7 +1006,7 @@ def generate_drafts(
 
     seen_hashes = {orig_hash}
     dup_count = 0
-    trunc_count = 0
+    rejects = dict.fromkeys(REJECT_KINDS, 0)
     attempts = 0
     drafts: list[dict] = []
     logger.info(
@@ -858,15 +1016,14 @@ def generate_drafts(
     for attempt in range(cfg.n_improv):
         attempts = attempt + 1
         draft = _synthesize_draft(attempt, cfg, ident, text, orig_len, orig_hash,
-                                  seen_hashes, voice=voice)
+                                  seen_hashes, voice=voice, audio_path=audio_path)
         seed, cfg_alpha = draft["seed"], draft["cfg_alpha"]
         alpha_s = f" alpha={cfg_alpha}" if cfg_alpha is not None else ""
-        if draft["truncated"]:
-            trunc_count += 1
+        if draft["reject"]:
+            rejects[draft["reject"]] += 1
             logger.warning(
                 f"  {ident} candidate {attempt + 1}/{cfg.n_improv} seed={seed}{alpha_s} -> "
-                f"{draft['dur']:.2f}s, stopped at the TTS frame cap "
-                f"({cfg.max_audio_seconds:.2f}s): cut off mid-sentence, not saved"
+                f"{draft['reject']}: {draft['reject_detail']}, not saved"
             )
             continue
         if draft["duplicate"]:
@@ -880,12 +1037,9 @@ def generate_drafts(
         logger.info(
             f"  {ident} candidate {attempt + 1}/{cfg.n_improv} seed={seed}{alpha_s} -> saved {draft_path.name}"
         )
-    if trunc_count:
-        logger.warning(
-            f"{ident}: {trunc_count}/{attempts} candidate(s) hit the TTS frame cap "
-            f"({cfg.max_audio_seconds:.2f}s). Its text is too long for the backend to "
-            f"speak in full, so no seed can fix this clip: re-chunk the source text."
-        )
+    summary = reject_summary(ident, rejects, attempts)
+    if summary:
+        logger.warning(summary)
     return {"drafts": drafts, "attempts": attempts,
             "all_duplicates": bool(dup_count and dup_count == attempts and not drafts)}
 
@@ -1033,8 +1187,8 @@ def combined_worker(pos: int, rec: dict, cfg: SimpleNamespace, model_key: str, i
         # the tts pass (it ran with a smaller --n-improv, or its sidecars have since
         # gone missing) goes BACK to that pass to be made in full.
         # The bar is "the tts pass delivered everything it was asked for", not
-        # "len(drafts) == --n-improv": a draw it skipped as a duplicate or as frame-cap
-        # truncated is skipped deterministically (the seed of each attempt is fixed), so
+        # "len(drafts) == --n-improv": a draw it skipped as a duplicate or on one of the
+        # generation guards is skipped deterministically (each attempt's seed is fixed), so
         # demanding a file for it would bounce the clip between the two passes forever.
         missing = [d for d in drafts if not Path(str(d.get("path") or "")).is_file()]
         asked = int(imp_state.get("attempts") or 0)
@@ -1882,6 +2036,36 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
 @click.option("--cfg-alpha-step", default=CFG_ALPHA_STEP, type=float, help="Added to cfg_alpha on each successive re-attempt, normally NEGATIVE so the ladder descends. With the defaults, five draws walk 2.0, 1.8, 1.6, 1.4, 1.2. Prefer the equals form for a negative value (--cfg-alpha-step=-0.2): this click version accepts the bare form too, but the equals form cannot be read as another option whatever the version.")
 @click.option("--cfg-alpha-floor", default=CFG_ALPHA_FLOOR, type=float, help="Hard lower clamp on the ladder (default 1.2, the measured floor of the usable band). It matters because --n-improv is free: without it, ten draws at the default step would reach 0.2, i.e. CFG off, where the decoder stops following the text. Pass a negative value to remove the clamp.")
 @click.option("--original-cfg-alpha", default=CFG_ALPHA_START, type=float, help="cfg_alpha the ORIGINAL dataset audio was synthesized with, for every clip stage 05 did NOT record a per-clip value for (a clip whose rung is in cfg_alpha_sidecar.jsonl beside the audio uses that instead, since stage 05 re-draws a duration rejection one rung lower). Default 2.0, the value v2 is generated at (VOXTRAL_CFG_ALPHA in the CrispASR compose since the 2026-10-13 sweep); pass 1.3 when running over v1 audio, which was drawn at that. Written as each clip's `cfg_alpha` when it keeps its original audio (passed / exhausted); a regenerated clip records its winning draw's cfg_alpha instead.")
+@click.option("--auto-token-budget/--no-auto-token-budget", default=True,
+              help="ON by default. Send each draw a per-clip frame budget "
+                   "(max_new_tokens) sized from its text and the VOICE's measured "
+                   "reading speed, and reject a draw that comes back past it. This is "
+                   "the same guard stage 05 generates under, with the same numbers "
+                   "(utils/frame_budget.py, per-voice bands; stage 05's "
+                   "--budget-chars-per-second style overrides are deliberately NOT "
+                   "repeated here, so there is one place to change a band). Without "
+                   "it a looping draw runs to the server's 327.68s cap, i.e. ~6 "
+                   "minutes of GPU to produce a take the duration check then throws "
+                   "away. The floor check (a draw too SHORT for its text, so part of "
+                   "it was never spoken) runs either way: it needs nothing from the "
+                   "server.")
+@click.option("--code-dump-dir", metavar="DIR", default=None,
+              help="HOST path of the directory the TTS server writes code dumps into, "
+                   "i.e. the host side of $VOXTRAL_CODE_DUMP_DIR in the CrispASR "
+                   "compose (container /cache/cloning/dumps). Setting it turns on the "
+                   "code gate on every draw: the draw's semantic codes are read back "
+                   "and a derailed one (collapsed onto a few codes, held one, looped a "
+                   "unit) is discarded before it costs an STT call, which is the half "
+                   "of the defects a duration check cannot see. Off when unset, and a "
+                   "stock (unpatched) server writes no dump, which reads as no opinion "
+                   "and rejects nothing. One row per attempt is appended to the "
+                   "code_qc_sidecar.jsonl beside the audio, tagged \"stage\": \"redo\" "
+                   "so a redraw is distinguishable from stage 05's own take.")
+@click.option("--store-semantic-codes/--no-store-semantic-codes", default=True,
+              help="Store each draw's semantic codes in that sidecar row, base64 int16 "
+                   "(default on, ~500 bytes per 15s draw). It is what lets the code "
+                   "gate's thresholds, calibrated on 30 takes, be re-decided later "
+                   "without regenerating anything. No effect without --code-dump-dir.")
 @click.option("--refresh-duration/--no-refresh-duration", default=True, help="Re-probe and update each row's `duration` when its audio is replaced (keeps stage-99 splits correct).")
 @click.option("--force", is_flag=True, help="Re-process clips already marked improved/exhausted in a previous run.")
 @click.option("--retry-exhausted", is_flag=True, help="Give the clips marked `exhausted` (flagged bad, no draw good enough) another run: they are treated as if they carried no marker, so a rescore can clear them and an stt pass can send the ones that still read bad back through the tts queue. Unlike --force this leaves the clips that already passed and the ones already improved alone, so a retry costs only the known-weak tail (173 clips after the 0.08 sweep) instead of re-transcribing the corpus. Use it after a scoring-rule change or with a different seed / cfg_alpha ladder.")
@@ -1904,7 +2088,8 @@ def main(
     tts_max_retries, max_audio_seconds, mode, n_improv, cer_threshold, tail_cer_threshold,
     window_cer_threshold, bad_run_threshold, min_improvement,
     start_seed, speed_jitter,
-    cfg_alpha_start, cfg_alpha_step, cfg_alpha_floor, original_cfg_alpha, refresh_duration,
+    cfg_alpha_start, cfg_alpha_step, cfg_alpha_floor, original_cfg_alpha,
+    auto_token_budget, code_dump_dir, store_semantic_codes, refresh_duration,
     force, retry_exhausted,
     rescore, rescore_only,
     stt_parallel, tts_parallel, shuffle, flush_every, flush_interval, limit,
@@ -1952,6 +2137,13 @@ def main(
         # cfg_alpha the original dataset audio was made with, written on every clip that
         # keeps its original audio (99_hf_release/README.md documents it as 1.3).
         original_cfg_alpha=original_cfg_alpha,
+        # The v2 generation guards, applied to every draw (see _synthesize_draft). The
+        # three names are the ones stage 05 reads off its own namespace, because
+        # _tts.budget_terms / dump_path / read_codes are called with THIS cfg: one
+        # spelling, or the guard would be silently off here while looking configured.
+        auto_token_budget=auto_token_budget,
+        code_dump_dir=code_dump_dir,
+        store_semantic_codes=store_semantic_codes,
         refresh_duration=refresh_duration,
         force=force,
         retry_exhausted=retry_exhausted,

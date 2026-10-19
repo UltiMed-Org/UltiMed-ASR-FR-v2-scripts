@@ -348,6 +348,45 @@ Changing any of this changes every stored CER, so follow it with a `RESCORE_ONLY
 (see below): it re-derives the scores from the transcripts already on disk, without
 transcribing anything again.
 
+### The generation guards on a draw (`AUTO_TOKEN_BUDGET`, `CODE_DUMP_DIR`)
+
+Before a draw is worth an STT call it has to survive the same three guards the
+**generation** pass generates under, with the same numbers (they live in
+`utils/frame_budget.py` and `utils/code_loops.py`, and stage 06 calls them rather than
+carrying a copy, so re-measuring a voice moves both stages at once):
+
+* **a per-clip frame budget**, on by default (`AUTO_TOKEN_BUDGET=1`). Each draw is asked
+  for only the frames its text can plausibly need, from that text's length and the
+  **voice's** measured slow rate (`fr_female` 9.9 chars/s, `h_frm_bre` 8.6, and so on;
+  5.0 for a voice not in the table), plus 3 s of head and tail. A draw that comes back
+  past that budget was looping rather than reading, and is discarded. This is the guard
+  that matters most for cost: without it a looping draw runs to the server's 327.68 s
+  cap, which is about six minutes of GPU per draw and five draws per clip, to produce a
+  take that is then thrown away anyway. `AUTO_TOKEN_BUDGET=0` falls back to
+  `MAX_AUDIO_SECONDS` alone (next section).
+* **a floor**, always on, budget or no budget: it needs nothing from the server. A draw
+  far shorter than its text can be read in did not speak all of it, which is precisely
+  the defect this stage exists to repair, so keeping it would be the worst outcome
+  available. Rejecting it here also saves the transcription that would have scored it.
+* **the code gate**, off unless `CODE_DUMP_DIR` is set. That is the HOST path of the
+  directory the TTS server writes code dumps into, i.e. the host side of
+  `$VOXTRAL_CODE_DUMP_DIR` in the CrispASR compose (container `/cache/cloning/dumps`);
+  only the operator knows where their checkout sits, so nothing can derive it. With it
+  set, each draw's own semantic codes are read back and a draw that collapsed onto a
+  handful of codes, held one for over a second or looped a unit is discarded. That is the
+  half of the severe defects a duration check cannot see: a plausible length for the
+  text, and still not a reading of it. Pointing it at a stock, unpatched server is
+  harmless, since no dump is written and an absent dump reads as "no opinion", never as a
+  rejection. One row per draw is appended to the `code_qc_sidecar.jsonl` beside the
+  audio, the same file stage 05 writes, tagged `"stage": "redo"` with the draw's seed so
+  the two are distinguishable; `--no-store-semantic-codes` keeps the measured features
+  and drops the codes themselves.
+
+Each rejected draw logs its own line with the numbers behind the verdict (how far over or
+under, against which bound, for how much text), and a clip that lost draws to the guards
+gets one summary line: five "over" rejections out of five is not bad luck, it is a clip
+whose text no seed can fit.
+
 ### The TTS frame cap (a "stopped for length" guard)
 
 `/v1/audio/speech` returns raw audio with no `finish_reason`, so a generation that ran out
@@ -355,7 +394,10 @@ of tokens instead of reaching the end of the text still answers HTTP 200, with a
 just stops mid-sentence. The only observable is a duration pinned at the backend's frame
 cap, so any draw landing within half a second of `MAX_AUDIO_SECONDS` (default 327.68 s, the
 served 4096 frames at 12.5 Hz) is discarded rather than scored or promoted, and the clip
-keeps its original. When every draw for a clip hits the cap the log says so explicitly: no
+keeps its original. With `AUTO_TOKEN_BUDGET=1` (the default) this is only the fallback
+bound: each draw is held to its own per-clip budget instead, which is tighter by one to
+two orders of magnitude on a dictionary term, and `MAX_AUDIO_SECONDS` then only matters
+for a run with the budget turned off. When every draw for a clip hits the cap the log says so explicitly: no
 seed can fix it, the source text is simply too long to be spoken in full, and the fix is
 re-chunking that text. Keep `MAX_AUDIO_SECONDS` in step with the server's actual
 `VOXTRAL_MAX_TOKENS` (163.84 for the packaged 2048 frames, 327.68 for 4096);

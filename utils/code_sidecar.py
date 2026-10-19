@@ -7,6 +7,11 @@ row here, and the row carries the measured features rather than just the verdict
 a later pass can re-decide what counts as derailed over the whole corpus and
 compare its answer against stage 06's CER gate, which is the real label.
 
+Stage 06 gates its REDRAWS on the same thresholds and appends here too, with
+`"stage": "redo"`, so one file per audio directory holds a clip's whole history:
+what the generator drew, and what each repair attempt drew after the CER gate
+condemned it.
+
 The row also carries the **semantic track itself**, base64 of little-endian
 int16, which is what makes the stored data outlive the current thresholds
 entirely. Costs are measured, not guessed: a 15 s clip is 187 frames, so 374
@@ -82,7 +87,9 @@ def decode_track(encoded: str) -> list[int]:
 def record_code_take(audio_dir: Path | str, *, stem: str, take, attempt: int,
                      accepted: bool, track: list[int] | None = None,
                      voice: str | None = None,
-                     cfg_alpha: float | None = None) -> Path:
+                     cfg_alpha: float | None = None,
+                     stage: str | None = None,
+                     seed: int | None = None) -> Path:
     """Append one row for one attempt at one clip.
 
     Unlike `cfg_sidecar.record_cfg_alpha`, which only records the exceptions, this
@@ -106,6 +113,14 @@ def record_code_take(audio_dir: Path | str, *, stem: str, take, attempt: int,
         The semantic codes, stored base64 when given. None stores the features only.
     voice, cfg_alpha
         Provenance, so a defect can be attributed without joining three files.
+    stage, seed
+        More provenance, for the same reason, and both optional so a row written by
+        the generator is byte-identical to the rows it wrote before these existed.
+        Two stages append to the same file: stage 05 generating a clip (no `stage`
+        key, one seed per run) and stage 06 redrawing one it later judged bad
+        (`"stage": "redo"`, a different seed per attempt). Without them, attempt 1 of
+        a redo and attempt 1 of the original generation are indistinguishable rows
+        for the same stem, and "how many clips needed redrawing" counts both.
 
     Returns
     -------
@@ -117,9 +132,11 @@ def record_code_take(audio_dir: Path | str, *, stem: str, take, attempt: int,
     """
     row = {
         "stem": stem,
+        "stage": stage,
         "attempt": attempt,
         "accepted": accepted,
         "voice": voice,
+        "seed": seed,
         "cfg_alpha": cfg_alpha,
         "frames": take.frames,
         "dur_s": round(take.duration_s, 3),

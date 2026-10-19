@@ -74,7 +74,7 @@ already fired.
 
 ## The six work items
 
-Each is one commit. Order is dependency order. Items 1 and 2 are done.
+Each is one commit. Order is dependency order. Items 1, 2 and 3 are done.
 
 1. **Window gates in the repair pass.** DONE (9a639de, 231003c). `is_bad()` tested `cer`
    and `tail` only, so a 180 s document that read 170 s correctly and dropped a phrase in
@@ -99,11 +99,29 @@ Each is one commit. Order is dependency order. Items 1 and 2 are done.
    reports a clean corpus because it could not find its input is the worst failure
    available here.
 
-3. **The v2 generation guards on a redraw.** A redo sends `cfg_alpha` and
-   `voxtral_noise_seed` but no frame budget, and checks `max_audio_seconds` only after the
-   fact, so repairing a looping clip can spend 327 s of GPU producing the exact failure the
-   generator would have killed at 50 s. Reuse `utils/frame_budget.py` (same function stage
-   05 calls, not a second copy) and honour `CODE_DUMP_DIR` for the code gate.
+3. **The v2 generation guards on a redraw.** DONE. A redo sent `cfg_alpha` and
+   `voxtral_noise_seed` but no frame budget, and checked `max_audio_seconds` only after the
+   fact, so repairing a looping clip could spend 327 s of GPU producing the exact failure the
+   generator would have killed at 50 s. Every draw now carries the per-clip
+   `max_new_tokens` (`--auto-token-budget`, on by default) and is judged by
+   `_tts.classify_duration` against that budget and against its floor, plus the code gate
+   when `--code-dump-dir` is given; all three call stage 05's own functions, so
+   `utils/frame_budget.py` and `utils/code_loops.py` keep one home each.
+   Three things it turned out to need beyond the plan: the frame budget rides FLAT
+   while the dump tag rides nested (`max_new_tokens` is read by a generic vllm-omni
+   override, `voxtral_dump_codes` only by the fork), `record_code_take` gained optional
+   `stage` / `seed` fields because both stages append to the same
+   `code_qc_sidecar.jsonl` and attempt 1 of a redo was otherwise indistinguishable from
+   attempt 1 of the original generation, and `_synthesize_draft`'s `truncated` flag
+   became a `reject` / `reject_detail` pair, which also removed the two copies of the
+   frame-cap warning its callers carried. Covered by `tests/test_tts_request_knobs.py`
+   (wire format for both knobs, all three rejections, the sidecar row, and that
+   `driver.sh` actually passes the flags).
+   One consequence worth knowing: a clip whose text is longer than its own budget now
+   loses every draw to the `over` guard and stays `exhausted` with its original audio.
+   That is the same bound stage 05 generated the clip under, so it can only happen to
+   the 0.52% tail stage 05 also rejects, and the log says so per draw and once per clip.
+   `AUTO_TOKEN_BUDGET=0` restores the old "only the 327.68 s cap" behaviour.
 
 4. **Voice swap on exhausted.** A clip that fails all 5 draws keeps its original audio
    today. Instead, redraw it with another of the nine voices, which is legitimate only for

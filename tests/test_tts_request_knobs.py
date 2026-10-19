@@ -167,6 +167,170 @@ eq("no draw is ever at or below CFG-off", [a for a in (_alpha(b) for b in deep) 
 jit = _capture_bodies(3, tts_speed=1.0, speed_jitter=0.05)
 eq("speed cycles around the base", [round(b["speed"], 4) for b in jit], [1.0, 1.05, 0.95])
 
+# --- the v2 generation guards, on a redraw ------------------------------------------
+# A redo used to send cfg_alpha and the noise seed and nothing else, so a looping draw
+# ran to the server's 327.68 s cap: ~6 minutes of GPU to produce a take the duration
+# check then threw away, five times per clip. These sections pin that each draw now
+# carries the same per-clip frame budget the generation pass sends, and that the two
+# cheap rejections (duration band, code gate) happen BEFORE the draw costs an STT call.
+import array  # noqa: E402
+import io  # noqa: E402
+import json  # noqa: E402
+import sys  # noqa: E402
+import tempfile  # noqa: E402
+import wave  # noqa: E402
+
+# Imported by name, not by path: code_loops defines dataclasses, and a module loaded by
+# path is absent from sys.modules, which @dataclass needs to resolve its own
+# annotations. These are also the instances the stages themselves import, so the
+# numbers asserted here are the ones that actually gate.
+sys.path.insert(0, str(HERE.parent / "utils"))
+import code_loops  # noqa: E402
+import code_sidecar  # noqa: E402
+import frame_budget as fb  # noqa: E402
+
+# OFF unless asked for, which is deliberate and worth a line: _synthesize_draft reads
+# the flag with getattr defaulting to False, exactly as stage 05's build_body does, so a
+# caller that never asked for a budget (a test, anything outside main()) keeps sending
+# what it used to. main() passes --auto-token-budget, whose click default is True.
+eq("no budget is sent unless the pass asks for one", "max_new_tokens" in bodies[0], False)
+
+budgeted = _capture_bodies(2, auto_token_budget=True)
+# The number is not restated here: it comes from utils/frame_budget.py, through the
+# VOICE's measured band (fr_female reads at 9.9 chars/s at its slow end, where the
+# unlisted-voice fallback is 5.0), which is the same call stage 05 makes. A copy of the
+# arithmetic in this file would keep passing after a voice was re-measured.
+_slow, _fast = fb.rates_for_voice("fr_female")
+eq("the frame budget rides flat, where vllm-omni reads it",
+   budgeted[0].get("max_new_tokens"), fb.budget_tokens("bonjour", fb.BUDGET_FIXED_S, _slow))
+eq("every draw carries it", [b.get("max_new_tokens") for b in budgeted],
+   [fb.budget_tokens("bonjour", fb.BUDGET_FIXED_S, _slow)] * 2)
+# Flat, not nested: unlike cfg_alpha, max_new_tokens is applied by a generic vllm-omni
+# override gated on _SAMPLING_MAX_TOKENS_TTS_MODEL_TYPES (which includes voxtral_tts),
+# after prompt building. Nesting it in extra_params would be silently ignored.
+eq("the budget is not sent nested", "max_new_tokens" in (budgeted[0].get("extra_params") or {}),
+   False)
+
+# The code gate's tag: nested (only the patched fork reads it) and unique per ATTEMPT,
+# because the server APPENDS to <tag>.i16. A shared tag would read attempt 2 as attempt 1
+# concatenated with itself and condemn a clean draw.
+with tempfile.TemporaryDirectory() as _td:
+    tagged = _capture_bodies(3, code_dump_dir=_td)
+_tags = [(b.get("extra_params") or {}).get("voxtral_dump_codes") for b in tagged]
+eq("a dump tag per draw, nested", _tags, ["clip__redo0s43", "clip__redo1s44", "clip__redo2s45"])
+eq("the tags are distinct", len(set(_tags)), 3)
+eq("no dump tag when the gate is off",
+   (bodies[0].get("extra_params") or {}).get("voxtral_dump_codes"), None)
+
+
+def _wav(seconds: float) -> bytes:
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(24000)
+        w.writeframes(b"\x00\x00" * int(24000 * seconds))
+    return buf.getvalue()
+
+
+def _write_dump(path: Path, track: list[int]) -> None:
+    """A dump as the server writes it: 37 int16 per frame, semantic in column 0."""
+    rows = [[c] + [0] * 36 for c in track] + [[code_loops.SEMANTIC_END_AUDIO] + [0] * 36]
+    path.write_bytes(array.array("h", [v for r in rows for v in r]).tobytes())
+
+
+def _guarded_draft(text: str, seconds: float, *, track: list[int] | None = None,
+                   attempt: int = 0, **overrides) -> tuple[dict, Path]:
+    """One draw against a stub that answers `seconds` of audio (and writes `track` as
+    its code dump when given). Returns the draft dict and the clip's directory, so the
+    caller can read the code-QC sidecar the draw left beside it."""
+    tmp = Path(tempfile.mkdtemp())
+    dumps = tmp / "dumps"
+    dumps.mkdir()
+    audio = tmp / "000001_0001_terme.flac"
+    audio.write_bytes(b"the original clip")
+    cfg = SimpleNamespace(
+        start_seed=43, tts_speed=None, speed_jitter=0.0,
+        cfg_alpha_start=2.0, cfg_alpha_step=-0.2, cfg_alpha_floor=1.2, n_improv=5,
+        tts_url="http://localhost:8003", tts_format="flac", tts_voice="fr_female",
+        tts_model=None, tts_timeout=30.0, tts_max_retries=1,
+        max_audio_seconds=327.68, tts_sem=threading.Semaphore(1),
+        auto_token_budget=True, code_dump_dir=(str(dumps) if track else None),
+        store_semantic_codes=True,
+    )
+    for key, value in overrides.items():
+        setattr(cfg, key, value)
+
+    def fake_post(url, body, timeout):
+        if track is not None:
+            _write_dump(dumps / f"{body['extra_params']['voxtral_dump_codes']}.i16", track)
+        return 200, _wav(seconds), 1.0
+
+    orig_post = _imp._tts.post_json
+    _imp._tts.post_json = fake_post
+    try:
+        draft = _imp._synthesize_draft(attempt, cfg, "clip", text, 999, "nohash", set(),
+                                       audio_path=audio)
+    finally:
+        _imp._tts.post_json = orig_post
+    return draft, tmp
+
+
+# 60 characters read by fr_female: plausible between 2.02 s (its fastest take ever
+# measured, times 1.45) and 9.06 s (3 s of head/tail plus 60/9.9). The three draws below
+# sit above, below and inside that band, with the same text each time.
+_TEXT = "a" * 60
+_over, _ = _guarded_draft(_TEXT, 30.0)
+eq("a draw past its per-clip budget is rejected", _over["reject"], "over")
+# The budget, not the 327.68 s cap: at the cap a 30 s draw is perfectly fine, which is
+# exactly how a looping repair used to be promoted over the clip it was repairing.
+eq("and it is the budget it was judged against", "budget" in (_over["reject_detail"] or ""), True)
+_short, _ = _guarded_draft(_TEXT, 1.0)
+eq("a draw too short for its text is rejected", _short["reject"], "short")
+eq("the floor fires with the budget off too",
+   _guarded_draft(_TEXT, 1.0, auto_token_budget=False)[0]["reject"], "short")
+_ok, _ = _guarded_draft(_TEXT, 4.0)
+eq("a plausible draw survives both bounds", _ok["reject"], None)
+
+# The code gate: the half of the defects a duration check cannot see. Both draws below
+# are the same plausible 4 s for the same text, so only the codes tell them apart.
+_COLLAPSED = [10, 855, 4007] * 40          # 8 s of audio built from three codes
+_CLEAN = list(range(300, 500))
+_derailed, _dir = _guarded_draft(_TEXT, 4.0, track=_COLLAPSED)
+eq("a derailed draw is rejected on its codes alone", _derailed["reject"], "derailed")
+eq("with the verdict in the line", "collapse" in (_derailed["reject_detail"] or ""), True)
+# Consumed: 925 B per second of audio would be ~11.7 GB over a corpus-wide pass.
+eq("the dump is deleted once read", list((_dir / "dumps").iterdir()), [])
+_rows = [json.loads(ln) for ln in
+         (_dir / code_sidecar.SIDECAR_FILENAME).read_text(encoding="utf-8").splitlines()]
+eq("one sidecar row per draw", len(_rows), 1)
+# `stage` and `seed` are what make the row readable later: stage 05 and stage 06 append
+# to the SAME file, and without them attempt 1 of a redo and attempt 1 of the original
+# generation are the same row for the same stem.
+eq("the row says which stage drew it", _rows[0]["stage"], "redo")
+eq("and which seed", _rows[0]["seed"], 43)
+eq("and that it was not kept", _rows[0]["accepted"], False)
+eq("the codes themselves are stored, so the thresholds can be re-decided later",
+   code_sidecar.decode_track(_rows[0]["semantic"]), _COLLAPSED)
+_kept, _dir_ok = _guarded_draft(_TEXT, 4.0, track=_CLEAN)
+eq("a clean draw passes the code gate", _kept["reject"], None)
+_rows_ok = [json.loads(ln) for ln in
+            (_dir_ok / code_sidecar.SIDECAR_FILENAME).read_text(encoding="utf-8").splitlines()]
+eq("and is recorded as accepted", _rows_ok[0]["accepted"], True)
+# A stock, unpatched server writes no dump at all. That has to read as "no opinion", or
+# turning the gate on against the wrong server would reject every draw of every clip.
+_no_dump, _dir_nd = _guarded_draft(_TEXT, 4.0, code_dump_dir=str(Path(tempfile.mkdtemp())))
+eq("a missing dump rejects nothing", _no_dump["reject"], None)
+eq("and records nothing", (_dir_nd / code_sidecar.SIDECAR_FILENAME).exists(), False)
+
+# Both guards have to be reachable from the driver, which is the only way the pass is
+# actually launched. A flag the driver never passes is a guard that is off in production.
+_driver_text = DRIVER_PATH.read_text(encoding="utf-8")
+for _flag in ("--auto-token-budget", "--no-auto-token-budget", "--code-dump-dir"):
+    eq(f"driver.sh can pass {_flag}", _flag in _driver_text, True)
+eq("and it puts them on the command line",
+   'GUARD_ARGS[@]+"${GUARD_ARGS[@]}"' in _driver_text, True)
+
 if _failures:
     print("FAILED:")
     for f in _failures:

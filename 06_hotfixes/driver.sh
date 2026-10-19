@@ -80,7 +80,25 @@
 #   MAX_AUDIO_SECONDS   TTS frame cap in seconds (default 327.68 = the served 4096 frames
 #                       at 12.5 Hz). A draw landing on the cap stopped for LENGTH, not at
 #                       the end of the text, so it is discarded instead of promoted. Must
-#                       match the server's VOXTRAL_MAX_TOKENS; 0 disables the check.
+#                       match the server's VOXTRAL_MAX_TOKENS; 0 disables the check. With
+#                       AUTO_TOKEN_BUDGET=1 (the default) this is only the fallback bound:
+#                       each draw is held to its own per-clip budget instead.
+#   AUTO_TOKEN_BUDGET   1 (default) sends every draw a per-clip frame budget sized from
+#                       its text and its VOICE's measured reading speed, and discards a
+#                       draw that comes back past it (looping) or below its floor (text
+#                       not spoken). Same guard, same numbers, as the generation pass:
+#                       utils/frame_budget.py. 0 falls back to MAX_AUDIO_SECONDS alone,
+#                       which only catches the worst runaways, and only after paying ~6
+#                       minutes of GPU for each.
+#   CODE_DUMP_DIR       HOST path of the directory the TTS server writes code dumps into
+#                       (the host side of $VOXTRAL_CODE_DUMP_DIR in the CrispASR compose,
+#                       container /cache/cloning/dumps). Empty by default. Setting it
+#                       turns on the code gate: a draw whose own semantic codes say it
+#                       derailed is discarded before it costs an STT call, which is the
+#                       half of the defects a duration check cannot see. Harmless against
+#                       a stock server, which writes no dump (that reads as no opinion,
+#                       never as a rejection). Same name and meaning as in
+#                       05_generate_audio/generate_v2.sh.
 #   INPUT     space-separated list of NeMo manifests, processed one after the other
 #             (each to convergence). Defaults to the main corpus manifest followed by
 #             the PARROT one, which is a separate file because PARROT ships under its
@@ -220,6 +238,41 @@ fi
 # moves by that much on Whisper's own spelling choices. 0 (the script's default) accepts
 # any gain at all, which is the right call only when the gate is high enough that
 # everything flagged is genuinely broken.
+#
+# The v2 generation guards, applied to every draw a redo makes (the pass's step 2a).
+# AUTO_TOKEN_BUDGET=1 (the default) sends each draw a per-clip frame budget and rejects
+# one that comes back past it or below its floor; set it to 0 to go back to the server's
+# global 327.68s cap, which only catches the worst runaways and only after paying ~6
+# minutes of GPU for them. CODE_DUMP_DIR is the HOST path of the directory the TTS
+# server writes code dumps into, i.e. the host side of $VOXTRAL_CODE_DUMP_DIR in the
+# CrispASR compose (container /cache/cloning/dumps): nothing can derive it, which is why
+# it has to be given. Setting it turns on the code gate (a draw whose own semantic codes
+# say it derailed is discarded before it costs an STT call) and appends one row per draw
+# to the code_qc_sidecar.jsonl beside the audio. Empty by default, and harmless against
+# a stock server, which writes no dump: that reads as no opinion, never as a rejection.
+# Same variable name and meaning as 05_generate_audio/generate_v2.sh, on purpose.
+# Spelled out the same way RESCORE is below, and for a sharper reason: under `set -u`,
+# `(( AUTO_TOKEN_BUDGET ))` on a value like `true` reads it as an unset NAME, evaluates
+# to 0, and would turn the budget off while the operator believes they turned it on.
+case "${AUTO_TOKEN_BUDGET:-1}" in
+  1|true|TRUE|yes|YES|y|Y) AUTO_TOKEN_BUDGET=1 ;;
+  0|false|FALSE|no|NO|n|N) AUTO_TOKEN_BUDGET=0 ;;
+  *) echo "driver.sh: AUTO_TOKEN_BUDGET must be 0 or 1 (got '${AUTO_TOKEN_BUDGET}')" >&2
+     exit 1 ;;
+esac
+CODE_DUMP_DIR="${CODE_DUMP_DIR:-}"
+GUARD_ARGS=()
+if (( AUTO_TOKEN_BUDGET )); then
+  GUARD_ARGS+=(--auto-token-budget)
+else
+  GUARD_ARGS+=(--no-auto-token-budget)
+  echo "driver: per-clip frame budget OFF, draws are only bounded by the server's cap"
+fi
+if [[ -n "${CODE_DUMP_DIR}" ]]; then
+  GUARD_ARGS+=(--code-dump-dir "${CODE_DUMP_DIR}")
+  echo "driver: code gate ON, reading dumps from ${CODE_DUMP_DIR}"
+fi
+
 MIN_IMPROVEMENT="${MIN_IMPROVEMENT:-0.02}"
 MAX_AUDIO_SECONDS="${MAX_AUDIO_SECONDS:-327.68}"
 STT_PARALLEL="${STT_PARALLEL:-10}"
@@ -470,6 +523,7 @@ run_pass() {  # $1 = stt|tts ; runs on the CUR_* dataset; returns the pass's exi
         --n-improv "${N_IMPROV}" \
         ${GATE_ARGS[@]+"${GATE_ARGS[@]}"} \
         --min-improvement "${MIN_IMPROVEMENT}" \
+        ${GUARD_ARGS[@]+"${GUARD_ARGS[@]}"} \
         --max-audio-seconds "${MAX_AUDIO_SECONDS}" \
         --stt-parallel "${STT_PARALLEL}" --tts-parallel "${TTS_PARALLEL}" \
         ${CATEGORY_ARGS[@]+"${CATEGORY_ARGS[@]}"} \

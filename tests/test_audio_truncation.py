@@ -19,9 +19,12 @@ test covers both sides of that guard:
 
   * stage 05 (`01_generate_audio.py`): `synthesize` raises TruncatedAudioError and
     writes NOTHING, so the batch counts the row as failed and a resume retries it.
-  * stage 06 (`01_recursive_improvement.py`): `_synthesize_draft` flags the draw and
-    `generate_drafts` saves no sidecar for it, so a truncated draw can never be
-    promoted over a real clip.
+  * stage 06 (`01_recursive_improvement.py`): `_synthesize_draft` reports the draw as
+    `reject == "over"` and `generate_drafts` saves no sidecar for it, so a truncated
+    draw can never be promoted over a real clip. With the per-clip frame budget off
+    (the namespace below leaves `auto_token_budget` unset, as every caller outside
+    main() does) the bound is the server's global cap, which is what this file pins;
+    `test_tts_request_knobs.py` covers the budgeted bound and the other two guards.
 
 Network and audio decoding are faked (no server, no wheels beyond the module's own),
 so this runs offline. Because the modules import soundfile at import time, run it
@@ -139,12 +142,13 @@ def test_stage06_discards_a_truncated_draw() -> None:
     # First: the draw stops at the cap.
     mod._tts.payload_duration = lambda payload: cap
     draft = mod._synthesize_draft(0, cfg, "clip", "texte", 99, "deadbeef", set())
-    assert draft["truncated"] is True and draft["duplicate"] is False
+    assert draft["reject"] == "over" and draft["duplicate"] is False
+    assert "frame cap" in draft["reject_detail"], draft["reject_detail"]
 
     # Then: the same draw at a normal length is not flagged.
     mod._tts.payload_duration = lambda payload: 20.0
     draft = mod._synthesize_draft(1, cfg, "clip", "texte", 99, "deadbeef", set())
-    assert draft["truncated"] is False
+    assert draft["reject"] is None
 
     with tempfile.TemporaryDirectory() as td:
         audio = Path(td) / "000001_0000_terme.flac"

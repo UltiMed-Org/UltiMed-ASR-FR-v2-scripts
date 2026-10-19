@@ -61,8 +61,13 @@ def load_module():
 def install_fakes(mod):
     """Replace the two network calls with deterministic in-memory fakes."""
 
+    # Every knob spelled out rather than **kwargs: this stub is also what catches a
+    # caller that stopped passing one. The two generation guards carry defaults because
+    # the cfg below leaves them off (this file is about the mode state machine, and
+    # tests/test_tts_request_knobs.py pins what they put on the wire).
     def fake_tts(url, text, *, response_format, seed, voice, speed, model,
-                 timeout, max_retries, cfg_alpha):
+                 timeout, max_retries, cfg_alpha,
+                 max_new_tokens=None, dump_tag=None):
         # Distinct bytes per seed (so no dedup / seed-determinism trip) and never
         # equal to the original clip bytes (b"ORIG").
         return f"AUD{seed}".encode()
@@ -908,7 +913,8 @@ def test_incomplete_candidate_set_goes_back_to_tts(mod):
         # Regenerating would skip it again (the seed of each attempt is fixed), so this
         # set is as complete as it will ever be and must be judged, not requeued.
         def dup_tts(url, text, *, response_format, seed, voice, speed, model,
-                    timeout, max_retries, cfg_alpha):
+                    timeout, max_retries, cfg_alpha,
+                    max_new_tokens=None, dump_tag=None):
             return f"AUD{43 if seed == 45 else seed}".encode()
 
         mod.tts_synthesize = dup_tts
