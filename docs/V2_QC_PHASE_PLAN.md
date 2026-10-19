@@ -171,25 +171,32 @@ Each is one commit. Order is dependency order. All six items are done.
    distributions and filters, `count_pending` unchanged, round numbering across datasets,
    the report and the driver's call).
 
-6. **One entry point.** DONE. `driver.sh` now wraps the whole phase:
-   `REFRESH_MANIFESTS=1` (with a REQUIRED `PIN_SPLITS_FROM`, refused when empty because
-   an unpinned rebuild leaks v1's test set into v2's train set) rebuilds the manifests,
-   `ACOUSTIC_SCAN=1` runs the free CPU loop scan, and `SYNC_RESULTS=1` carries the QC
-   columns back into the release manifests after the last dataset converges. The rebuild
-   is fatal on failure, the scan is not, the sync warns. All three default to OFF, so a
-   plain run is byte-identical to before. v2 defaults landed too: the local judge
+6. **One entry point.** DONE. `sudo -E ./driver.sh` is now the whole phase:
+   `REFRESH_MANIFESTS` rebuilds the manifests, `ACOUSTIC_SCAN` runs the free CPU loop
+   scan, `SYNC_RESULTS` carries the QC columns back into the release manifests after the
+   last dataset converges, and all three default ON (set one to 0 to skip it). The
+   rebuild is fatal on failure, the scan is not, the sync warns. `PIN_SPLITS_FROM` is
+   derived from the `99_hf_release/data` symlink (its `NeMO_files` sibling), so a plain
+   run pins its splits without a machine path in the repo; there is no unpinned fallback,
+   and when nothing can be derived an explicit `REFRESH_MANIFESTS=1` stops the run while
+   the default ON skips the refresh. v2 defaults landed too: the local judge
    (`http://127.0.0.1:8002`, with `WDOC_WHISPER_API_KEY` falling back to
    `$CRISPASR_API_KEY`), `STT_PARALLEL` 10 -> 20 (six serialising replicas need a queue),
    `TTS_PARALLEL` 2 -> 32 (the measurement below; 32 is the ceiling, the largest captured
    CUDA graph).
 
-   Two things it turned out to need. `STT_MODEL` was **documented but never plumbed**:
-   the header's own example passed it and `run_pass` sent
-   `--stt-model "${WDOC_WHISPER_MODEL:-}"`, i.e. an empty model, which stored every
-   reading under the `"default"` key instead of a per-judge one. It is now one variable
+   Two things it turned out to need. `STT_MODEL` was **documented but never read**: the
+   header's own example passed it (`sudo -E MODE=stt STT_MODEL=large-v3 ...`) while
+   `run_pass` sent `--stt-model "${WDOC_WHISPER_MODEL:-}"`, so the variable the docs told
+   you to use did nothing and the judge was whatever `.env` happened to hold (here
+   `whisper-1`, which is why every v1 reading sits under that key). Setting it per run,
+   which is what the two-judge plan needs, silently had no effect. It is now one variable
    used in both places (the name sent to the server and the key the reading lands under),
    defaulting to `whisper.cpp/ggml-large-v3-turbo`, with `WDOC_WHISPER_MODEL` kept as its
-   older spelling. And `03_sync_hotfix_results.py` gained `--stt-key`, which the driver
+   older spelling. Note the key is also the resume key: changing it makes readings stored
+   under the old one invisible, which on a 602k-clip corpus means re-transcribing. For v2
+   that is moot (new audio, nothing to reuse), but it is the reason to decide the judge's
+   name once and leave it alone. And `03_sync_hotfix_results.py` gained `--stt-key`, which the driver
    passes as `$STT_MODEL`: that script's `STT_KEY` default is v1's `whisper-1` alias,
    which against a v2 row matches nothing and would have written every QC column null, so
    it now also warns and lists the keys it did find.

@@ -140,31 +140,36 @@
 #             categories are passed through unchanged and convergence is judged
 #             over the selected categories only, so the loop stops when just
 #             those subsets are done. Empty (default) = the whole dataset.
-#   Optional pre- and post-steps, so one command can do the whole phase (all default OFF;
-#   each is a single call to a script that already exists, run as ${TARGET_USER} at the
-#   same nice level as a pass):
-#   REFRESH_MANIFESTS=1  rebuild the NeMo manifests from the generated audio before any
-#                       pass, which is what picks up the durations of regenerated clips
-#                       (99_hf_release/01_build_nemo_manifest.py --all, then
-#                       02_combine_nemo_manifests.py). Needs PIN_SPLITS_FROM.
+#   Pre- and post-steps, so `sudo -E ./driver.sh` alone is the whole phase. All three
+#   default ON; set one to 0 to skip it. Each is a single call to a script that already
+#   exists, run as ${TARGET_USER} at the same nice level as a pass:
+#   REFRESH_MANIFESTS=1  (default) rebuild the NeMo manifests from the generated audio
+#                       before any pass, which is what picks up the durations of
+#                       regenerated clips (99_hf_release/01_build_nemo_manifest.py --all,
+#                       then 02_combine_nemo_manifests.py).
 #   PIN_SPLITS_FROM     manifest root of the PREVIOUS generation (v1's NeMO_files/),
-#                       passed to both builders as --pin-splits-from. REQUIRED by
-#                       REFRESH_MANIFESTS and refused when empty, not defaulted: the
-#                       splitter is duration-greedy, so an unpinned rebuild reshuffles
-#                       train/val/test and leaks the old test set into the new train set,
-#                       which silently invalidates every v1-vs-v2 comparison. The path is
-#                       machine-specific, so only you can supply it.
-#   ACOUSTIC_SCAN=1     run the CPU-only acoustic loop scan first
+#                       passed to both builders as --pin-splits-from. Derived when unset,
+#                       as the `NeMO_files` sibling of whatever 99_hf_release/data points
+#                       at, so no machine-specific path is written down here. There is no
+#                       unpinned fallback: the splitter is duration-greedy, so an
+#                       unpinned rebuild reshuffles train/val/test and leaks the old test
+#                       set into the new train set, which silently invalidates every
+#                       v1-vs-v2 comparison. When no pin can be derived, an explicit
+#                       REFRESH_MANIFESTS=1 stops the run and a defaulted one skips the
+#                       refresh.
+#   ACOUSTIC_SCAN=1     (default) run the CPU-only acoustic loop scan first
 #                       (05_generate_audio/04_qc_acoustic_loops.py), which scores every
 #                       clip for self-similarity and writes qc_acoustic_sidecar.jsonl
 #                       beside the audio. Free (no GPU, no server), and its sidecar is a
 #                       STEMS_FROM file, so a cheap scan can aim an expensive pass.
 #   ACOUSTIC_WORKERS    worker processes for that scan (default 4).
-#   SYNC_RESULTS=1      after every dataset has converged, carry stage 06's QC columns
-#                       (and a swapped clip's voice) back into the release manifests
-#                       (99_hf_release/03_sync_hotfix_results.py --apply --stt-key
-#                       $STT_MODEL). Without it the manifests still describe the audio as
-#                       it was before this run.
+#   ACOUSTIC_STAGES     generator stages to scan, space-separated (e.g. "01_dictionnary
+#                       04_PARROT"). Empty (default) = all of them.
+#   SYNC_RESULTS=1      (default) after every dataset has converged, carry stage 06's QC
+#                       columns (and a swapped clip's voice) back into the release
+#                       manifests (99_hf_release/03_sync_hotfix_results.py --apply
+#                       --stt-key $STT_MODEL --stt-model $STT_MODEL). Without it the
+#                       manifests still describe the audio as it was before this run.
 #   STEMS_FROM space-separated list of files naming the only CLIPS to work on, each
 #             either a QC sidecar jsonl (its flagged rows) or a plain list of stems,
 #             one per line. Same pass-through and convergence semantics as CATEGORY,
@@ -519,34 +524,78 @@ if (( ${#STEMS_ARGS[@]} )); then
   echo "driver: restricting work to the clips listed in: ${STEMS_FROM}"
 fi
 
-# Optional pre-steps, in the only order that makes sense: refresh the manifests from the
-# audio on disk FIRST (so the durations the passes read describe the clips as they are
-# now, including anything regenerated since), then scan that audio for acoustic loops
-# (its sidecar is a STEMS_FROM file, so it can aim the expensive passes that follow).
-# Both call a script that already exists, as ${TARGET_USER} and at nice 19 like a pass.
-flag REFRESH_MANIFESTS 0
-flag ACOUSTIC_SCAN 0
-flag SYNC_RESULTS 0
-PIN_SPLITS_FROM="${PIN_SPLITS_FROM:-}"
+# The pre- and post-steps, in the only order that makes sense: refresh the manifests from
+# the audio on disk FIRST (so the durations the passes read describe the clips as they are
+# now, including anything regenerated since), then scan that audio for acoustic loops (its
+# sidecar is a STEMS_FROM file, so it can aim the expensive passes that follow), and sync
+# the results back after the last dataset converges. Each is a single call to a script
+# that already exists, as ${TARGET_USER} and at nice 19 like a pass.
+#
+# All three default ON, so `sudo -E ./driver.sh` is the whole phase. Remember whether the
+# refresh was ASKED for, because that changes what an undecidable PIN_SPLITS_FROM means:
+# explicit means stop, defaulted means skip the refresh and carry on.
+REFRESH_EXPLICIT="${REFRESH_MANIFESTS+1}"
+flag REFRESH_MANIFESTS 1
+flag ACOUSTIC_SCAN 1
+flag SYNC_RESULTS 1
 ACOUSTIC_WORKERS="${ACOUSTIC_WORKERS:-4}"
+# Which generator stages the acoustic scan looks at (space-separated, e.g.
+# "01_dictionnary 04_PARROT"). Empty = all of them, which is the script's own default.
+ACOUSTIC_STAGES="${ACOUSTIC_STAGES:-}"
+ACOUSTIC_STAGE_ARGS=()
+for _st in ${ACOUSTIC_STAGES}; do
+  ACOUSTIC_STAGE_ARGS+=(--stage "${_st}")
+done
 # The repo root, so the pre- and post-steps can reach the other stages. HERE is
 # <root>/06_hotfixes, and the two are kept apart because every path a pass gets is
 # relative to HERE.
 ROOT="$(cd "${HERE}/.." && pwd)"
 
+# Where the PREVIOUS generation's manifests live, which the rebuild must pin its splits
+# to. Derived rather than hardcoded (no machine path or username in a tracked file): the
+# release stage's `data` symlink points at THIS generation's audio root, and the previous
+# one's manifest root is its sibling `NeMO_files/`, e.g. data -> .../audio_datasets/v2 so
+# the pin is .../audio_datasets/NeMO_files. Set PIN_SPLITS_FROM to override.
+PIN_SPLITS_FROM="${PIN_SPLITS_FROM:-}"
+if [[ -z "${PIN_SPLITS_FROM}" && -e "${ROOT}/99_hf_release/data" ]]; then
+  _audio_root="$(readlink -f "${ROOT}/99_hf_release/data" 2>/dev/null || true)"
+  if [[ -n "${_audio_root}" && -d "$(dirname "${_audio_root}")/NeMO_files" ]]; then
+    PIN_SPLITS_FROM="$(dirname "${_audio_root}")/NeMO_files"
+    # Refuse the degenerate case where that resolves to the manifests we are ABOUT to
+    # rewrite: pinning a rebuild to its own output pins nothing.
+    if [[ "${PIN_SPLITS_FROM}" == "$(readlink -f "${ROOT}/99_hf_release/data" )/NeMO_files" ]]; then
+      echo "driver: the derived pin (${PIN_SPLITS_FROM}) is this generation's own" >&2
+      echo "  manifest root, which pins nothing. Set PIN_SPLITS_FROM explicitly." >&2
+      PIN_SPLITS_FROM=""
+    else
+      echo "driver: splits pinned to ${PIN_SPLITS_FROM} (derived from 99_hf_release/data;" \
+           "set PIN_SPLITS_FROM to override)"
+    fi
+  fi
+fi
+
+if (( REFRESH_MANIFESTS )) && [[ -z "${PIN_SPLITS_FROM}" ]]; then
+  # No pin, and none can be derived. An UNPINNED rebuild is never an option: the splitter
+  # is duration-greedy, so it reshuffles train/val/test and leaks the old test set into
+  # the new train set, which invalidates every old-vs-new comparison with no error
+  # anywhere. See docs/V2_REGENERATION_RUNBOOK.md.
+  echo "driver.sh: cannot pin the splits: no PIN_SPLITS_FROM, and none derivable from" >&2
+  echo "  99_hf_release/data (expected <that symlink's parent>/NeMO_files)." >&2
+  if [[ -n "${REFRESH_EXPLICIT}" ]]; then
+    echo "  REFRESH_MANIFESTS was asked for explicitly, so stopping rather than" >&2
+    echo "  rebuilding unpinned. Pass PIN_SPLITS_FROM=<previous NeMO_files dir>." >&2
+    exit 1
+  fi
+  echo "  Skipping the manifest refresh (it is only ON by default). The passes will use" >&2
+  echo "  the manifests as they are; pass PIN_SPLITS_FROM=<dir> to refresh them." >&2
+  REFRESH_MANIFESTS=0
+fi
+if (( REFRESH_MANIFESTS )) && [[ ! -d "${PIN_SPLITS_FROM}" ]]; then
+  echo "driver.sh: PIN_SPLITS_FROM is not a directory: ${PIN_SPLITS_FROM}" >&2
+  exit 1
+fi
+
 if (( REFRESH_MANIFESTS )); then
-  if [[ -z "${PIN_SPLITS_FROM}" ]]; then
-    echo "driver.sh: REFRESH_MANIFESTS=1 needs PIN_SPLITS_FROM=<the previous generation's" >&2
-    echo "  manifest root, i.e. v1's NeMO_files/>. Not defaulted on purpose: the splitter" >&2
-    echo "  is duration-greedy, so an unpinned rebuild reshuffles train/val/test and leaks" >&2
-    echo "  the old test set into the new train set, which invalidates every v1-vs-v2" >&2
-    echo "  comparison without any error. See docs/V2_REGENERATION_RUNBOOK.md." >&2
-    exit 1
-  fi
-  if [[ ! -d "${PIN_SPLITS_FROM}" ]]; then
-    echo "driver.sh: PIN_SPLITS_FROM is not a directory: ${PIN_SPLITS_FROM}" >&2
-    exit 1
-  fi
   echo "=== $(date '+%F %T') pre-step: rebuilding the NeMo manifests," \
        "splits pinned to ${PIN_SPLITS_FROM} ==="
   # Fatal if either fails, unlike the scan below: a half-written manifest set is what the
@@ -567,6 +616,7 @@ if (( ACOUSTIC_SCAN )); then
   # not be able to stop a GPU run that would otherwise work.
   as_user "${UV_BIN}" run "${ROOT}/05_generate_audio/04_qc_acoustic_loops.py" \
     --workers "${ACOUSTIC_WORKERS}" \
+    ${ACOUSTIC_STAGE_ARGS[@]+"${ACOUSTIC_STAGE_ARGS[@]}"} \
     || echo "driver: the acoustic scan failed; continuing without its sidecar" >&2
 fi
 
@@ -644,16 +694,14 @@ run_pass() {  # $1 = stt|tts ; runs on the CUR_* dataset; returns the pass's exi
     echo "driver: reopening the clips a previous run gave up on (--retry-exhausted)"
     RETRY_EXHAUSTED_PENDING=0
   fi
-  # Drop to the normal user for the Python (files stay user-owned). runuser without -l
-  # keeps CWD (=HERE), so the relative --input/--audio-root resolve as they do manually;
-  # we forward the STT config explicitly and call uv by absolute path.
-  # `nice -n 40` puts the pass, and everything it spawns, at 19: the lowest priority.
-  # This is an unattended job that runs for days and must never be the reason an
-  # interactive session stutters, and it costs nothing, a pass waits on the GPU server
-  # far more than on the CPU. 40 rather than 19 because nice takes an INCREMENT, not a
-  # level: sudo can hand the driver a negative priority (-5 observed here), where +19
-  # would land at 14. The result is clamped to 19, so an oversized step pins the floor
-  # wherever it starts from. Placed after `env` so it resolves on USER_PATH.
+  # `as_user` drops root and pins nice 19 (see its definition); the inner `env` adds the
+  # STT config on top, because that is the only thing a pass needs beyond HOME and PATH.
+  # runuser without -l keeps CWD (=HERE), so the relative --input/--audio-root resolve as
+  # they do when run by hand, and uv is called by absolute path.
+  #
+  # nice 19 matters here in particular: this is an unattended job that runs for days and
+  # must never be the reason an interactive session stutters, and it costs nothing, since
+  # a pass waits on the GPU server far more than on the CPU.
   as_user env WDOC_WHISPER_ENDPOINT="${WDOC_WHISPER_ENDPOINT}" \
         WDOC_WHISPER_API_KEY="${WDOC_WHISPER_API_KEY:-}" \
         WDOC_WHISPER_MODEL="${STT_MODEL}" \
@@ -774,11 +822,20 @@ done
 # columns, and the voice of a clip whose reader was swapped). Last, not first: it reads
 # the <output>/*.stt.jsonl every pass above has been writing. --stt-key is ${STT_MODEL}
 # because that is the key the readings were stored under, and the default is v1's
-# ("whisper-1"), which would match nothing and write nulls.
+# ("whisper-1"), which would match nothing and write nulls. --stt-model goes with it so
+# the `stt_model` column names the judge whose reading is in the row next to it.
 if (( SYNC_RESULTS )); then
+  # That script reads a fixed pair of outputs (improved/, improved_parrot/), so a run
+  # under a different OUTPUT has nothing for it to find. It says so per source, but by
+  # then the run is over, so say it here first.
+  case "${OUTPUT}" in
+    improved|improved_*) ;;
+    *) echo "driver: OUTPUT is '${OUTPUT}', while 03_sync_hotfix_results.py reads" >&2
+       echo "  06_hotfixes/improved{,_parrot}/full.stt.jsonl. Expect it to find nothing." >&2 ;;
+  esac
   echo "=== $(date '+%F %T') post-step: syncing stage 06 results into the manifests ==="
   as_user "${UV_BIN}" run "${ROOT}/99_hf_release/03_sync_hotfix_results.py" \
-    --apply --stt-key "${STT_MODEL}" \
+    --apply --stt-key "${STT_MODEL}" --stt-model "${STT_MODEL}" \
     || echo "driver: the manifest sync failed; the audio is fine, re-run" \
             "99_hf_release/03_sync_hotfix_results.py --apply by hand" >&2
 fi

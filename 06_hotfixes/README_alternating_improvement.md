@@ -145,33 +145,41 @@ the eager path. v1's 2 existed because that server was shared with interactive w
 
 ### The whole phase in one command
 
-The three things that surround the alternation are optional steps of the driver, so a QC
-phase is one invocation rather than a checklist:
+The three things that surround the alternation are steps of the driver, and all three are
+**ON by default**, so the QC phase is one invocation rather than a checklist:
 
 ```sh
-sudo -E REFRESH_MANIFESTS=1 PIN_SPLITS_FROM=/path/to/v1/NeMO_files \
-        ACOUSTIC_SCAN=1 SYNC_RESULTS=1 ./driver.sh
+sudo -E ./driver.sh
 ```
 
 In order: rebuild the NeMo manifests from the audio on disk (`99_hf_release/01_build_nemo_manifest.py --all`
 then `02_combine_nemo_manifests.py`), scan that audio for acoustic loops
 (`05_generate_audio/04_qc_acoustic_loops.py`, CPU only, `ACOUSTIC_WORKERS` processes,
-default 4), run the alternation to convergence for every dataset, then carry stage 06's
-QC columns back into the release manifests (`99_hf_release/03_sync_hotfix_results.py
---apply --stt-key $STT_MODEL`). All three default to OFF, so a plain `sudo -E ./driver.sh`
-is exactly what it was before.
+default 4, restrict with `ACOUSTIC_STAGES="01_dictionnary 04_PARROT"`), run the
+alternation to convergence for every dataset, then carry stage 06's QC columns back into
+the release manifests (`99_hf_release/03_sync_hotfix_results.py --apply --stt-key
+$STT_MODEL --stt-model $STT_MODEL`). Set any of `REFRESH_MANIFESTS`, `ACOUSTIC_SCAN`,
+`SYNC_RESULTS` to 0 to skip that one, e.g. `sudo -E REFRESH_MANIFESTS=0 ./driver.sh` when
+the manifests are already current.
 
-`PIN_SPLITS_FROM` is **required** by `REFRESH_MANIFESTS` and has no default on purpose.
-The splitter is duration-greedy, so a rebuild that is not pinned to the previous
-generation's manifest root redraws train/val/test and leaks v1's test set into v2's train
-set, with no error anywhere: the model would then be evaluated on clips it trained on.
-The driver refuses before running a single pass. See `docs/V2_REGENERATION_RUNBOOK.md`.
+The rebuild needs its splits pinned to the PREVIOUS generation's manifest root, and
+`PIN_SPLITS_FROM` is **derived** when you do not set it: whatever `99_hf_release/data`
+points at, with `NeMO_files` as its sibling (`data -> .../audio_datasets/v2` gives
+`.../audio_datasets/NeMO_files`). That keeps a machine-specific path out of the repo while
+still letting a plain run work. There is no unpinned fallback, ever: the splitter is
+duration-greedy, so an unpinned rebuild redraws train/val/test and leaks v1's test set
+into v2's train set with no error anywhere, and the model would then be evaluated on clips
+it trained on (see `docs/V2_REGENERATION_RUNBOOK.md`). When no pin can be derived, the two
+cases differ on purpose: `REFRESH_MANIFESTS=1` asked for explicitly **stops the run**,
+while the default ON **skips the refresh** and says so, since a missing v1 root must not
+block a corpus that only needs the passes.
 
 The manifest rebuild is fatal if it fails (every pass after it reads those files as the
 truth about the corpus); the acoustic scan is not (its sidecar is advisory, and hours of
 CPU must not be able to stop a GPU run that would otherwise work); the sync warns rather
 than failing, because by then the audio is already fixed and the sync can be re-run by
-hand.
+hand. The sync reads `improved/` and `improved_parrot/`, so the driver also warns up front
+when `OUTPUT` is something else and it will find nothing.
 
 ### Which judge, and where its reading is stored (`STT_MODEL`)
 
@@ -186,7 +194,12 @@ so neither overwrites the other and the two can be compared:
 sudo -E MODE=stt STT_MODEL=whisper.cpp/ggml-large-v3 STEMS_FROM=flags.txt ./driver.sh
 ```
 
-`WDOC_WHISPER_MODEL` is the older name for the same thing and still works.
+`WDOC_WHISPER_MODEL` is the older name for the same thing and still works, and it is
+what the existing v1 outputs were judged under (`whisper-1`, from `.env`). Mind that the
+key is also the **resume** key: a pass only sees readings stored under its own
+`STT_MODEL`, so renaming the judge makes every earlier reading invisible and the corpus
+is transcribed again (~31 h for 602k clips). For v2 that costs nothing, since the audio
+is new, but it is a reason to settle on the judge's name before the first full sweep.
 `SYNC_RESULTS=1` passes `--stt-key "$STT_MODEL"` for the same reason: that script's own
 default is v1's `whisper-1` alias, which against a v2 row matches nothing and would write
 every QC column empty (it now warns and lists the keys it did find).

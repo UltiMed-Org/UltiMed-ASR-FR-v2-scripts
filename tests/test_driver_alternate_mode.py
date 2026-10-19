@@ -262,21 +262,40 @@ def test_retry_exhausted_defaults_off(tmp: Path) -> None:
     print("test_retry_exhausted_defaults_off: OK")
 
 
-def test_no_pre_or_post_steps_by_default(tmp: Path) -> None:
-    """A plain run must still be exactly the passes: the extra steps rebuild manifests
-    and rewrite the release files, so none of them may happen unless asked for."""
+def test_the_steps_are_on_by_default(tmp: Path) -> None:
+    """`sudo -E ./driver.sh` alone is meant to be the whole phase, so the scan and the
+    sync run with no env at all. The refresh is the one that cannot: these tests run
+    against a copy of the driver in a tmpdir, where there is no 99_hf_release/data to
+    derive the split pin from. A DEFAULTED refresh in that position must skip itself and
+    let the run continue, not take the run down."""
     steps: list[str] = []
     rc, modes, _switches, out = run_driver(tmp, [10], {"MODE": "alternate"}, steps=steps)
-    assert modes == ["stt"], f"passes ran: {modes}\n{out}"
-    assert steps == [], f"unasked-for steps ran: {steps}\n{out}"
     assert rc == 0, f"driver exited {rc}\n{out}"
-    print("test_no_pre_or_post_steps_by_default: OK")
+    assert modes == ["stt"], f"passes ran: {modes}\n{out}"
+    scripts = [line.split("|", 1)[0] for line in steps]
+    assert scripts == ["04_qc_acoustic_loops.py", "03_sync_hotfix_results.py"], \
+        f"steps ran: {scripts}\n{out}"
+    assert "Skipping the manifest refresh" in out, out
+    print("test_the_steps_are_on_by_default: OK")
 
 
-def test_refresh_manifests_refuses_unpinned_splits(tmp: Path) -> None:
-    """PIN_SPLITS_FROM has no safe default: an unpinned rebuild redraws train/val/test
-    and leaks the old test set into the new train set, silently. So refuse BEFORE any
-    pass runs rather than rebuilding and hoping someone notices."""
+def test_every_step_can_be_turned_off(tmp: Path) -> None:
+    """...and a run that wants only the passes can still have exactly that: the steps
+    rebuild manifests and rewrite the release files, which is not always wanted."""
+    steps: list[str] = []
+    rc, modes, _switches, out = run_driver(
+        tmp, [10], {"MODE": "alternate", "REFRESH_MANIFESTS": "0",
+                    "ACOUSTIC_SCAN": "no", "SYNC_RESULTS": "0"}, steps=steps)
+    assert rc == 0, f"driver exited {rc}\n{out}"
+    assert modes == ["stt"] and steps == [], f"{modes} {steps}\n{out}"
+    print("test_every_step_can_be_turned_off: OK")
+
+
+def test_an_explicit_refresh_refuses_unpinned_splits(tmp: Path) -> None:
+    """PIN_SPLITS_FROM has no safe fallback: an unpinned rebuild redraws train/val/test
+    and leaks the old test set into the new train set, silently. Asked for explicitly
+    with no pin available, the driver stops BEFORE any pass rather than rebuilding and
+    hoping someone notices. (Defaulted, it skips: the test above.)"""
     steps: list[str] = []
     rc, modes, _switches, out = run_driver(
         tmp, [10], {"MODE": "alternate", "REFRESH_MANIFESTS": "1"}, steps=steps)
@@ -289,7 +308,7 @@ def test_refresh_manifests_refuses_unpinned_splits(tmp: Path) -> None:
         tmp, [10], {"MODE": "alternate", "REFRESH_MANIFESTS": "1",
                     "PIN_SPLITS_FROM": str(tmp / "nope")})
     assert rc == 1 and "not a directory" in out, f"exited {rc}\n{out}"
-    print("test_refresh_manifests_refuses_unpinned_splits: OK")
+    print("test_an_explicit_refresh_refuses_unpinned_splits: OK")
 
 
 def test_the_whole_phase_in_one_command(tmp: Path) -> None:
@@ -303,8 +322,8 @@ def test_the_whole_phase_in_one_command(tmp: Path) -> None:
     rc, modes, _switches, out = run_driver(
         tmp, [10], {"MODE": "alternate", "REFRESH_MANIFESTS": "1",
                     "PIN_SPLITS_FROM": str(pinned), "ACOUSTIC_SCAN": "1",
-                    "ACOUSTIC_WORKERS": "3", "SYNC_RESULTS": "1",
-                    "STT_MODEL": "whisper.cpp/ggml-large-v3"},
+                    "ACOUSTIC_WORKERS": "3", "ACOUSTIC_STAGES": "01_dictionnary 04_PARROT",
+                    "SYNC_RESULTS": "1", "STT_MODEL": "whisper.cpp/ggml-large-v3"},
         steps=steps)
     assert rc == 0, f"driver exited {rc}\n{out}"
     assert modes == ["stt"], f"passes ran: {modes}\n{out}"
@@ -315,9 +334,13 @@ def test_the_whole_phase_in_one_command(tmp: Path) -> None:
     assert f"--pin-splits-from {pinned}" in steps[0], steps[0]
     assert f"--pin-splits-from {pinned}" in steps[1], steps[1]
     assert "--workers 3" in steps[2], steps[2]
+    assert "--stage 01_dictionnary --stage 04_PARROT" in steps[2], steps[2]
     # The sync must read the key the passes WROTE under, not v1's `whisper-1` default,
     # or it matches nothing and writes every QC column empty.
     assert "--apply" in steps[3] and "--stt-key whisper.cpp/ggml-large-v3" in steps[3], steps[3]
+    # And the model NAME it writes into the manifest must be that same judge, or the row
+    # would credit turbo (the script's own default) with large-v3's reading.
+    assert "--stt-model whisper.cpp/ggml-large-v3" in steps[3], steps[3]
     print("test_the_whole_phase_in_one_command: OK")
 
 
@@ -342,8 +365,9 @@ def main() -> None:
         test_dry_start_on_the_second_dataset(tmp)
         test_retry_exhausted_is_one_shot_per_dataset(tmp)
         test_retry_exhausted_defaults_off(tmp)
-        test_no_pre_or_post_steps_by_default(tmp)
-        test_refresh_manifests_refuses_unpinned_splits(tmp)
+        test_the_steps_are_on_by_default(tmp)
+        test_every_step_can_be_turned_off(tmp)
+        test_an_explicit_refresh_refuses_unpinned_splits(tmp)
         test_the_whole_phase_in_one_command(tmp)
     print("test_driver_alternate_mode: OK")
 
