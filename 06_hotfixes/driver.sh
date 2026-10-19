@@ -39,9 +39,22 @@
 #                       1.4, 1.2 over five draws, which is the measured usable band (see
 #                       the note at the assignment). A negative START omits the knob,
 #                       leaving the server's startup value every draw.
-#   TAIL_CER_THRESHOLD  CER gate on the last ~30s of clips longer than 30s (default 0.12,
-#                       looser than CER_THRESHOLD because the tail is a short window;
-#                       negative disables the tail gate)
+#   TAIL_CER_THRESHOLD  CER gate on the last ~30s of clips longer than 30s (looser than
+#                       CER_THRESHOLD because the tail is a short window; negative
+#                       disables that one gate)
+#   WINDOW_CER_THRESHOLD  CER gate on the WORST ~15s window of a clip: the only one of
+#                       the four that sees a phrase dropped in the MIDDLE of a long clip
+#                       (five lost words are 0.14 of a 213-char window but 0.04 of a 48s
+#                       PARHAF chunk, so no whole-clip gate catches them without flagging
+#                       every clean long clip too)
+#   BAD_RUN_THRESHOLD   gate on the longest CONTIGUOUS run of reference characters the
+#                       recognizer never said, in characters. A count and not a rate,
+#                       because a skipped phrase has a size and dividing it by the clip's
+#                       length is exactly what hides it
+#   None of those four carries a default HERE: unset means "whatever the scripts ship"
+#                       (01_compute_stt.py's DEFAULT_*_GATE, which
+#                       01_recursive_improvement.py reads for its own click defaults), so
+#                       this file never becomes a second copy of a number that then drifts
 #   MIN_IMPROVEMENT     how much better a draw must be to replace the original when it
 #                       does not clear the gates (default 0.02, see the note below)
 #   RESCORE=1           re-derive every stored CER under the CURRENT scoring rules before
@@ -183,8 +196,24 @@ N_IMPROV="${N_IMPROV:-5}"
 # left above either gate), so these are the SECOND sweep: they queue the next ~1550
 # clips, about 10.5 h of audio, which is roughly one night of alternating passes. Raise
 # them back if you only want the worst clips.
-CER_THRESHOLD="${CER_THRESHOLD:-0.08}"
-TAIL_CER_THRESHOLD="${TAIL_CER_THRESHOLD:-0.12}"
+# One flag per gate, and only when its env var is set, so an unset gate keeps whatever
+# 01_recursive_improvement.py ships (see the header note on why no gate value is
+# defaulted in this file). A loop over name:flag pairs rather than four if blocks, so a
+# fifth gate is one line and cannot be half-wired.
+GATE_ARGS=()
+for _gate in "CER_THRESHOLD:--cer-threshold" \
+             "TAIL_CER_THRESHOLD:--tail-cer-threshold" \
+             "WINDOW_CER_THRESHOLD:--window-cer-threshold" \
+             "BAD_RUN_THRESHOLD:--bad-run-threshold"; do
+  _gate_var="${_gate%%:*}"
+  _gate_val="${!_gate_var:-}"
+  if [[ -n "${_gate_val}" ]]; then
+    GATE_ARGS+=("${_gate#*:}" "${_gate_val}")
+  fi
+done
+if (( ${#GATE_ARGS[@]} )); then
+  echo "driver: gate overrides: ${GATE_ARGS[*]}"
+fi
 # How much better a draw must be to REPLACE the original when it does not clear the
 # gates. It matters at a low gate: a clip flagged at 0.09 whose best draw comes in at
 # 0.088 has not been fixed, it has been fitted to the judge, and the CER of a clean clip
@@ -438,8 +467,8 @@ run_pass() {  # $1 = stt|tts ; runs on the CUR_* dataset; returns the pass's exi
         --cfg-alpha-start "${CFG_ALPHA_START}" --cfg-alpha-step="${CFG_ALPHA_STEP}" \
         --cfg-alpha-floor "${CFG_ALPHA_FLOOR}" \
         --start-seed "${START_SEED}" \
-        --n-improv "${N_IMPROV}" --cer-threshold "${CER_THRESHOLD}" \
-        --tail-cer-threshold "${TAIL_CER_THRESHOLD}" \
+        --n-improv "${N_IMPROV}" \
+        ${GATE_ARGS[@]+"${GATE_ARGS[@]}"} \
         --min-improvement "${MIN_IMPROVEMENT}" \
         --max-audio-seconds "${MAX_AUDIO_SECONDS}" \
         --stt-parallel "${STT_PARALLEL}" --tts-parallel "${TTS_PARALLEL}" \
