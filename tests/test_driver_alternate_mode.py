@@ -50,11 +50,19 @@ UV_STUB = """#!/usr/bin/env bash
 # answer 99 (an abort) instead of spinning forever.
 mode=""
 retry=0
+report=0
 while [[ $# -gt 0 ]]; do
   [[ "$1" == --mode ]] && mode="$2"
   [[ "$1" == --retry-exhausted ]] && retry=1
+  [[ "$1" == --report ]] && report=1
   shift
 done
+# The driver also calls the script once per dataset with --report (print the per-round
+# ledger and exit), which is not a pass: recording it would make every test see one
+# extra "pass" with no mode, and consume a line of the exit-code plan.
+if (( report )); then
+  exit 0
+fi
 echo "${mode}|$(nice)|${retry}" >> "%(log)s"
 n=$(wc -l < "%(log)s")
 code=$(sed -n "${n}p" "%(plan)s")

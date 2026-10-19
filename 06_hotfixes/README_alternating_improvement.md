@@ -410,6 +410,65 @@ now regenerate them in full. Stage 05 applies the same guard when it generates a
 the first place
 (`--max-audio-seconds`), where a truncated clip is not written at all so a resume retries it.
 
+### The per-round history: `rounds.jsonl` and `--report`
+
+Each pass logs plenty about what it is doing right now and nothing that survives it, so
+"how much did this improve the corpus" used to be a question you answered by diffing two
+Markdown reports by eye. Every pass now appends **one line per dataset** to
+`rounds.jsonl` beside its output (`improved/rounds.jsonl`,
+`improved_parrot/rounds.jsonl`), describing the dataset as it stands when that pass ends:
+
+* `states`: rows, scored, `bad` (fails any of the four gates), `pending_tts`,
+  `pending_stt`, `improved`, `exhausted`, `clean` (scored, passes every gate, no marker);
+* `scores`: the median and p90 of `cer`, `cer_tail`, `cer_window` and `bad_run_chars`,
+  with the count that carried each one;
+* `work`: what this pass itself did (queued, done, transcribed, rescored, improved,
+  exhausted, swapped, requeued, unflagged, ...), which is a different question from where
+  the dataset stands;
+* `gates` and `n_improv`: the numbers the pass judged by, because `bad` means nothing
+  without them. A run that lowers a gate mid-sweep would otherwise read as a corpus that
+  got worse;
+* `audio_hours`, `wall_s`, `ts`, `mode`, and the `round` / `pass` counters.
+
+A **round** is an stt pass plus the tts pass it feeds, which is what the driver
+alternates and what "one more round of draws" means: an stt (or `both`) pass opens a
+round, the tts pass joins it. Numbering is per dataset, so round 3 of the main corpus
+says nothing about PARROT.
+
+The whole line comes from one extra parse of the written output (`scan_output`), which
+also feeds the convergence check the driver loops on, so the ledger costs one scan of the
+file per pass and no second pass over the corpus. The scores are **read back, not
+re-derived**: the pass already stored all four on every row it scored, and re-deriving
+602k rows would cost ~1.8 h of jiwer for numbers that are already on disk.
+
+Read the history with:
+
+```bash
+./01_recursive_improvement.py --report              # ledgers here and one level down
+./01_recursive_improvement.py --report improved     # or one specific output dir
+```
+
+`--report` is eager, so it needs none of the run options (no `--input`, no
+`--output`, no `--stt-endpoint`) and no server: it is meant to be run from another tab
+while a pass is working. It prints one table per dataset, one line per pass, then the
+delta against the first round on record, the total wall time, and whether anything is
+still pending. `driver.sh` prints the same table for a dataset when that dataset's loop
+ends, so the driver log carries the before / after too.
+
+```
+improved/full.stt.jsonl: 3 pass(es), 2 round(s)
+  rnd pass mode      rows     bad pend_tts pend_stt   impr    exh  swap           cer  ...
+    1    1 stt    601,338  12,044   12,044        0      0      0     0   0.012/0.031  ...
+    1    2 tts    601,338  12,044        0   12,044      0      0     0   0.012/0.031  ...
+    2    3 stt    601,338   1,943    1,788        0 10,101  1,943 1,788   0.012/0.029  ...
+  since round 1 (2026-10-21T10:00:00+02:00): bad -10,101 (-83.9 pct), cer p50 -0.0004 ...
+```
+
+The ledger is a snapshot, deliberately, and it is useless as a source of truth about any
+individual clip: `full.stt.jsonl` owns that, and the ledger must never become a second
+copy of it. Appending is best effort, so a ledger that cannot be written warns and lets
+the pass finish, and an unparseable line is skipped rather than fatal.
+
 ### Another reader for a clip no draw could fix (`VOICE_SWAP`)
 
 A clip that loses all `N_IMPROV` draws is usually not an unlucky seed, it is a text its own

@@ -74,7 +74,7 @@ already fired.
 
 ## The six work items
 
-Each is one commit. Order is dependency order. Items 1 to 4 are done.
+Each is one commit. Order is dependency order. Items 1 to 5 are done.
 
 1. **Window gates in the repair pass.** DONE (9a639de, 231003c). `is_bad()` tested `cer`
    and `tail` only, so a 180 s document that read 170 s correctly and dropped a phrase in
@@ -151,11 +151,25 @@ Each is one commit. Order is dependency order. Items 1 to 4 are done.
    swaps, the term index, and the driver + sync chain) and `tests/test_voice_assignment.py`
    sections 7 and 8.
 
-5. **`rounds.jsonl` and a report.** Nothing writes a per-round history, so "how much did it
-   improve" is answered by diffing two Markdown reports by eye. Each pass appends one JSON
-   line per dataset and round: counts by state, median and p90 of each of the four scores,
-   audio hours scored, wall seconds. A `--report` flag prints the table with the delta
-   against round 0 and is readable from another tab mid-run.
+5. **`rounds.jsonl` and a report.** DONE. Each pass appends one line per dataset to
+   `rounds.jsonl` beside its output: counts by state (including `bad`, i.e. how many
+   clips still fail a gate), the p50 and p90 of all four scores, audio hours, wall
+   seconds, what that pass itself did, and the gates it judged by (`bad` is
+   uninterpretable without them). A round is an stt pass plus the tts pass it feeds,
+   numbered per dataset. `--report` renders the history with the delta against the first
+   round on record; it is eager, so it needs none of the run options and no server and
+   can be read from another tab mid-run, and `driver.sh` prints it per dataset when that
+   dataset's loop ends.
+   Two things beyond the plan. The line comes from one parse of the written output
+   (`scan_output`), which now also feeds the convergence check the driver loops on, so
+   the two no longer read the file separately and `both` mode gets the numbers it had no
+   count for at all; the scores are read back rather than re-derived, since the pass
+   already stored all four and re-deriving 602k rows costs ~1.8 h of jiwer. And the
+   format, reader and renderer live in `utils/rounds_ledger.py` rather than in the pass,
+   so `--report` cannot drift from what the passes append and a later stage can append to
+   the same ledger. Covered by `tests/test_rounds_ledger.py` (the snapshot's states,
+   distributions and filters, `count_pending` unchanged, round numbering across datasets,
+   the report and the driver's call).
 
 6. **One entry point.** `driver.sh` gains two optional pre-steps before the dataset loop,
    each a single call to a script that already exists: refresh the v2 manifests (stage 99)

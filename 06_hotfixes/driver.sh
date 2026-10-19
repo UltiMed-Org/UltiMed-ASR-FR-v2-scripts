@@ -637,5 +637,12 @@ for i in "${!MANIFESTS[@]}"; do
       break
     fi
   done
+  # Where this dataset stands now, from the per-round ledger every pass appends to
+  # (improved/rounds.jsonl). Read-only and instant, and it is what puts the before /
+  # after of the whole run in the driver's own log instead of only in the live chatter
+  # of each pass. Same table as `./01_recursive_improvement.py --report` from another
+  # tab. Never fatal: a missing or unreadable ledger must not fail a finished dataset.
+  runuser -u "${TARGET_USER}" -- env HOME="${TARGET_HOME}" PATH="${USER_PATH}" \
+    "${UV_BIN}" "${HERE}/01_recursive_improvement.py" --report "${CUR_OUTPUT}" || true
 done
 echo "=== $(date '+%F %T') every dataset converged. Done. ==="

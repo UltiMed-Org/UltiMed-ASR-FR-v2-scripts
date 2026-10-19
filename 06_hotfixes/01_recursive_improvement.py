@@ -232,6 +232,13 @@ brings the matching server up before each), same flags plus ``--mode``:
     uv run 01_recursive_improvement.py ... --mode tts   # generate candidates
     # repeat until the --mode stt run exits 10 (converged), or 11 (that mode ran dry)
 
+Every pass appends one line per dataset to ``rounds.jsonl`` beside its output (where the
+dataset stands, what the pass did, the gates it judged by), and the history is read back
+with no other option and no server, from another tab while a pass is running:
+
+    uv run 01_recursive_improvement.py --report          # here and one level down
+    uv run 01_recursive_improvement.py --report improved # one output dir
+
 This file was written with Claude Code.
 """
 
@@ -246,6 +253,7 @@ import sys
 import tempfile
 import threading
 import time
+from array import array
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -327,6 +335,10 @@ from cfg_sidecar import (  # noqa: E402
 # tell it: the roster a directory of audio was generated with, and which OTHER voice to
 # hand a clip whose own voice could not read it (see `swap_voice_for`).
 import voice_assignment as _voices  # noqa: E402
+# The per-round history (`improved/rounds.jsonl`) and its report. Format, reader and
+# renderer live in one module so `--report` cannot drift from what the passes append,
+# and so a future stage can append to the same ledger without redefining it.
+import rounds_ledger as _ledger  # noqa: E402
 
 
 # How many independent STT readings a bad-CER clip gets before its CER is trusted: the
@@ -1756,23 +1768,67 @@ def backfill_cfg_alpha(out_file: Path, improved_records: dict, cfg: SimpleNamesp
     return changed
 
 
-def count_pending(out_file: Path, categories: set[str] | None = None,
-                  stem_requests: dict[str, set[str]] | None = None,
-                  audio_key: str = "audio_filepath") -> tuple[int, int]:
-    """(pending_tts, pending_stt) counts in a written ``.stt.jsonl``, so the driver /
-    main can tell when the alternating passes have fully converged (both zero). A
-    pending_tts clip still needs a tts pass to draft candidates; a pending_stt clip
-    still needs an stt pass to score them.
+class Snapshot(NamedTuple):
+    """The whole dataset as it stands in a written ``.stt.jsonl``, not just the rows one
+    pass touched. Two consumers, one parse: the convergence check the driver loops on,
+    and the round line appended to ``rounds.jsonl``."""
 
-    When ``categories`` is given, only rows in those categories are counted, so a
-    category-restricted run converges on its own subset and ignores pending clips a
-    prior full run left in other categories (which this run never touches). A
-    ``stem_requests`` filter does the same thing one clip at a time, and for the same
-    reason: a run restricted to 12k flagged clips must not be held open forever by a
-    pending row it is never going to look at."""
-    n_tts = n_stt = 0
+    rows: int = 0            # rows the filters let through
+    scored: int = 0          # of those, the ones carrying a usable transcript
+    bad: int = 0             # scored rows failing a gate under THIS pass's gates
+    pending_tts: int = 0     # flagged, waiting for a tts pass to draft candidates
+    pending_stt: int = 0     # candidates drafted, waiting for an stt pass to judge them
+    improved: int = 0        # a draw replaced the original
+    exhausted: int = 0       # flagged, no draw was good enough, original ships
+    clean: int = 0           # scored, passes every gate, never carried a marker
+    audio_seconds: float = 0.0
+    # Score key -> {"n", "p50", "p90"}, or None for a score nothing carried. Both
+    # constructors below always pass it; the default is None rather than {} because a
+    # mutable default on a NamedTuple is shared by every instance that omits it.
+    scores: dict | None = None
+
+
+#: Gates for a scan whose caller has no cfg (the thin ``count_pending`` wrapper, and any
+#: outside caller): the stage's own defaults, read from the script that owns them, so a
+#: snapshot taken without a cfg is judged by the same numbers as a pass.
+_DEFAULT_GATES = SimpleNamespace(
+    cer_threshold=_stt.DEFAULT_CER_GATE,
+    tail_cer_threshold=_stt.DEFAULT_TAIL_CER_GATE,
+    window_cer_threshold=_stt.DEFAULT_WINDOW_CER_GATE,
+    bad_run_threshold=_stt.DEFAULT_BAD_RUN_GATE,
+)
+
+
+def scan_output(out_file: Path, *, model_key: str = "default",
+                cfg: SimpleNamespace | None = None,
+                categories: set[str] | None = None,
+                stem_requests: dict[str, set[str]] | None = None,
+                audio_key: str = "audio_filepath") -> Snapshot:
+    """One parse of a written output file, returning everything that describes the
+    dataset as a whole.
+
+    The scores are read back, never re-derived: this runs after a pass that already
+    stored all four on every row it scored, and re-deriving 602k rows costs ~1.8 h
+    (jiwer's character alignment) for numbers that are already on disk. A row last
+    scored before a gate existed carries None for it, which ``is_bad`` treats as "this
+    reading cannot produce that score", exactly as the pass itself does, so the ``bad``
+    count here is the same verdict the pass would reach on the same row.
+
+    When ``categories`` or ``stem_requests`` is given only those rows are counted, so a
+    restricted run converges on its own subset instead of being held open forever by a
+    pending row it is never going to look at, and its round line describes the slice it
+    actually worked on rather than the corpus around it.
+
+    Percentiles come from ``utils/rounds_ledger.py``, which is also what renders them."""
+    gates = cfg if cfg is not None else _DEFAULT_GATES
+    counts = dict(rows=0, scored=0, bad=0, pending_tts=0, pending_stt=0,
+                  improved=0, exhausted=0, clean=0)
+    audio_seconds = 0.0
+    # array('d') rather than a list: 602k rows x 4 scores is ~19 MB packed against
+    # ~77 MB of boxed floats, and the only thing done with them is sorting.
+    collected = {key: array("d") for key in _ledger.SCORE_KEYS}
     if not out_file.is_file():
-        return 0, 0
+        return Snapshot(scores={key: None for key in _ledger.SCORE_KEYS})
     with out_file.open(encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
@@ -1787,12 +1843,90 @@ def count_pending(out_file: Path, categories: set[str] | None = None,
             if stem_requests and not _stems.row_is_requested(
                     stem_requests, rec.get(audio_key) or ""):
                 continue
+            counts["rows"] += 1
+            audio_seconds += float(rec.get("duration") or 0.0)
             status = (rec.get("improvement") or {}).get("status")
-            if status == "pending_tts":
-                n_tts += 1
-            elif status == "pending_stt":
-                n_stt += 1
-    return n_tts, n_stt
+            if status in counts:
+                counts[status] += 1
+            reading = (rec.get("transcriptions") or {}).get(model_key) or {}
+            text = reading.get("text")
+            if reading.get("error") or not (text and text.strip()):
+                continue
+            counts["scored"] += 1
+            for key in _ledger.SCORE_KEYS:
+                value = reading.get(key)
+                if value is not None:
+                    collected[key].append(float(value))
+            bad = is_bad(Scores(reading.get("cer"), reading.get("cer_tail"),
+                                reading.get("cer_window"), reading.get("bad_run_chars")),
+                         gates)
+            if bad:
+                counts["bad"] += 1
+            elif status is None:
+                counts["clean"] += 1
+    return Snapshot(audio_seconds=audio_seconds,
+                    scores={key: _ledger.summarize(vals)
+                            for key, vals in collected.items()},
+                    **counts)
+
+
+def count_pending(out_file: Path, categories: set[str] | None = None,
+                  stem_requests: dict[str, set[str]] | None = None,
+                  audio_key: str = "audio_filepath") -> tuple[int, int]:
+    """(pending_tts, pending_stt) counts in a written ``.stt.jsonl``, so the driver /
+    main can tell when the alternating passes have fully converged (both zero). A
+    pending_tts clip still needs a tts pass to draft candidates; a pending_stt clip
+    still needs an stt pass to score them. The two numbers out of ``scan_output``,
+    for callers that want nothing else from it."""
+    snap = scan_output(out_file, categories=categories, stem_requests=stem_requests,
+                       audio_key=audio_key)
+    return snap.pending_tts, snap.pending_stt
+
+
+def record_round(out_file: Path, snap: Snapshot, stats: dict, cfg: SimpleNamespace,
+                 wall_s: float) -> dict | None:
+    """Append this pass's line to ``rounds.jsonl`` beside the output file.
+
+    One line per pass per dataset, describing the DATASET (from `snap`) and the WORK
+    (from the pass's own counters), because the two answer different questions: the
+    states say how far along the run is, the work says what this pass actually spent to
+    get there. The gates are written down with them, since `bad` is only interpretable
+    against the numbers it was judged by, and a run that lowers a gate mid-sweep would
+    otherwise look like it had made the corpus worse.
+
+    Best effort: a pass that has just spent hours of GPU must not die because a log file
+    could not be appended to, so an OSError is reported and swallowed."""
+    entry = {
+        "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "dataset": out_file.name,
+        "mode": cfg.mode,
+        "wall_s": round(wall_s, 1),
+        "audio_hours": round(snap.audio_seconds / 3600.0, 3),
+        "states": {"rows": snap.rows, "scored": snap.scored, "bad": snap.bad,
+                   "pending_tts": snap.pending_tts, "pending_stt": snap.pending_stt,
+                   "improved": snap.improved, "exhausted": snap.exhausted,
+                   "clean": snap.clean},
+        "scores": snap.scores or {},
+        # What this pass did, as opposed to where the dataset now stands.
+        "work": {key: stats.get(key, 0) for key in
+                 ("queued", "done", "transcribed", "rescored", "improved", "exhausted",
+                  "swapped", "requeued", "unflagged", "incomplete_drafts",
+                  "deterministic")},
+        "gates": {"cer": cfg.cer_threshold, "tail": cfg.tail_cer_threshold,
+                  "window": cfg.window_cer_threshold, "bad_run": cfg.bad_run_threshold,
+                  "min_improvement": cfg.min_improvement},
+        "n_improv": cfg.n_improv,
+        "rescore_only": bool(cfg.rescore_only),
+    }
+    path = _ledger.ledger_path(out_file.parent)
+    try:
+        entry["round"], entry["pass"] = _ledger.next_round(
+            _ledger.load_rounds(path), entry["dataset"], cfg.mode)
+        _ledger.append_round(path, entry)
+    except OSError as exc:
+        logger.warning(f"could not append to {path}: {exc} (the pass itself is fine)")
+        return None
+    return entry
 
 
 def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
@@ -2134,7 +2268,29 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
     return worker, apply_result, counting_needs_work, on_flush, postfix_fn, stats, tts_bar
 
 
+def _print_report(ctx, _param, value):
+    """``--report`` handler. Eager and `expose_value=False`, the way click's own
+    --version works, so it prints and exits BEFORE the required run options
+    (--input / --output / --stt-endpoint) are checked: reading the history has to work
+    from another tab with no run arguments at hand, while a pass is running."""
+    if not value or ctx.resilient_parsing:
+        return
+    print(_ledger.render_report(Path(value)))
+    ctx.exit()
+
+
 @click.command(context_settings={"show_default": True})
+@click.option("--report", is_flag=False, flag_value=".", default=None, metavar="[DIR]",
+              is_eager=True, expose_value=False, callback=_print_report,
+              help="Print the per-round history and exit, instead of running a pass. "
+                   "Every pass appends one line per dataset to `rounds.jsonl` beside "
+                   "its output (counts by state, p50 / p90 of each of the four scores, "
+                   "audio hours, wall seconds), and this renders them as a table with "
+                   "the delta against the first round on record. Bare `--report` looks "
+                   "for ledgers in the current directory and one level under it, which "
+                   "from 06_hotfixes/ finds improved/ and improved_parrot/ with no "
+                   "hardcoded dataset list; `--report DIR` looks under DIR. Read-only, "
+                   "so it is safe to run while a pass is working.")
 @click.option("--input", "input_path", required=True, type=click.Path(exists=True, path_type=Path),
               help="Manifest jsonl (or a dir searched recursively for *.jsonl, skipping *.stt.jsonl).")
 @click.option("--output", "output_root", required=True, type=click.Path(path_type=Path),
@@ -2405,6 +2561,7 @@ def main(
         worker, apply_result, needs_work, on_flush, postfix_fn, stats, tts_bar = make_hooks(
             cfg, model_key, input_file, improved_file, improved_records
         )
+        t_start = time.monotonic()
         try:
             _stt.process_file(
                 input_file, out_file,
@@ -2485,13 +2642,29 @@ def main(
         )
         total_queued += stats["queued"]
         total_done += stats["done"]
+        # One parse of the written output, for both the round line and the convergence
+        # check the driver loops on. `both` mode pays for it too (it used to skip the
+        # count entirely): the dataset-wide numbers are the whole point of the ledger,
+        # and a scan of 602k rows is seconds against a pass that runs for hours.
+        snap = scan_output(out_file, model_key=model_key, cfg=cfg,
+                           categories=cfg.categories, stem_requests=cfg.stem_requests,
+                           audio_key=cfg.audio_key)
+        entry = record_round(out_file, snap, stats, cfg, time.monotonic() - t_start)
+        if entry is not None:
+            cer = (snap.scores or {}).get("cer") or {}
+            cer_s = ("" if cer.get("p50") is None else
+                     f", cer p50 {cer['p50']:.4f} p90 {cer['p90']:.4f}")
+            logger.success(
+                f"{out_file.name}: round {entry['round']} (pass {entry['pass']}, "
+                f"{cfg.mode}) recorded in {_ledger.LEDGER_FILENAME}: {snap.bad:,} of "
+                f"{snap.scored:,} scored clip(s) still fail a gate{cer_s}"
+            )
         if cfg.mode != "both":
-            n_tts, n_stt = count_pending(out_file, cfg.categories, cfg.stem_requests,
-                                 cfg.audio_key)
-            total_pending_tts += n_tts
-            total_pending_stt += n_stt
-            if n_tts or n_stt:
-                logger.info(f"{out_file.name}: {n_tts} pending_tts, {n_stt} pending_stt remaining")
+            total_pending_tts += snap.pending_tts
+            total_pending_stt += snap.pending_stt
+            if snap.pending_tts or snap.pending_stt:
+                logger.info(f"{out_file.name}: {snap.pending_tts} pending_tts, "
+                            f"{snap.pending_stt} pending_stt remaining")
 
     # Split flow: the driver alternates stt/tts passes. Signal convergence from the stt
     # pass (the only one that resolves clips) so the driver loop can stop: exit 10 when
