@@ -448,20 +448,31 @@ def scores_to_state(scores: Scores) -> dict:
             "orig_window": scores.window, "orig_bad_run": scores.bad_run}
 
 
+#: The two marker fields a state hop must NOT drop: the voice a redraw has to use and
+#: how many rungs of the escalation ladder the clip has burned (see `swap_voice_for`).
+#: Everything else in the marker is rewritten from scratch at every hop, which is what
+#: keeps a stale score out of the next round; these two are the clip's voice history,
+#: so they have to outlive it.
+CARRIED_FIELDS = ("swap_voice", "voice_tier")
+
+
 def set_improvement(row: dict, status: str, orig: Scores, **extra) -> dict:
     """Write ``row['improvement']``, carrying over the marker a state hop must not drop.
 
     Every state the clip passes through (pending_tts, pending_stt, exhausted, improved)
     replaces the whole marker, which is what keeps a stale field from a previous round
-    out of the next one. ``swap_voice`` is the one field that has to survive that
-    replacement: the stt pass decides the swap, the tts pass two steps later is what
-    draws with it (`voice_for_row`), and the pending_stt hop in between would otherwise
-    lose it and silently redraw with the voice that already failed.
+    out of the next one. `CARRIED_FIELDS` are the exception: the stt pass decides the
+    next voice, the tts pass two steps later is what draws with it (`voice_for_redraw`),
+    and the pending_stt hop in between would otherwise lose both and silently redraw
+    with the voice that already failed, at a rung the clip had already climbed.
     """
     state = {"status": status, **scores_to_state(orig), **extra}
-    swap = (row.get("improvement") or {}).get("swap_voice")
-    if swap and "swap_voice" not in state:
-        state["swap_voice"] = swap
+    prev = row.get("improvement") or {}
+    for field in CARRIED_FIELDS:
+        # Truthiness, not `in`: a `voice_tier` of 0 says the ladder is untouched, which
+        # is exactly what its absence says, so there is nothing to carry.
+        if prev.get(field) and field not in state:
+            state[field] = prev[field]
     row["improvement"] = state
     return state
 
@@ -498,76 +509,112 @@ def _swap_roster(audio_dir: str) -> tuple[tuple[str, ...], str] | None:
         logger.info(f"{audio_dir}: generated in {mode or 'single'} mode "
                     f"({len(roster)} voice(s)), so no voice swap here")
         return None
+    # Nested quotes kept out of the f-string: PEP 701 would allow them, but this file
+    # declares requires-python >=3.10, where they are a syntax error.
+    scope = ("one new reader per clip" if mode == "row" else
+             "one new reader per document, shared by every chunk needing repair")
     logger.info(f"{audio_dir}: {len(roster)} voice(s), {mode} mode, "
-                f"voice swap {'ON' if mode == 'row' else 'OFF (one reader per document)'}")
+                f"voice swap ON ({scope})")
     return roster, mode
 
 
-def swap_voice_for(row: dict, audio_path: Path, cfg: SimpleNamespace) -> str | None:
-    """Another voice to redraw this clip with after every draw failed, or None.
+def swap_voice_for(row: dict, audio_path: Path,
+                   cfg: SimpleNamespace) -> tuple[str, int] | None:
+    """``(voice, rungs_used)`` for one more round of draws of a clip every draw failed,
+    or None when the clip has run out of voices.
 
     A clip that fails `--n-improv` draws is a text its own voice cannot read: the draws
     differ only by noise seed and guidance, so a sixth one of the same kind buys little.
     A different voice is a genuinely different draw, and it is the one lever left before
     keeping the known-bad original.
 
+    WHICH voice is `voice_assignment.VOICE_LADDER_FR_V2`, walked one rung per exhausted
+    round: ``--n-improv`` draws at the clip's own voice, then that many at h_itf_arm or
+    h_itf_def, then that many at fr_male or fr_female, then the clip exhausts. Those
+    four are the voices the first full QC sweep measured as able to read what the other
+    five could not (the rates are quoted where the constant is defined), so each
+    escalation is to a MEASURED voice rather than to any other roster entry: a redraw at
+    one of the five that fail 40 to 77 pct of long clips is not a repair attempt, it is
+    a coin flip. The ladder replaced a single swap over the whole roster on 2026-10-20.
+
     None, and the clip exhausts as it did in v1, when:
 
     * ``--no-voice-swap``;
-    * the clip already used its swap (one per clip: `row['improvement']['swap_voice']`),
-      so a clip cannot wander the roster for ever;
+    * the ladder is used up (``voice_tier`` has reached its length), or every voice on
+      the next rung is one this clip already failed at;
     * the row carries no ``voice`` (v1 single-voice audio);
-    * the audio was generated in ``group`` mode, i.e. one voice per DOCUMENT
-      (`03_PARHAF`, `04_PARROT`). Swapping one chunk there would make a report change
-      reader mid-way, which is a worse defect than the one being repaired. Read from
-      what stage 05 recorded for that directory rather than from a list of stage names
-      here, so the rule follows the audio.
+    * stage 05 recorded no usable roster beside that audio, or one that does not contain
+      the rung's voices. Read from what stage 05 recorded for the directory rather than
+      from a list of stage names here, so the rule follows the audio.
 
-    Otherwise the swap is drawn by `voice_assignment.swap_voice` over the roster THAT
-    directory was generated with, avoiding the voices already reading the same term
-    (`cfg.term_voices`, harvested in `make_hooks`) so the term keeps its accent spread.
+    The rung's two voices are chosen between by the shared assignment hash, keyed on the
+    clip stem in ``row`` mode and on the GROUP id in ``group`` mode (`03_PARHAF`,
+    `04_PARROT`), so every repaired chunk of one document lands on the SAME new reader:
+    a document gains at most one reader per rung instead of one per repaired chunk.
+    Group mode used to refuse to swap at all, to keep one reader per document. The first
+    full sweep then measured 22.6 pct of PARHAF clips over the gates against ~1 pct
+    elsewhere, and audio that does not say its text is worse label noise for an ASR
+    corpus than a document changing reader once, so the rule is now about keeping that
+    change as small as possible rather than forbidding it.
+
+    `cfg.term_voices` (harvested in `make_hooks`) is still honoured as a preference, so
+    a rung prefers the voice not already reading the same term when it can afford to.
     """
     if not getattr(cfg, "voice_swap", False):
-        return None
-    imp = row.get("improvement") or {}
-    if imp.get("swap_voice"):
         return None
     current = row.get("voice")
     if not current:
         return None
     roster = _swap_roster(str(audio_path.parent))
-    if roster is None or roster[1] != "row":
+    if roster is None:
         return None
+    voices, mode = roster
+    imp = row.get("improvement") or {}
+    rung = int(imp.get("voice_tier") or 0)
+    # The clip STEM (or its group id), not the key synthesis hashed: the voice is
+    # recorded on the row (and carried into the manifests by
+    # 99_hf_release/03_sync_hotfix_results.py), never re-derived, so it only has to be
+    # stable per clip. See `ladder_voice`.
+    key = str(row.get("group_id") or audio_path.stem) if mode == "group" \
+        else audio_path.stem
     avoid = (getattr(cfg, "term_voices", None) or {}).get(row.get("group_id")) or ()
-    # The clip STEM, not the key synthesis hashed: the swap is recorded on the row (and
-    # carried into the manifests by 99_hf_release/03_sync_hotfix_results.py), never
-    # re-derived, so it only has to be stable per clip. See `swap_voice`.
-    return _voices.swap_voice(audio_path.stem, current, voices=roster[0], avoid=avoid)
+    voice = _voices.ladder_voice(key, rung, roster=voices, avoid=avoid,
+                                 tried=(current, imp.get("swap_voice")))
+    return None if voice is None else (voice, rung + 1)
 
 
 def finish_or_swap(row: dict, result: dict, orig: Scores, imp: dict,
                    cfg: SimpleNamespace, stats: dict) -> str:
-    """Resolve a clip no draw could repair: one more round with ANOTHER voice when the
-    clip is entitled to one (`swap_voice_for`), else exhausted as in v1.
+    """Resolve a clip no draw could repair: one more round at the next voice on the
+    escalation ladder when the clip has one left (`swap_voice_for`), else exhausted.
 
     Returns the status written, so a caller can tell the two apart. Either way the
     clip's audio is untouched: a swap only queues more draws, and the original still
     ships if those fail too. Every state is written through `set_improvement`, so the
-    swap marker survives the pending_stt hop in between.
+    swap marker and the rung count survive the pending_stt hop in between.
     """
     attempts = imp.get("attempts", 0)
     audio_path = result.get("audio_path")
-    swap = swap_voice_for(row, Path(audio_path), cfg) if audio_path else None
-    if swap is None:
+    nxt = swap_voice_for(row, Path(audio_path), cfg) if audio_path else None
+    if nxt is None:
         set_improvement(row, "exhausted", orig, attempts=attempts)
         stats["exhausted"] += 1
         return "exhausted"
-    set_improvement(row, "pending_tts", orig, swap_voice=swap)
+    swap, rung = nxt
+    rungs = len(_voices.VOICE_LADDER_FR_V2)
+    # The voice that just failed is the previous rung's, not the row's: the row still
+    # names the voice of the audio on disk, which is what it shipped with.
+    failed = imp.get("swap_voice") or row.get("voice")
+    set_improvement(row, "pending_tts", orig, swap_voice=swap, voice_tier=rung)
     stats["swapped"] += 1
+    if rung >= rungs:
+        # The last rung, so this clip either comes back fixed or exhausts. Counted
+        # apart because it is the number that says whether the ladder is long enough.
+        stats["swapped_last"] += 1
     logger.info(
-        f"SWAP {Path(audio_path).name}: {row.get('voice')} -> {swap} after "
-        f"{attempts} attempt(s) left it at {_fmt_scores(orig)}; queued for one more "
-        f"round of draws with the new voice"
+        f"SWAP {Path(audio_path).name}: {failed} -> {swap} (ladder rung {rung}/{rungs})"
+        f" after {attempts} attempt(s) left it at {_fmt_scores(orig)}; queued for one "
+        f"more round of draws with the new voice"
     )
     return "pending_tts"
 
@@ -1910,7 +1957,8 @@ def record_round(out_file: Path, snap: Snapshot, stats: dict, cfg: SimpleNamespa
         # What this pass did, as opposed to where the dataset now stands.
         "work": {key: stats.get(key, 0) for key in
                  ("queued", "done", "transcribed", "rescored", "improved", "exhausted",
-                  "swapped", "requeued", "unflagged", "incomplete_drafts",
+                  "swapped", "swapped_last", "requeued", "unflagged",
+                  "incomplete_drafts",
                   "deterministic")},
         "gates": {"cer": cfg.cer_threshold, "tail": cfg.tail_cer_threshold,
                   "window": cfg.window_cer_threshold, "bad_run": cfg.bad_run_threshold,
@@ -1943,6 +1991,9 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
              # pending_tts queue for one more round, and lands on improved or
              # exhausted after it.
              "swapped": 0,
+        # swapped_last = of those, the ones that went to the LAST rung of the ladder
+        # (the fr_* bases), i.e. the clips one more rung would have to be invented for.
+        "swapped_last": 0,
              # rescored = scored from the transcript already on the row (no STT request);
              # transcribed = a real server round trip. rescored_bad is the subset that now
              # reads bad under the current rules, i.e. what a rescore actually surfaced.
@@ -2394,16 +2445,19 @@ def _print_report(ctx, _param, value):
                    "without regenerating anything. No effect without --code-dump-dir.")
 @click.option("--voice-swap/--no-voice-swap", default=True,
               help="ON by default. When every draw of a clip fails, hand the clip to "
-                   "ANOTHER voice from the roster its audio was generated with and give "
-                   "it one more round of draws, instead of keeping the known-bad "
-                   "original. Only for audio generated one voice per CLIP: the roster "
-                   "and the mode are read from the voice_assignment.json beside the "
-                   "clips, so 03_PARHAF / 04_PARROT (one voice per DOCUMENT) are left "
-                   "alone, since a swapped chunk would change reader mid-report. One "
-                   "swap per clip, drawn deterministically and avoiding the voices "
-                   "already reading the same term, and the new voice is written to the "
-                   "row's `voice` only if its draw actually wins (99_hf_release/"
-                   "03_sync_hotfix_results.py carries it into the manifests).")
+                   "the next voice on the MEASURED escalation ladder and give it one "
+                   "more round of draws, instead of keeping the known-bad original: "
+                   "h_itf_arm or h_itf_def first, then fr_male or fr_female, then "
+                   "exhausted (voice_assignment.VOICE_LADDER_FR_V2, the four voices the "
+                   "first full QC sweep found able to read what the other five could "
+                   "not). The roster and the mode are read from the voice_assignment."
+                   "json beside the clips, so the rule follows the audio: one new "
+                   "reader per clip for the term stages, one per DOCUMENT for 03_PARHAF "
+                   "/ 04_PARROT (every chunk of it that needs repairing gets the same "
+                   "new reader). Deterministic, prefers a voice not already reading the "
+                   "same term, and the new voice is written to the row's `voice` only "
+                   "if its draw actually wins (99_hf_release/03_sync_hotfix_results.py "
+                   "carries it into the manifests).")
 @click.option("--refresh-duration/--no-refresh-duration", default=True, help="Re-probe and update each row's `duration` when its audio is replaced (keeps stage-99 splits correct).")
 @click.option("--force", is_flag=True, help="Re-process clips already marked improved/exhausted in a previous run.")
 @click.option("--retry-exhausted", is_flag=True, help="Give the clips marked `exhausted` (flagged bad, no draw good enough) another run: they are treated as if they carried no marker, so a rescore can clear them and an stt pass can send the ones that still read bad back through the tts queue. Unlike --force this leaves the clips that already passed and the ones already improved alone, so a retry costs only the known-weak tail (173 clips after the 0.08 sweep) instead of re-transcribing the corpus. Use it after a scoring-rule change or with a different seed / cfg_alpha ladder.")

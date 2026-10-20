@@ -72,9 +72,9 @@ shorter than one window returns the whole-clip score, and 0.15 is looser than th
 whole-clip gate, so on a short clip the window gate can never fire where `cer` has not
 already fired.
 
-## The seven work items
+## The eight work items
 
-Each is one commit. Order is dependency order. All seven items are done (item 7 was added on 2026-10-20, after the first six, so that the phase could be launched before generation ended).
+Each is one commit. Order is dependency order. All eight items are done. Items 7 and 8 were both added on 2026-10-20, after the first six: 7 so that the phase could be launched before generation ended, 8 once the first full sweep had measured WHICH voices fail and the one-swap rule of item 4 turned out to be aimed at the wrong clips.
 
 1. **Window gates in the repair pass.** DONE (9a639de, 231003c). `is_bad()` tested `cer`
    and `tail` only, so a 180 s document that read 170 s correctly and dropped a phrase in
@@ -135,10 +135,10 @@ Each is one commit. Order is dependency order. All seven items are done (item 7 
    Three things beyond the plan. The eligibility rule reads `mode` from the
    `voice_assignment.json` beside the audio instead of a hardcoded stage list, so it
    follows the audio rather than the directory name (`group` stages, i.e. `03_PARHAF` and
-   `04_PARROT`, still never swap). The decision is carried as `improvement.swap_voice` on
+   `04_PARROT`, did not swap at all until item 8). The decision is carried as `improvement.swap_voice` on
    the row rather than as extra draws inside the TTS pass, which is what makes one
    mechanism serve `both` mode and the split halves, costs nothing on clips the first
-   round fixes, and caps it at one swap per clip; that also meant `set_improvement` had to
+   round fixes, and capped it at one swap per clip (item 8 made that a three-rung ladder); that also meant `set_improvement` had to
    be introduced, since the `pending_stt` hop rewrites `improvement` wholesale and would
    have silently redrawn with the voice that already failed (six literal marker dicts
    collapsed into it). And `99_hf_release/03_sync_hotfix_results.py` now carries `voice`
@@ -221,6 +221,38 @@ Each is one commit. Order is dependency order. All seven items are done (item 7 
 The signal is the generator's PROCESS on purpose. Not the container, since the alternation's own tts passes need it up, so its state says nothing about whether generation is over; and not a lock file, since a crashed run would never release one. What makes the wait necessary rather than merely tidy: the first `switch_server.sh stt` runs `docker compose stop voxtral-tts`, so starting early takes the TTS server out from under a multi-day run, and the manifest refresh would describe a half-written corpus.
 
 Ordering, all of it load-bearing: config errors are reported BEFORE the wait (so the gate only blocks a run that is otherwise ready), and the QC is stopped BEFORE the acoustic scan (they want the same cores, and the stage 05 QC is redundant once this script reads every clip with a stronger judge). Six new cases in `tests/test_driver_alternate_mode.py`, which now stubs `pgrep`/`pkill` so every other case also proves the gate waves through an idle host.
+
+## 8. The voice ladder, because the swap was aimed at the wrong clips (DONE)
+
+Item 4 gave an exhausted clip ONE redraw at any other voice of its roster, and refused to swap at all in `group` mode so that a document would keep one reader start to end. The first full QC sweep measured both decisions wrong, in the same week they were written.
+
+What the sweep says, at 143,093 clips scored (2026-10-20, whisper `ggml-large-v3-turbo`, the four gates of this plan):
+
+| stage | scored | over a gate |
+|---|---|---|
+| `01_dictionnary` | 134,801 | 0.99 pct |
+| `02_drugs` | 5,563 | 1.15 pct |
+| `07_acronyms` | 404 | 1.73 pct |
+| `03_PARHAF` | 2,325 | **22.62 pct** |
+
+479 of PARHAF's 526 failures are shaped `loop` (the model starts the sentence, then repeats syllables until the token ceiling). Two causes compound. A length cliff that every stage shares, measured on the dictionary alone so the stages cannot confound it: 0.20 pct under 20 s, 0.82 pct at 20-30 s, 8.78 pct at 30-40 s, 55.89 pct at 40-60 s. And a voice effect that survives controlling for duration, measured inside the 40-60 s band only, where the roster splits in two with nothing in between: `fr_female` 0.0 pct (n=34), `h_itf_arm` 1.4 (69), `h_itf_def` 2.2 (46), `fr_male` 5.8 (52), then `h_frf_esm` 41.5 (94), `h_frm_ptf` 44.2 (104), `h_frf_itm` 48.3 (89), `h_frm_nlf` 60.2 (88), `h_frf_ptm` 77.4 (115).
+
+So the old rule spent its one swap on a coin flip (five of nine roster voices fail 40 to 77 pct of long clips), and it spent it nowhere near the problem: PARHAF holds roughly 10,000 of the ~15,400 clips the sweep predicts will need repair, and PARHAF was the half that never swapped. Redrawing a 50 s clip at `h_frf_ptm` is not a repair attempt.
+
+The ladder, `utils/voice_assignment.py::VOICE_LADDER_FR_V2` plus `ladder_voice`, walked one rung per exhausted round by `06_hotfixes/01_recursive_improvement.py::swap_voice_for`:
+
+1. `--n-improv` draws at the clip's own voice (unchanged, 5 by default);
+2. then that many at `h_itf_arm` or `h_itf_def`;
+3. then that many at `fr_male` or `fr_female`;
+4. then the clip exhausts and ships its original, as in v1.
+
+Only the four measured survivors are on it, hybrids before bases: the hybrids are why the roster has nine voices rather than two, so the repair keeps the corpus accent spread as long as it can and falls back to the two shipped voices only once `h_itf_*` has failed too. Which of a rung's two voices a clip gets is the same assignment hash as everywhere else, so it is deterministic and resume stable, and `cfg.term_voices` is still honoured as a preference inside the rung.
+
+`group` mode now swaps, with the rung keyed on the GROUP id rather than the clip stem, so every repaired chunk of one document lands on the SAME new reader: a document gains at most one reader per rung instead of one per repaired chunk. That is the honest trade, stated plainly: a PARHAF document can now change reader mid-way, which item 4 refused. Against that, audio that does not say its text is worse label noise for an ASR corpus than a document changing reader once, each clip is an independent training sample anyway, and the alternative measured at 22.62 pct of the stage. `VOICE_SWAP=0` still turns the whole thing off.
+
+The marker carries `improvement.voice_tier` beside `improvement.swap_voice`, both in `CARRIED_FIELDS` so they survive the `pending_stt` hop (that list replaced the single `swap_voice` special case). The ledger gains `work.swapped_last`, the swaps that went to the LAST rung, which is the number that says whether the ladder is long enough. Cost: nothing for clips an earlier rung fixes, and at most two extra stt+tts rounds for the clips that keep failing, which is why the rungs are ordered best-measured-first.
+
+`tests/test_voice_swap.py` walks the whole ladder rung by rung (the draws per rung, in order, the rung counter climbing once per exhausted round, exhaustion only off the end) and pins the document rule from both sides: two chunks of one document get the same new reader, a row-mode clip still keys on itself.
 
 ## TTS_PARALLEL is the cheapest win available
 

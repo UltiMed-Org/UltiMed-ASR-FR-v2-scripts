@@ -99,6 +99,28 @@ RETIRED_VOICES_FR_V2: tuple[str, ...] = ()
 #: the survivors. Only reachable when most of the roster is retired; see there.
 _RETIRE_MAX_ATTEMPTS = 64
 
+#: The escalation ladder for a clip no draw could repair: the voices stage 06 hands it
+#: after its own, in order, one rung per exhausted round of `--n-improv` draws. Used by
+#: `ladder_voice` below and by `06_hotfixes/01_recursive_improvement.py`.
+#:
+#: Measured, not chosen by ear. In the 40-60 s duration band of the first full QC sweep
+#: (2026-10-20), the only band where enough clips fail to rank voices at all, the
+#: per-voice gate-fail rates split the roster in two with nothing in between:
+#: fr_female 0.0 pct (n=34), h_itf_arm 1.4 (69), h_itf_def 2.2 (46), fr_male 5.8 (52),
+#: then a cliff to h_frf_esm 41.5 (94), h_frm_ptf 44.2 (104), h_frf_itm 48.3 (89),
+#: h_frm_nlf 60.2 (88) and h_frf_ptm 77.4 (115). So a clip five draws could not fix is
+#: never retried at a voice from the second half: those four survivors are the ladder,
+#: and a clip that runs out of rungs keeps its original audio (as it did in v1).
+#:
+#: Hybrids before bases, on purpose. The hybrids are why the roster has nine voices
+#: rather than two, so the repair keeps the corpus accent spread as long as it can and
+#: only falls back to the two shipped voices, which are also the two the corpus already
+#: has most of, once h_itf_* has failed too.
+VOICE_LADDER_FR_V2: tuple[tuple[str, ...], ...] = (
+    ("h_itf_arm", "h_itf_def"),   # rung 1: the two best hybrids
+    ("fr_male", "fr_female"),     # rung 2: the shipped bases, last resort
+)
+
 # How to turn a row into the thing that gets hashed. "group" keys on the group alone,
 # "row" gives every clip its own draw. v2 uses BOTH, one per stage, because the group
 # means two different things depending on the stage: for 01_dictionnary, 02_drugs and
@@ -369,6 +391,95 @@ def swap_voice(key: str, current: str | None, *,
         if any(v not in blocked for v in voices):
             return voice_for_key(key, voices, retired=blocked)
     return None
+
+
+def ladder_voice(key: str, rung: int, *,
+                 ladder: tuple[tuple[str, ...], ...] = VOICE_LADDER_FR_V2,
+                 roster: tuple[str, ...] | list[str] | None = None,
+                 tried: tuple[str | None, ...] | list[str | None] = (),
+                 retired: tuple[str, ...] | list[str] = RETIRED_VOICES_FR_V2,
+                 avoid: tuple[str, ...] | list[str] = ()) -> str | None:
+    """One rung of `VOICE_LADDER_FR_V2`: the next voice to try, or None when out.
+
+    The sibling of `swap_voice`, for the other question. `swap_voice` answers "any
+    other voice of this roster", which is what a one-shot swap needs; this answers
+    "the next voice MEASURED to read what the clip's own voice could not", which is a
+    shortlist of two per rung, so unlike `swap_voice` it can legitimately have no
+    answer at all.
+
+    Parameters
+    ----------
+    key
+        Any string identifying the clip, hashed exactly as everywhere else so the pick
+        is deterministic and resume stable. Stage 06 keys a `row`-mode clip on its stem
+        and a `group`-mode clip on its group id, so that the repaired chunks of one
+        document all land on the SAME new reader instead of one each.
+    rung
+        0-based index into `ladder`: how many rungs this clip has already used up.
+    ladder
+        Overridable for tests and for a future roster; the default is the measured one.
+    roster
+        The voices the audio directory was generated with, when known. A rung voice
+        that directory never had is skipped rather than drawn, so a v1 or custom
+        `--voices-file` run is never handed a name its generator does not know.
+    tried
+        Voices this clip already failed at (its original, plus whatever earlier rungs
+        gave it). Hard exclusions, and None entries are ignored so a caller can pass
+        `(row.get("voice"), imp.get("swap_voice"))` as is.
+    retired
+        Same meaning as everywhere else, and a hard exclusion here too: a retired voice
+        on the ladder is skipped rather than re-drawn, since a two-name rung has no
+        room to re-draw within.
+    avoid
+        Soft preference, same as in `swap_voice`: voices already reading the same term,
+        dropped when honouring it would leave the rung empty.
+
+    Returns
+    -------
+    str or None
+        A name from `ladder[rung]`, or None when `rung` is past the end of the ladder
+        or every voice on that rung is excluded. Both mean one thing to the caller:
+        this clip is out of voices.
+
+    Examples
+    --------
+    >>> ladder_voice("42", 0)
+    'h_itf_arm'
+    >>> ladder_voice("42", 1)
+    'fr_male'
+    >>> ladder_voice("42", 2) is None     # past the end of the ladder
+    True
+    >>> # Another key, uniformly, lands on the other voice of each rung.
+    >>> (ladder_voice("13", 0), ladder_voice("13", 1))
+    ('h_itf_def', 'fr_female')
+    >>> # What the clip already failed at is skipped; None entries are ignored.
+    >>> ladder_voice("13", 0, tried=("h_itf_def", None))
+    'h_itf_arm'
+    >>> ladder_voice("13", 0, tried=("h_itf_arm", "h_itf_def")) is None
+    True
+    >>> # A directory whose roster never had the hybrids skips straight past them.
+    >>> ladder_voice("42", 0, roster=("fr_male", "fr_female")) is None
+    True
+    >>> # `avoid` is a preference, not a rule: it is dropped before giving up.
+    >>> ladder_voice("13", 0, avoid=("h_itf_def",))
+    'h_itf_arm'
+    >>> ladder_voice("13", 0, avoid=("h_itf_arm", "h_itf_def"))
+    'h_itf_def'
+    """
+    if rung < 0 or rung >= len(ladder):
+        return None
+    blocked = {v for v in (*tuple(tried or ()), *tuple(retired or ())) if v}
+    pool = [v for v in ladder[rung] if v not in blocked]
+    if roster:
+        known = set(roster)
+        pool = [v for v in pool if v in known]
+    if not pool:
+        return None
+    # Same two-tier draw as `swap_voice`: honour `avoid` when the rung can afford it,
+    # drop it rather than answer None, and let the shared hash make the choice so a
+    # rung reached twice in two runs lands on the same voice both times.
+    soft = [v for v in pool if v not in set(avoid or ())]
+    return voice_for_key(key, tuple(soft or pool), retired=())
 
 
 def load_voices(path) -> tuple[str, ...]:

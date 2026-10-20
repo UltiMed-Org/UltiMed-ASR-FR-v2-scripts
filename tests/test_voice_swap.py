@@ -22,11 +22,13 @@ alternation and pins the parts that are easy to get silently wrong:
     (pending_tts) rather than being resolved;
   * the marker survives the pending_stt hop in between, so the second round actually
     draws with the new voice instead of the one that already failed;
-  * one swap per clip, so a clip cannot wander the roster for ever;
+  * the ladder is walked one rung per exhausted round (own voice, then h_itf_*, then
+    fr_*), and a clip out of rungs exhausts rather than wandering the roster for ever;
   * the original audio is kept untouched until a draw wins, and `voice` is rewritten
     only then, since that column has to describe the audio that ships;
-  * document stages (one voice per document, `mode: group`) never swap, and neither
-    does a v1 row or a run with --no-voice-swap;
+  * document stages (`mode: group`) DO swap, but every repaired chunk of one document
+    lands on the same new reader, so the document gains one reader per rung rather than
+    one per chunk; a v1 row and a run with --no-voice-swap still never swap;
   * the voices already reading the same term are avoided, and that index is harvested
     by the needs_work hook from rows this pass does not even touch;
   * the whole chain exists outside the pass too: driver.sh can turn the swap off and
@@ -96,23 +98,24 @@ def install_fakes(mod, good_voice: str | None, calls: list[tuple[str | None, int
 
 
 def make_fixture(tmp: Path, *, mode: str = "row", voices=va.VOICES_FR_V2,
-                 voice: str | None = "fr_female") -> tuple[Path, dict]:
+                 voice: str | None = "fr_female", stem: str = STEM,
+                 group_id: str = GROUP) -> tuple[Path, dict]:
     """An audio directory with the provenance stage 05 leaves beside its clips, one
     clip in it, and the manifest row 06 would read for that clip."""
     audio = tmp / "data" / "dictionary"
-    audio.mkdir(parents=True)
-    if mode != "none":
+    audio.mkdir(parents=True, exist_ok=True)
+    if mode != "none" and not (audio / va.PROVENANCE_FILENAME).exists():
         va.write_provenance(audio, tmp / "01_dictionnary" / "generated_dataset.jsonl",
                             voices=voices, mode=mode,
                             field="term_index" if mode != "single" else None,
                             counts=Counter({v: 1 for v in voices}))
-    (audio / f"{STEM}.flac").write_bytes(b"ORIG")
+    (audio / f"{stem}.flac").write_bytes(b"ORIG")
     row = {
-        "audio_filepath": f"{STEM}.flac",
+        "audio_filepath": f"{stem}.flac",
         "asr_training_source": TARGET,
         "asr_training_target": TARGET,
         "category": "dictionary",
-        "group_id": GROUP,
+        "group_id": group_id,
         "item_index": 0,
         "index": 7,
         "term": "paracetamol",
@@ -155,8 +158,8 @@ def test_full_alternation(mod):
         # Two other variants of the same term are already read by these two voices, so
         # the swap must avoid them if the roster can afford it.
         term_voices = {GROUP: {"fr_female", "fr_male", "h_itf_arm"}}
-        expected = va.swap_voice(STEM, "fr_female", voices=va.VOICES_FR_V2,
-                                 avoid={"fr_male", "h_itf_arm"})
+        expected = va.ladder_voice(STEM, 0, roster=va.VOICES_FR_V2,
+                                   tried=("fr_female",), avoid=term_voices[GROUP])
         calls: list[tuple[str | None, int]] = []
         install_fakes(mod, expected, calls)
         improved: dict = {}
@@ -218,34 +221,97 @@ def test_full_alternation(mod):
               rec.get("voice") == expected, json.dumps(rec.get("voice")))
 
 
-def test_one_swap_per_clip(mod):
-    """A clip that fails with its swap voice too keeps its original, as in v1."""
-    print("\none swap per clip")
+def test_the_whole_ladder(mod):
+    """Every rung, in order, and then exhaustion: a clip no voice can read.
+
+    This is the shape the operator asked for on 2026-10-20: --n-improv draws at the
+    clip's own voice, then that many at h_itf_arm or h_itf_def, then that many at
+    fr_male or fr_female, then keep the original. Each rung costs one more
+    stt -> tts -> stt alternation, so the whole ladder is seven passes.
+    """
+    print("\nthe whole ladder, rung by rung")
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         audio, row = make_fixture(tmp)
-        swap = va.swap_voice(STEM, "fr_female")
+        rung1 = va.ladder_voice(STEM, 0, roster=va.VOICES_FR_V2, tried=("fr_female",))
+        rung2 = va.ladder_voice(STEM, 1, roster=va.VOICES_FR_V2,
+                                tried=("fr_female", rung1))
         calls: list[tuple[str | None, int]] = []
         install_fakes(mod, None, calls)   # nothing ever reads it well
         improved: dict = {}
 
-        for mode in ("stt", "tts", "stt", "tts", "stt"):
+        seen: list[tuple[str, int, str]] = []
+        for mode in ("stt", "tts", "stt", "tts", "stt", "tts", "stt"):
             cfg = make_cfg(mod, mode, audio)
             run(mod, cfg, row, improved, audio)
-        check("the clip was swapped exactly once",
-              {v for v, _ in calls} == {"fr_female", swap}, str(sorted({v for v, _ in calls})))
-        check("the second failure exhausts it",
-              row["improvement"]["status"] == "exhausted", json.dumps(row["improvement"]))
-        check("its exhausted marker still says which voice it was given",
-              row["improvement"].get("swap_voice") == swap)
+            imp = row["improvement"]
+            seen.append((mode, int(imp.get("voice_tier") or 0), imp["status"]))
+
+        check("the rungs are the measured voices, in order",
+              (rung1, rung2) == ("h_itf_arm", "fr_male"), f"{rung1} then {rung2}")
+        # Three draws per rung (the harness cfg's --n-improv), and the ORDER matters:
+        # a rung must be finished before the next is started, or the ladder would be
+        # three voices racing rather than an escalation.
+        tried = [v for v, _ in calls]
+        check("each rung gets a full round of draws, own voice first",
+              tried == ["fr_female"] * 3 + [rung1] * 3 + [rung2] * 3, str(tried))
+        check("the rung counter climbs once per exhausted round",
+              [t for _, t, _ in seen] == [0, 0, 1, 1, 2, 2, 2], str(seen))
+        check("the clip exhausts only once the ladder is used up",
+              [st for _, _, st in seen] == ["pending_tts", "pending_stt", "pending_tts",
+                                            "pending_stt", "pending_tts", "pending_stt",
+                                            "exhausted"], str(seen))
+        check("its exhausted marker still says which voice it was last given",
+              row["improvement"].get("swap_voice") == rung2,
+              json.dumps(row["improvement"]))
         check("the original audio ships",
               (audio / f"{STEM}.flac").read_bytes() == b"ORIG")
         check("and the row still names the voice that read it",
               row["voice"] == "fr_female")
         # count_pending must see a converged dataset, or the driver would loop for ever
         # on a clip that has nothing left to try.
-        check("a twice-failed clip is converged", harness.count_pending_rows(row) == (0, 0),
+        check("a clip off the end of the ladder is converged",
+              harness.count_pending_rows(row) == (0, 0),
               str(harness.count_pending_rows(row)))
+
+
+def test_a_document_shares_its_new_reader(mod):
+    """`group` mode swaps now, but one new reader for the whole document.
+
+    It used to refuse outright, to keep one reader per document. The first full QC
+    sweep then measured 22.6 pct of 03_PARHAF clips over the gates against ~1 pct
+    elsewhere, so refusing meant shipping the defect. Keying the rung on the GROUP id
+    instead of the clip stem is what keeps the cost to one extra reader per rung.
+    """
+    print("\na document keeps one new reader")
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        doc = "PARHAF:ANATOMOPATHOLOGIE-00003"
+        audio, chunk0 = make_fixture(tmp, mode="group", stem="parhaf_0000",
+                                     group_id=doc)
+        _, chunk7 = make_fixture(tmp, mode="group", stem="parhaf_0007", group_id=doc)
+        other = make_fixture(tmp, mode="group", stem="parhaf_0000",
+                             group_id="PARHAF:CARDIOLOGIE-00001")[1]
+        cfg = make_cfg(mod, "stt", audio)
+        picks = [mod.swap_voice_for(r, audio / f"{r['audio_filepath']}", cfg)
+                 for r in (chunk0, chunk7, other)]
+        check("a group-mode chunk does get a new voice", picks[0] is not None,
+              str(picks[0]))
+        check("both chunks of one document get the SAME new reader",
+              picks[0] == picks[1], str(picks[:2]))
+        check("and it is a rung of the ladder, not any roster voice",
+              picks[0][0] in va.VOICE_LADDER_FR_V2[0], str(picks[0]))
+        check("another document draws independently",
+              picks[2] is not None and picks[2][0] in va.VOICE_LADDER_FR_V2[0],
+              str(picks[2]))
+        # The whole point of keying on the group: a row-mode clip of the same document
+        # would scatter, which is what the old refusal was protecting against.
+        row_mode = make_fixture(tmp / "row", stem="parhaf_0007", group_id=doc)
+        cfg_row = make_cfg(mod, "stt", row_mode[0])
+        scattered = mod.swap_voice_for(row_mode[1],
+                                       row_mode[0] / "parhaf_0007.flac", cfg_row)
+        check("row mode still keys on the clip, so chunk 7 can differ there",
+              scattered is not None, str(scattered))
 
 
 def exhausts_without_swapping(mod, label: str, **fixture) -> None:
@@ -268,9 +334,6 @@ def exhausts_without_swapping(mod, label: str, **fixture) -> None:
 
 def test_what_never_swaps(mod):
     print("\nwhat must never be swapped")
-    # One voice per DOCUMENT: swapping one chunk would change reader mid-report.
-    exhausts_without_swapping(mod, "group mode (03_PARHAF / 04_PARROT) never swaps",
-                              mode="group")
     # v1 audio: nothing recorded a roster, and the row carries no voice.
     exhausts_without_swapping(mod, "a v1 row with no voice never swaps", voice=None)
     # No provenance beside the clips: the roster is unknown, so a swap would be a guess.
@@ -351,7 +414,8 @@ def test_term_voices_are_harvested(mod):
 if __name__ == "__main__":
     module = harness.load_module()
     test_full_alternation(module)
-    test_one_swap_per_clip(module)
+    test_the_whole_ladder(module)
+    test_a_document_shares_its_new_reader(module)
     test_what_never_swaps(module)
     test_term_voices_are_harvested(module)
     test_the_chain_outside_the_pass()
