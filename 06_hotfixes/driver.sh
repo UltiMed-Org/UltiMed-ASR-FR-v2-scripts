@@ -29,7 +29,13 @@
 #   WDOC_WHISPER_ENDPOINT  STT base URL (/v1/audio/transcriptions is appended). Defaults
 #                          to http://127.0.0.1:8002, the local CrispASR ASR stack
 #                          switch_server.sh brings up, because the remote endpoint v1 ran
-#                          against now answers 502.
+#                          against now answers 502. A non-local value is REFUSED at
+#                          startup (see ALLOW_REMOTE_JUDGE), because `sudo -E` imports
+#                          whatever your interactive shell exports for its own wdoc use
+#                          and that silently replaces the judge for all 602k clips.
+#   ALLOW_REMOTE_JUDGE     0 (default). Set to 1 to accept a non-local
+#                          WDOC_WHISPER_ENDPOINT on purpose, e.g. to score against a
+#                          second machine. The refusal it lifts is a startup check only.
 #   WDOC_WHISPER_API_KEY   STT bearer token (falls back to $CRISPASR_API_KEY). The ASR
 #                          service sets CRISPASR_API_KEYS, so a local run needs one too:
 #                          only /health is public.
@@ -227,6 +233,25 @@ if [[ -f "${HERE}/.env" ]]; then
   set +a
 fi
 
+# Normalise one 0/1 env flag in place. There are nine of them, hence a helper rather
+# than nine `case` blocks: under `set -u`, `(( VOICE_SWAP ))` on a value like `true`
+# reads `true` as an unset NAME, evaluates to 0, and turns OFF the very thing the
+# operator just turned on. So every flag goes through here, which accepts the usual
+# spellings, treats empty as the default, and refuses anything else outright.
+#   flag VOICE_SWAP 1          -> $VOICE_SWAP becomes 0 or 1
+#   flag RESCORE 0 RESCORE_ON  -> reads $RESCORE, writes $RESCORE_ON, so the operator's
+#                                own value stays readable in the logs and messages
+flag() {
+  local name="$1" default="$2"
+  local -n _src="${name}" _dst="${3:-$1}"
+  case "${_src:-${default}}" in
+    1|true|TRUE|yes|YES|y|Y) _dst=1 ;;
+    0|false|FALSE|no|NO|n|N) _dst=0 ;;
+    *) echo "driver.sh: ${name} must be 0 or 1 (got '${_src}')" >&2
+       exit 1 ;;
+  esac
+}
+
 # Non-root user that runs the Python passes. Defaults to whoever ran sudo, so nothing
 # is hardcoded; override with TARGET_USER=<name> for a dedicated account.
 TARGET_USER="${TARGET_USER:-${SUDO_USER:-}}"
@@ -253,17 +278,38 @@ fi
 # is what keeps the plan's two judges on one row: see the header note.
 STT_MODEL="${STT_MODEL:-${WDOC_WHISPER_MODEL:-whisper.cpp/ggml-large-v3-turbo}}"
 # Say which judge is about to score the corpus, because the defaults above are easy to
-# lose: `.env` is sourced with `set -a` BEFORE them, so a stale line there wins silently.
-# A v1 `.env` pins the old remote endpoint (now 502) and WDOC_WHISPER_MODEL=whisper-1,
-# which would file every v2 reading under the v1 key. One line beats a 401 or a 502 per
-# clip, or a key nobody notices until the sync writes nulls.
+# lose from TWO directions. `.env` is sourced with `set -a` BEFORE them, so a stale line
+# there wins silently; and the documented launch is `sudo -E`, which carries the whole
+# interactive environment in, so a WDOC_WHISPER_* exported by your shell for wdoc's own
+# sake fills the `${VAR:-default}` slot and COMMENTING THE .env LINE OUT CHANGES NOTHING.
+# That is what happened on 2026-10-20: ~/.scripts_oli/ubiquitous_scripts/shared_env/
+# 70_wdoc.sh exports the v1 remote endpoint and WDOC_WHISPER_MODEL=whisper-1, so two
+# launches with a clean .env still announced the remote judge. To pin the v2 judge, SET
+# the value in .env rather than removing it (an assignment beats the inherited one).
 echo "driver.sh: judge ${STT_MODEL} at ${WDOC_WHISPER_ENDPOINT}" \
      "(readings stored under the key '${STT_MODEL}')"
+# A refusal, not a warning. A warning scrolls past in a pane that then prints one wait
+# line a minute for a day, and the cost of missing it is the whole sweep: v1's remote host
+# answers 502, so every clip would fail its reading, and a judge that DOES answer would
+# file 602k readings under a key the rest of the phase does not look up.
+flag ALLOW_REMOTE_JUDGE 0 ALLOW_REMOTE_JUDGE_OK
 case "${WDOC_WHISPER_ENDPOINT}" in
   *127.0.0.1*|*localhost*) ;;
-  *) echo "driver: that endpoint is not local. Deliberate? The v2 judge is the CrispASR" >&2
-     echo "  stack switch_server.sh starts on :8002; a WDOC_WHISPER_ENDPOINT left over in" >&2
-     echo "  06_hotfixes/.env overrides the default and v1's remote host now answers 502." >&2 ;;
+  *)
+    if (( ALLOW_REMOTE_JUDGE_OK )); then
+      echo "driver: judging against the non-local ${WDOC_WHISPER_ENDPOINT}," \
+           "ALLOW_REMOTE_JUDGE=1 says that is deliberate." >&2
+    else
+      echo "driver.sh: refusing to start: the judge endpoint is not local." >&2
+      echo "  WDOC_WHISPER_ENDPOINT=${WDOC_WHISPER_ENDPOINT}" >&2
+      echo "  The v2 judge is the CrispASR stack switch_server.sh starts on :8002, and" >&2
+      echo "  v1's remote host now answers 502. This almost always comes from your shell" >&2
+      echo "  through 'sudo -E' (70_wdoc.sh in shared_env/), NOT from .env, so commenting" >&2
+      echo "  the .env line out does not help: put the real value in 06_hotfixes/.env," >&2
+      echo "    WDOC_WHISPER_ENDPOINT=http://127.0.0.1:8002" >&2
+      echo "  or set ALLOW_REMOTE_JUDGE=1 to judge against that host on purpose." >&2
+      exit 1
+    fi ;;
 esac
 
 TARGET_HOME="$(getent passwd "${TARGET_USER}" | cut -d: -f6)"
@@ -299,25 +345,6 @@ USER_PATH="${TARGET_HOME}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/u
 as_user() {
   runuser -u "${TARGET_USER}" -- \
     env HOME="${TARGET_HOME}" PATH="${USER_PATH}" nice -n 40 "$@"
-}
-
-# Normalise one 0/1 env flag in place. There are eight of them, hence a helper rather
-# than eight `case` blocks: under `set -u`, `(( VOICE_SWAP ))` on a value like `true`
-# reads `true` as an unset NAME, evaluates to 0, and turns OFF the very thing the
-# operator just turned on. So every flag goes through here, which accepts the usual
-# spellings, treats empty as the default, and refuses anything else outright.
-#   flag VOICE_SWAP 1          -> $VOICE_SWAP becomes 0 or 1
-#   flag RESCORE 0 RESCORE_ON  -> reads $RESCORE, writes $RESCORE_ON, so the operator's
-#                                own value stays readable in the logs and messages
-flag() {
-  local name="$1" default="$2"
-  local -n _src="${name}" _dst="${3:-$1}"
-  case "${_src:-${default}}" in
-    1|true|TRUE|yes|YES|y|Y) _dst=1 ;;
-    0|false|FALSE|no|NO|n|N) _dst=0 ;;
-    *) echo "driver.sh: ${name} must be 0 or 1 (got '${_src}')" >&2
-       exit 1 ;;
-  esac
 }
 
 echo "driver.sh: uv=${UV_BIN}, running passes as ${TARGET_USER}"

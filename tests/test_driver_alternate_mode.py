@@ -514,6 +514,35 @@ def test_the_whole_phase_in_one_command(tmp: Path) -> None:
     print("test_the_whole_phase_in_one_command: OK")
 
 
+def test_a_non_local_judge_is_refused(tmp: Path) -> None:
+    """What actually happened on 2026-10-20, twice: `sudo -E` imports the
+    WDOC_WHISPER_ENDPOINT / WDOC_WHISPER_MODEL the operator's shell exports for wdoc's
+    own sake (shared_env/70_wdoc.sh), so the driver started against v1's remote host
+    with a clean .env, and commenting the .env lines out could not help. The cost of a
+    warning here is the whole sweep (that host answers 502, and a judge that DOES answer
+    files 602k readings under a key nothing else looks up), so it refuses instead."""
+    rc, modes, _switches, out = run_driver(
+        tmp, [10], {"MODE": "stt", "WDOC_WHISPER_ENDPOINT": "https://stt.example.invalid",
+                    "WDOC_WHISPER_MODEL": "whisper-1"})
+    assert rc == 1, f"driver exited {rc}, expected a refusal\n{out}"
+    assert modes == [], f"it scored anyway: {modes}\n{out}"
+    assert "not local" in out and "ALLOW_REMOTE_JUDGE" in out, out
+
+    # Deliberate is still allowed, e.g. a second machine doing the T2 opinion.
+    rc, modes, _switches, out = run_driver(
+        tmp, [10], {"MODE": "stt", "WDOC_WHISPER_ENDPOINT": "https://stt.example.invalid",
+                    "ALLOW_REMOTE_JUDGE": "1"})
+    assert rc == 0 and modes == ["stt"], f"exited {rc}, passes {modes}\n{out}"
+    assert "says that is deliberate" in out, out
+
+    # And the usual hazard of a bare 0/1 var: `true` must not read as "off".
+    rc, _modes, _switches, out = run_driver(
+        tmp, [10], {"MODE": "stt", "WDOC_WHISPER_ENDPOINT": "https://stt.example.invalid",
+                    "ALLOW_REMOTE_JUDGE": "true"})
+    assert rc == 0, f"ALLOW_REMOTE_JUDGE=true was not honoured, exited {rc}\n{out}"
+    print("test_a_non_local_judge_is_refused: OK")
+
+
 def main() -> None:
     if shutil.which("unshare") is None and os.geteuid() != 0:
         print("SKIP test_driver_alternate_mode: no `unshare`, cannot fake the root check")
@@ -545,6 +574,7 @@ def main() -> None:
         test_both_halves_of_the_gate_can_be_turned_off(tmp)
         test_wait_timeout_refuses_to_start_on_top_of_a_generator(tmp)
         test_the_gate_defaults_are_the_documented_ones(tmp)
+        test_a_non_local_judge_is_refused(tmp)
     print("test_driver_alternate_mode: OK")
 
 

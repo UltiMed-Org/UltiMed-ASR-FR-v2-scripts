@@ -100,9 +100,20 @@ Both servers are services in the same CrispASR `docker-compose.yml`:
    `.env` is sourced with `set -a` **before** those defaults, so a line there always
    wins. A v1 `.env` therefore keeps pointing at the old remote endpoint (which now
    answers 502) and keeps `WDOC_WHISPER_MODEL=whisper-1`, which would file every v2
-   reading under the v1 key. Comment both out, or set them to the values above. The
-   driver prints the judge and endpoint it is about to use at startup, and warns when
-   the endpoint is not local, precisely because this is invisible otherwise.
+   reading under the v1 key. **Set them to the values above rather than commenting them
+   out**, because the documented launch is `sudo -E`, which imports the whole
+   interactive environment: if your shell exports `WDOC_WHISPER_ENDPOINT` or
+   `WDOC_WHISPER_MODEL` for its own tooling, those fill the `${VAR:-default}` slots and
+   an absent `.env` line changes nothing. That is exactly what happened on 2026-10-20:
+   two launches with a clean `.env` both announced the v1 remote judge, because
+   `shared_env/70_wdoc.sh` exports it. An assignment in `.env` beats the inherited
+   value; a comment does not.
+
+   The driver prints the judge and endpoint it is about to use at startup and
+   **refuses to start** when the endpoint is not local, because a warning scrolls past
+   in a pane that then prints one wait line a minute for a day, and the cost of missing
+   it is the whole sweep. Set `ALLOW_REMOTE_JUDGE=1` to score against a non-local host
+   on purpose (a second machine doing the T2 opinion, say).
 
 2. **Make the scripts executable:** `chmod +x switch_server.sh driver.sh`.
 
@@ -223,7 +234,8 @@ every QC column empty (it now warns and lists the keys it did find).
 
 The endpoint and token follow from that. `WDOC_WHISPER_ENDPOINT` defaults to
 `http://127.0.0.1:8002`, the local stack, because the remote endpoint v1 ran against now
-answers 502. That service sets `CRISPASR_API_KEYS`, so transcription needs a bearer
+answers 502, and a non-local value is refused at startup unless `ALLOW_REMOTE_JUDGE=1`
+says it is deliberate (see the config step above for why a warning was not enough). That service sets `CRISPASR_API_KEYS`, so transcription needs a bearer
 token: `WDOC_WHISPER_API_KEY` falls back to `$CRISPASR_API_KEY`, the name the CrispASR
 clients already use, and the driver warns at startup when neither is set rather than
 letting every clip 401.
