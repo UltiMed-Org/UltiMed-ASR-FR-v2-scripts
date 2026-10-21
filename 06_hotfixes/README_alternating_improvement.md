@@ -209,6 +209,59 @@ than failing, because by then the audio is already fixed and the sync can be re-
 hand. The sync reads `improved/` and `improved_parrot/`, so the driver also warns up front
 when `OUTPUT` is something else and it will find nothing.
 
+### Stopping it, and picking up where it was
+
+The phase is a day or more of work, so the same command can be relaunched after a stop
+(Ctrl-C, a reboot, a machine that had to be used for something else) and it continues
+instead of starting over:
+
+```sh
+sudo -E ./driver.sh            # run 1: rebuild, scan, passes, sync
+# Ctrl-C somewhere in the middle
+sudo -E ./driver.sh            # run 2: skips what run 1 finished, carries on
+```
+
+Every step appends a line to `improved/driver_steps.log` (or `<OUTPUT>/driver_steps.log`,
+override with `STEPS_LOG`) when it **succeeds**, and the relaunch skips what is in there,
+saying when it was done:
+
+```
+=== 2026-10-21 16:04:11 [step 1/4] skipping the NeMo manifest rebuild: finished 2026-10-21 14:01:04 in an earlier run (RESET_STATE=1 to redo it) ===
+```
+
+Those `[step N/M]` headers are on every step either way, so the position in the phase is
+readable from one line of the log instead of counted by hand. The log is also the phase's
+own history: `cat improved/driver_steps.log`.
+
+What counts as finished is deliberately narrow, because the cost of wrongly skipping a
+step is a corpus that silently never got the work:
+
+- the **manifest rebuild** only when both builders landed (a half-rebuilt manifest set is
+  what every pass after it reads as the truth about the corpus);
+- the **acoustic scan** only when it ran to the end. A partial scan is not recorded on
+  purpose: it resumes from its own append-only sidecar, so re-entering it costs only the
+  clips it had not reached, while skipping it would lose them for good;
+- a **dataset** only when the `stt` pass reported convergence (exit 10). Every other way
+  the per-dataset loop can end is a dead end, not a result: clips nobody can clear,
+  missing audio, both passes dry. Those are exactly what a relaunch should re-enter,
+  since whatever was blocking them is usually what got fixed in between. A `RESCORE_ONLY`
+  migration records itself under its own key for the same reason, so it cannot be read as
+  a converged dataset later;
+- the **sync** only when it applied.
+
+Two escape hatches. `RESET_STATE=1` moves the log aside and re-runs everything, and a log
+whose first line describes a **different** run (another corpus, `OUTPUT`, `MODE` or judge)
+is moved aside by itself rather than trusted, since none of its markers would mean
+anything here. The passes themselves were always resumable (each rebuilds its
+`<output>/<stem>.stt.jsonl` from the manifest and keeps the stored readings, see "When the
+manifest is rebuilt under a running output"); this only decides which **steps** to
+re-enter.
+
+One caveat that has nothing to do with the log: do not edit `driver.sh` while a run is in
+flight. Bash reads a script in chunks as it goes, so inserting lines above the point it
+has reached shifts every byte after it and the running shell resumes parsing in the wrong
+place. Edit it, then relaunch, which is now cheap.
+
 ### Which judge, and where its reading is stored (`STT_MODEL`)
 
 `STT_MODEL` is both the model name sent to the STT server and the key the reading is

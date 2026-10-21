@@ -209,6 +209,21 @@
 #             slower, stronger one is pointed at just the ones it flagged, e.g.
 #                 sudo -E MODE=stt STT_MODEL=large-v3 STEMS_FROM=flags.txt ./driver.sh
 #
+# Resume. A phase is a day or more of work, so a stopped run picks up where it was:
+# every step records itself in an append-only log when it SUCCEEDS, and a relaunch of
+# the same command skips what is already in there, printing `[step N/M]` headers so the
+# position is visible either way. What counts as finished is narrow on purpose: a
+# dataset only when the stt pass reported convergence (never when it stopped on stuck
+# leftovers, which is what a human usually fixes between two runs), the manifest
+# rebuild only when BOTH builders landed, the acoustic scan only when it ran to the end
+# (a partial scan resumes from its own sidecar, so re-entering it is nearly free).
+#   STEPS_LOG   where that record lives (default <OUTPUT>/driver_steps.log, which the
+#               repo's `**/*.log` rule already ignores). It also doubles as the phase's
+#               history: `cat improved/driver_steps.log`. A log whose first line
+#               describes a different run (other corpus, OUTPUT, MODE or judge) is
+#               moved aside rather than trusted.
+#   RESET_STATE=1  move it aside anyway, i.e. re-run every step from scratch.
+#
 # This file was written with Claude Code.
 set -uo pipefail
 
@@ -603,6 +618,47 @@ done
 # relative to HERE.
 ROOT="$(cd "${HERE}/.." && pwd)"
 
+# --- resume: what this phase has already finished ----------------------------------
+# A phase is a day or more of work, and a restart used to mean redoing it: an 18-minute
+# manifest rebuild, then a multi-hour acoustic scan over 600k clips, before the first
+# pass could run again. Each step now records itself here when it SUCCEEDS, and a
+# relaunch skips what is already recorded. The passes themselves were always resumable
+# (each reads its own <output>/<stem>.stt.jsonl back), and so is the scan (it reads its
+# sidecar), so this only has to decide which STEPS to re-enter.
+#
+# Append-only and plain text, so it doubles as the phase's own history, and named .log
+# because the repo already ignores `**/*.log`.
+STEPS_LOG="${STEPS_LOG:-${OUTPUT}/driver_steps.log}"
+flag RESET_STATE 0 RESET_STATE_ON
+# What the record describes. A log written for another corpus, output directory, mode or
+# judge says nothing about this run, so it is moved aside rather than trusted. Note
+# RESCORE_ONLY is deliberately NOT in here: it gets its own step keys below, so a
+# migration run does not throw away the pre-step markers the next full run can reuse.
+STATE_FP="$(printf '%s|%s|%s|%s' "${INPUT}" "${OUTPUT}" "${MODE}" "${STT_MODEL}" \
+            | md5sum | cut -d" " -f1)"
+# Created as ${TARGET_USER} (root appends to it afterwards) so the phase leaves no
+# root-owned file in a directory the user owns.
+as_user mkdir -p "${OUTPUT}"
+if (( RESET_STATE_ON )) && [[ -f "${STEPS_LOG}" ]]; then
+  mv -- "${STEPS_LOG}" "${STEPS_LOG}.$(date '+%Y%m%d-%H%M%S')"
+  echo "driver: RESET_STATE=1, the step log was moved aside; every step runs again"
+elif [[ -f "${STEPS_LOG}" ]]; then
+  _prev_fp="$(grep -a " start " -- "${STEPS_LOG}" | tail -1 | awk "{print \$NF}")"
+  if [[ -n "${_prev_fp}" && "${_prev_fp}" != "${STATE_FP}" ]]; then
+    mv -- "${STEPS_LOG}" "${STEPS_LOG}.$(date '+%Y%m%d-%H%M%S')"
+    echo "driver: the step log describes a different run (corpus, output, mode or" \
+         "judge changed), moved aside; every step runs again"
+  fi
+fi
+as_user touch "${STEPS_LOG}"
+
+step_log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >> "${STEPS_LOG}"; }
+# Step keys are plain words (manifests, acoustic, dataset-2, sync): matched anchored, so
+# `dataset-1` cannot be answered by `dataset-10`.
+step_done() { grep -qaE "^[0-9-]+ [0-9:]+ done ${1}$" -- "${STEPS_LOG}"; }
+step_when() { grep -aE "^[0-9-]+ [0-9:]+ done ${1}$" -- "${STEPS_LOG}" | tail -1 | cut -d" " -f1-2; }
+step_log "start ${STATE_FP}"
+
 # Where the PREVIOUS generation's manifests live, which the rebuild must pin its splits
 # to. Derived rather than hardcoded (no machine path or username in a tracked file): the
 # release stage's `data` symlink points at THIS generation's audio root, and the previous
@@ -646,6 +702,23 @@ if (( REFRESH_MANIFESTS )) && [[ ! -d "${PIN_SPLITS_FROM}" ]]; then
   echo "driver.sh: PIN_SPLITS_FROM is not a directory: ${PIN_SPLITS_FROM}" >&2
   exit 1
 fi
+
+# How many steps this phase has, so every header can say which one it is on. The dataset
+# count comes from INPUT rather than the validated MANIFESTS array, which is built later
+# (it cannot be built here: the manifest rebuild below is what CREATES those files on a
+# first run).
+DATASET_COUNT="$(set -- ${INPUT}; echo $#)"
+STEP_TOTAL=$(( REFRESH_MANIFESTS + ACOUSTIC_SCAN + DATASET_COUNT + SYNC_RESULTS ))
+STEP_NOW=0
+step_header() {   # $* = what this step is
+  STEP_NOW=$(( STEP_NOW + 1 ))
+  echo "=== $(date '+%F %T') [step ${STEP_NOW}/${STEP_TOTAL}] $* ==="
+}
+step_skip() {     # $1 = step key, $2.. = what it was
+  STEP_NOW=$(( STEP_NOW + 1 ))
+  echo "=== $(date '+%F %T') [step ${STEP_NOW}/${STEP_TOTAL}] skipping ${*:2}:" \
+       "finished $(step_when "$1") in an earlier run (RESET_STATE=1 to redo it) ==="
+}
 # ----------------------------------------------------------------------------------
 # The gate, so that `sudo -E ./driver.sh` can be launched NOW and start by itself the
 # moment stage 05 is done. Two things have to happen before anything else:
@@ -767,9 +840,11 @@ if [[ -n "${KILL_QC}" ]]; then
 fi
 
 
-if (( REFRESH_MANIFESTS )); then
-  echo "=== $(date '+%F %T') pre-step: rebuilding the NeMo manifests," \
-       "splits pinned to ${PIN_SPLITS_FROM} ==="
+if (( REFRESH_MANIFESTS )) && step_done manifests; then
+  step_skip manifests "the NeMo manifest rebuild"
+elif (( REFRESH_MANIFESTS )); then
+  step_header "pre-step: rebuilding the NeMo manifests," \
+       "splits pinned to ${PIN_SPLITS_FROM}"
   # Fatal if either fails, unlike the scan below: a half-written manifest set is what the
   # passes then read as the truth about the corpus.
   as_user "${UV_BIN}" run "${ROOT}/99_hf_release/01_build_nemo_manifest.py" \
@@ -778,18 +853,27 @@ if (( REFRESH_MANIFESTS )); then
   as_user "${UV_BIN}" run "${ROOT}/99_hf_release/02_combine_nemo_manifests.py" \
     --pin-splits-from "${PIN_SPLITS_FROM}" \
     || { echo "!!! the combined manifest rebuild failed, stopping" >&2; exit 1; }
+  # Only now: both halves of the rebuild have to land for the manifests to be the truth.
+  step_log "done manifests"
 fi
 
-if (( ACOUSTIC_SCAN )); then
-  echo "=== $(date '+%F %T') pre-step: acoustic loop scan," \
-       "${ACOUSTIC_WORKERS} CPU worker(s), no GPU and no server ==="
+if (( ACOUSTIC_SCAN )) && step_done acoustic; then
+  step_skip acoustic "the acoustic loop scan"
+elif (( ACOUSTIC_SCAN )); then
+  step_header "pre-step: acoustic loop scan," \
+       "${ACOUSTIC_WORKERS} CPU worker(s), no GPU and no server"
   # Never fatal: the sidecar is advisory (it says which clips repeat themselves, which
   # the passes do not need to run), and this scan is minutes to hours of CPU that must
   # not be able to stop a GPU run that would otherwise work.
-  as_user "${UV_BIN}" run "${ROOT}/05_generate_audio/04_qc_acoustic_loops.py" \
-    --workers "${ACOUSTIC_WORKERS}" \
-    ${ACOUSTIC_STAGE_ARGS[@]+"${ACOUSTIC_STAGE_ARGS[@]}"} \
-    || echo "driver: the acoustic scan failed; continuing without its sidecar" >&2
+  # A partial scan is NOT recorded: it resumes from its own sidecar, so re-entering it
+  # costs only the clips it had not reached, and skipping it would lose them for good.
+  if as_user "${UV_BIN}" run "${ROOT}/05_generate_audio/04_qc_acoustic_loops.py" \
+      --workers "${ACOUSTIC_WORKERS}" \
+      ${ACOUSTIC_STAGE_ARGS[@]+"${ACOUSTIC_STAGE_ARGS[@]}"}; then
+    step_log "done acoustic"
+  else
+    echo "driver: the acoustic scan failed; continuing without its sidecar" >&2
+  fi
 fi
 
 # Expand the INPUT list into one (manifest, output dir, audio root) triple per dataset.
@@ -911,7 +995,14 @@ for i in "${!MANIFESTS[@]}"; do
   RETRY_EXHAUSTED_PENDING="${RETRY_EXHAUSTED_ON}"
   # Rounds in a row whose tts pass found nothing to draft. Bounded below, see the loop.
   DRY_TTS_ROUNDS=0
-  echo "=== $(date '+%F %T') dataset $((i + 1))/${#MANIFESTS[@]}: ${CUR_INPUT} -> ${CUR_OUTPUT}/ ==="
+  # A RESCORE_ONLY run is a one-pass migration, not convergence, so it records itself
+  # under its own key: a later full run must not read it as "this dataset is done".
+  if (( RESCORE_ONLY_ON )); then STEP_KEY="rescore-$((i + 1))"; else STEP_KEY="dataset-$((i + 1))"; fi
+  if step_done "${STEP_KEY}"; then
+    step_skip "${STEP_KEY}" "dataset $((i + 1))/${#MANIFESTS[@]} (${CUR_INPUT})"
+    continue
+  fi
+  step_header "dataset $((i + 1))/${#MANIFESTS[@]}: ${CUR_INPUT} -> ${CUR_OUTPUT}/"
   # RESCORE_ONLY is a migration, not a loop: one pass, then the next dataset. Looping would
   # never end, since re-examining the same stored transcripts always counts as work done.
   if (( RESCORE_ONLY_ON )); then
@@ -922,6 +1013,7 @@ for i in "${!MANIFESTS[@]}"; do
       exit "${rc}"
     fi
     echo "=== $(date '+%F %T') rescored ${CUR_INPUT}; nothing was transcribed. ==="
+    step_log "done ${STEP_KEY}"
     continue
   fi
   while :; do
@@ -931,6 +1023,11 @@ for i in "${!MANIFESTS[@]}"; do
     rc=$?
     if (( rc == 10 )); then
       echo "=== $(date '+%F %T') converged: no improvement work left on ${CUR_INPUT}. ==="
+      # The ONLY place a dataset is recorded as finished. Every other break below is a
+      # dead end rather than a convergence (clips nobody can clear, missing audio), and
+      # those are exactly the ones a relaunch should re-enter, since the thing blocking
+      # them is usually what the human fixed in between.
+      step_log "done ${STEP_KEY}"
       break
     fi
     # 11 = this mode has nothing left to do, but the OTHER one still has work.
@@ -996,7 +1093,9 @@ done
 # because that is the key the readings were stored under, and the default is v1's
 # ("whisper-1"), which would match nothing and write nulls. --stt-model goes with it so
 # the `stt_model` column names the judge whose reading is in the row next to it.
-if (( SYNC_RESULTS )); then
+if (( SYNC_RESULTS )) && step_done sync; then
+  step_skip sync "the manifest sync"
+elif (( SYNC_RESULTS )); then
   # That script reads a fixed pair of outputs (improved/, improved_parrot/), so a run
   # under a different OUTPUT has nothing for it to find. It says so per source, but by
   # then the run is over, so say it here first.
@@ -1005,11 +1104,14 @@ if (( SYNC_RESULTS )); then
     *) echo "driver: OUTPUT is '${OUTPUT}', while 03_sync_hotfix_results.py reads" >&2
        echo "  06_hotfixes/improved{,_parrot}/full.stt.jsonl. Expect it to find nothing." >&2 ;;
   esac
-  echo "=== $(date '+%F %T') post-step: syncing stage 06 results into the manifests ==="
-  as_user "${UV_BIN}" run "${ROOT}/99_hf_release/03_sync_hotfix_results.py" \
-    --apply --stt-key "${STT_MODEL}" --stt-model "${STT_MODEL}" \
-    || echo "driver: the manifest sync failed; the audio is fine, re-run" \
-            "99_hf_release/03_sync_hotfix_results.py --apply by hand" >&2
+  step_header "post-step: syncing stage 06 results into the manifests"
+  if as_user "${UV_BIN}" run "${ROOT}/99_hf_release/03_sync_hotfix_results.py" \
+      --apply --stt-key "${STT_MODEL}" --stt-model "${STT_MODEL}"; then
+    step_log "done sync"
+  else
+    echo "driver: the manifest sync failed; the audio is fine, re-run" \
+         "99_hf_release/03_sync_hotfix_results.py --apply by hand" >&2
+  fi
 fi
 
 echo "=== $(date '+%F %T') every dataset converged. Done. ==="

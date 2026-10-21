@@ -129,7 +129,8 @@ def run_driver(tmp: Path, plan: list[int], env_extra: dict[str, str],
                gen_plan: list[str] | None = None,
                qc_plan: list[str] | None = None,
                signals: list[str] | None = None,
-               events: list[str] | None = None) -> tuple[int, list[str], list[str], str]:
+               events: list[str] | None = None,
+               work_dir: Path | None = None) -> tuple[int, list[str], list[str], str]:
     """Run driver.sh once with the passes stubbed. Returns (exit code, the --mode of
     each pass in order, the server switches in order, combined output). `record`, if
     given, also receives one [mode, niceness, retry-exhausted] entry per pass, for the
@@ -142,7 +143,11 @@ def run_driver(tmp: Path, plan: list[int], env_extra: dict[str, str],
     running, which is the shape the gate must wave through untouched. `signals`, if
     given, receives the pgrep/pkill calls. It and `steps` come from ONE log, so the
     order of a kill against a pre-step is observable."""
-    work = Path(tempfile.mkdtemp(dir=tmp))
+    # `work_dir` runs a second driver on top of the first one's OUTPUT, which is what
+    # resume is about: same manifests, same out/, a fresh plan. Everything the harness
+    # itself owns (the logs, the plans) is rewritten below, so only what the DRIVER
+    # left behind survives into the second run.
+    work = work_dir if work_dir is not None else Path(tempfile.mkdtemp(dir=tmp))
     # Run a COPY of driver.sh: it sources `<its dir>/.env`, and the real one holds the
     # user's STT token and would override the test's env.
     driver = work / "driver.sh"
@@ -154,18 +159,18 @@ def run_driver(tmp: Path, plan: list[int], env_extra: dict[str, str],
     # starts competing with it for the same cores).
     steps_log = work / "steps.log"
     plans = work / "plans"
-    plans.mkdir()
+    plans.mkdir(exist_ok=True)
     (plans / "plan.gen").write_text("".join(f"{l}\n" for l in (gen_plan or [])),
                                     encoding="utf-8")
     (plans / "plan.qc").write_text("".join(f"{l}\n" for l in (qc_plan or [])),
                                    encoding="utf-8")
-    pass_log.touch()
-    switch_log.touch()
-    steps_log.touch()
+    pass_log.write_text("", encoding="utf-8")
+    switch_log.write_text("", encoding="utf-8")
+    steps_log.write_text("", encoding="utf-8")
     (work / "plan.txt").write_text("".join(f"{c}\n" for c in plan), encoding="utf-8")
 
     stub_bin = work / "bin"
-    stub_bin.mkdir()
+    stub_bin.mkdir(exist_ok=True)
     _write_exec(stub_bin / "runuser", RUNUSER_STUB)
     _write_exec(stub_bin / "nvidia-smi", NVIDIA_SMI_STUB)
     _write_exec(stub_bin / "pgrep", PGREP_STUB % {"plans": plans, "events": steps_log})
@@ -179,7 +184,7 @@ def run_driver(tmp: Path, plan: list[int], env_extra: dict[str, str],
     manifests = []
     for i in range(n_manifests):
         d = work / f"ds{i}"
-        d.mkdir()
+        d.mkdir(exist_ok=True)
         (d / "full.jsonl").touch()
         manifests.append(str(d / "full.jsonl"))
     (work / "compose.yml").touch()
@@ -543,6 +548,76 @@ def test_a_non_local_judge_is_refused(tmp: Path) -> None:
     print("test_a_non_local_judge_is_refused: OK")
 
 
+def test_a_stopped_run_picks_up_where_it_was(tmp: Path) -> None:
+    """The phase is a day or more of work, so a relaunch must not redo the 18-minute
+    manifest rebuild and the multi-hour acoustic scan before the first pass can run.
+    Run 1 does the whole phase; run 2, same command on the same OUTPUT, must do nothing
+    at all and say why. RESET_STATE=1 then makes it redo everything, since "resume"
+    that cannot be turned off is a trap of its own."""
+    pinned = tmp / "v1_NeMO_files"
+    pinned.mkdir(exist_ok=True)
+    work = Path(tempfile.mkdtemp(dir=tmp))
+    env = {"MODE": "alternate", "REFRESH_MANIFESTS": "1", "PIN_SPLITS_FROM": str(pinned),
+           "ACOUSTIC_SCAN": "1", "SYNC_RESULTS": "1"}
+
+    steps: list[str] = []
+    rc, modes, _switches, out = run_driver(tmp, [10], env, steps=steps, work_dir=work)
+    assert rc == 0, f"run 1 exited {rc}\n{out}"
+    scripts = [line.split("|", 1)[0] for line in steps]
+    assert scripts == ["01_build_nemo_manifest.py", "02_combine_nemo_manifests.py",
+                       "04_qc_acoustic_loops.py", "03_sync_hotfix_results.py"], \
+        f"run 1 steps: {scripts}\n{out}"
+    assert modes == ["stt"], f"run 1 passes: {modes}\n{out}"
+    # Four steps here: refresh + scan + one dataset + sync, numbered so the log says
+    # where the run is without counting lines.
+    assert "[step 1/4]" in out and "[step 4/4]" in out, out
+
+    # Run 2: the plan would converge again if it were asked, so anything it runs is
+    # work the first run had already finished.
+    steps2: list[str] = []
+    rc, modes, _switches, out2 = run_driver(tmp, [10], env, steps=steps2, work_dir=work)
+    assert rc == 0, f"run 2 exited {rc}\n{out2}"
+    assert steps2 == [], f"run 2 redid pre/post-steps: {steps2}\n{out2}"
+    assert modes == [], f"run 2 re-ran passes: {modes}\n{out2}"
+    assert out2.count("skipping") == 4, out2
+    assert "finished 2" in out2, "a skip should say WHEN it was done\n" + out2
+
+    # And the escape hatch.
+    steps3: list[str] = []
+    rc, modes, _switches, out3 = run_driver(
+        tmp, [10], {**env, "RESET_STATE": "1"}, steps=steps3, work_dir=work)
+    assert rc == 0, f"run 3 exited {rc}\n{out3}"
+    assert [line.split("|", 1)[0] for line in steps3] == scripts, \
+        f"RESET_STATE did not redo the steps: {steps3}\n{out3}"
+    assert modes == ["stt"], f"RESET_STATE did not redo the passes: {modes}\n{out3}"
+    print("test_a_stopped_run_picks_up_where_it_was: OK")
+
+
+def test_a_dataset_that_did_not_converge_is_retried(tmp: Path) -> None:
+    """The narrow half of the same feature: only CONVERGENCE (the stt pass's exit 10)
+    counts as a finished dataset. A run that stopped on stuck leftovers must be
+    re-entered, because what was blocking them is usually what the operator fixed in
+    between. Here run 1 ends on the both-dry dead end, and run 2 (a plan that now
+    converges) must pick the dataset up instead of calling it done."""
+    work = Path(tempfile.mkdtemp(dir=tmp))
+    env = {"MODE": "alternate", "REFRESH_MANIFESTS": "0", "ACOUSTIC_SCAN": "0",
+           "SYNC_RESULTS": "0"}
+    rc, modes, _switches, out = run_driver(tmp, [11, 11], env, work_dir=work)
+    assert rc == 0 and modes == ["stt", "tts"], f"exited {rc}, passes {modes}\n{out}"
+    assert "both passes ran dry" in out, out
+
+    rc, modes, _switches, out2 = run_driver(tmp, [10], env, work_dir=work)
+    assert rc == 0, f"run 2 exited {rc}\n{out2}"
+    assert modes == ["stt"], f"the stuck dataset was skipped: {modes}\n{out2}"
+    assert "skipping" not in out2, out2
+
+    # Now it converged, so a third run does skip it.
+    rc, modes, _switches, out3 = run_driver(tmp, [10], env, work_dir=work)
+    assert rc == 0 and modes == [], f"exited {rc}, passes {modes}\n{out3}"
+    assert "skipping dataset 1/1" in out3, out3
+    print("test_a_dataset_that_did_not_converge_is_retried: OK")
+
+
 def main() -> None:
     if shutil.which("unshare") is None and os.geteuid() != 0:
         print("SKIP test_driver_alternate_mode: no `unshare`, cannot fake the root check")
@@ -575,6 +650,8 @@ def main() -> None:
         test_wait_timeout_refuses_to_start_on_top_of_a_generator(tmp)
         test_the_gate_defaults_are_the_documented_ones(tmp)
         test_a_non_local_judge_is_refused(tmp)
+        test_a_stopped_run_picks_up_where_it_was(tmp)
+        test_a_dataset_that_did_not_converge_is_retried(tmp)
     print("test_driver_alternate_mode: OK")
 
 
