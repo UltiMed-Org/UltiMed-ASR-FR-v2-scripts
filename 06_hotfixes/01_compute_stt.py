@@ -88,6 +88,7 @@ from tqdm import tqdm
 # The scorer folds the same symbol / spoken pairs the TTS normalizer spells out, so it
 # reads that table instead of keeping a second copy of it (see _UNIT_RULES below).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "utils"))
+from progress import bar_safe_sink  # noqa: E402
 from voxtral_normalize import (  # noqa: E402
     FR_CARDINAL, STAGING_ROMAN_RE, UNIT_SPOKEN, compile_unit_rules, roman_to_int,
 )
@@ -1374,8 +1375,7 @@ def main(
 ):
     """Transcribe dataset audio and score WER/CER to find derailed TTS clips."""
     logger.remove()
-    logger.add(lambda m: tqdm.write(m, end=""), colorize=True,
-               format="<level>{level: <8}</level> | {message}", level="INFO")
+    bar_safe_sink(logger)
 
     extra_params = _parse_params(params)
     input_root, input_files = discover_inputs(input_path)

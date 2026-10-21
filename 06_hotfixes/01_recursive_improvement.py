@@ -315,6 +315,7 @@ _tts = _load_module(
 # The stage-05 clip-name convention lives with the manifest builder that already reads it
 # (stdlib-only import, so it costs nothing here).
 sys.path.insert(0, str(_HERE.parent / "utils"))
+from progress import bar_safe_sink  # noqa: E402
 from nemo_manifest import parse_clip_name  # noqa: E402
 # "Work on exactly these clips" lists, shared with the live CPU QC that produces them
 # (05_generate_audio/03_qc_cpu_stt.py --stems-from reads the same two file shapes).
@@ -2488,8 +2489,7 @@ def main(
 ):
     """Transcribe a dataset and regenerate the worst TTS clips, in one combined pass."""
     logger.remove()
-    logger.add(lambda m: tqdm.write(m, end=""), colorize=True,
-               format="<level>{level: <8}</level> | {message}", level="INFO")
+    bar_safe_sink(logger)
 
     cfg = SimpleNamespace(
         audio_root=audio_root, audio_key=audio_key,

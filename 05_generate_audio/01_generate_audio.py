@@ -97,6 +97,7 @@ from loguru import logger
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "utils"))
+from progress import bar_safe_sink  # noqa: E402
 from voice_assignment import (  # noqa: E402
     MODES,
     VOICES_FR_V2,
@@ -1174,7 +1175,7 @@ def main() -> int:
 
     # stderr through tqdm.write so log lines don't mangle the progress bar.
     logger.remove()
-    logger.add(lambda m: tqdm.write(m, end="", file=sys.stderr), level="INFO", colorize=True)
+    bar_safe_sink(logger, fmt=None, stream=sys.stderr)   # fmt=None: loguru's default
     logger.add(args.log_file, level="DEBUG")
 
     base_url = args.url.rstrip("/")

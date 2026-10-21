@@ -169,6 +169,7 @@ _audit = _qc._audit
 
 sys.path.insert(0, str(ROOT / "utils"))
 from nemo_manifest import parse_clip_name  # noqa: E402
+from progress import bar_safe_sink, resumed_bar  # noqa: E402
 from voice_assignment import voice_for_row  # noqa: E402
 
 #: Where the per-clip acoustic rows land: beside the audio and the STT sidecar, one
@@ -558,8 +559,14 @@ def scan_stage(watch, *, gate: float, workers: int, limit: int,
     _qc.ensure_index(watch)
     scored = flagged = 0
     started = time.monotonic()
-    with out_path.open("a") as sink, ProcessPoolExecutor(max_workers=workers) as pool:
+    # The bar counts the WHOLE stage, not just this run's share, so a resumed scan reads
+    # 44% rather than 0%. `len(names)` is every clip on disk; `todo` is what is left,
+    # after both the sidecar and --limit.
+    with out_path.open("a") as sink, ProcessPoolExecutor(max_workers=workers) as pool, \
+         resumed_bar(total=len(done) + len(todo), remaining=len(todo),
+                     desc=f"{watch.name} loops", smoothing=0.02) as bar:
         for stem, score, duration, error in pool.map(score_path, todo, chunksize=8):
+            bar.update(1)
             if error is not None or score is None:
                 logger.warning("{}: unreadable ({}), not scored", stem, error)
                 continue
@@ -567,6 +574,9 @@ def scan_stage(watch, *, gate: float, workers: int, limit: int,
             voice, label_rep = _voice_and_label(watch, stem)
             looped = score.similarity >= gate
             flagged += looped
+            # refresh=False: the bar's own tick draws it, so this costs nothing per clip.
+            bar.set_postfix(flagged=f"{flagged} ({100.0 * flagged / scored:.2f}%)",
+                            refresh=False)
             sink.write(json.dumps({
                 "stem": stem, "stage": watch.name, "voice": voice,
                 "duration": round(duration, 2),
@@ -658,8 +668,13 @@ def calibrate_stage(watch, *, workers: int, clean_limit: int, out_name: str) -> 
     by_shape: dict[str, list[float]] = {}
     rows: list[tuple[str, str, LoopScore]] = []
     started = time.monotonic()
-    with ProcessPoolExecutor(max_workers=workers) as pool:
+    # Nothing is resumable here (a calibration always scores its whole sample), so the
+    # bar starts at zero: same helper, `remaining` equal to `total`.
+    with ProcessPoolExecutor(max_workers=workers) as pool, \
+         resumed_bar(total=len(paths), remaining=len(paths),
+                     desc=f"{watch.name} calibrate") as bar:
         for stem, score, _duration, error in pool.map(score_path, paths, chunksize=8):
+            bar.update(1)
             if error is not None or score is None:
                 continue
             shape = labels.get(stem, "?")
@@ -728,7 +743,8 @@ def main(stages: tuple[str, ...], workers: int, gate: float, limit: int, calibra
          log_file: str) -> None:
     """Score clips for self-similarity and flag the ones that repeat themselves."""
     logger.remove()
-    logger.add(sys.stderr, format="{time:HH:mm:ss} | {level} | {message}", level="INFO")
+    # Through tqdm.write, on stderr, so a flag line does not tear the bar it prints over.
+    bar_safe_sink(logger, fmt="{time:HH:mm:ss} | {level} | {message}", stream=sys.stderr)
     if log_file:
         path = Path(log_file)
         logger.add(path if path.is_absolute() else _HERE / path,
