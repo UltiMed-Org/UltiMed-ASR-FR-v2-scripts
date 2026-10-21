@@ -183,7 +183,8 @@ sudo -E ./driver.sh
 In order: rebuild the NeMo manifests from the audio on disk (`99_hf_release/01_build_nemo_manifest.py --all`
 then `02_combine_nemo_manifests.py`), scan that audio for acoustic loops
 (`05_generate_audio/04_qc_acoustic_loops.py`, CPU only, `ACOUSTIC_WORKERS` processes,
-default 4, restrict with `ACOUSTIC_STAGES="01_dictionnary 04_PARROT"`), run the
+default **the host's cores minus 2** (floor 2), restrict with
+`ACOUSTIC_STAGES="01_dictionnary 04_PARROT"`), run the
 alternation to convergence for every dataset, then carry stage 06's QC columns back into
 the release manifests (`99_hf_release/03_sync_hotfix_results.py --apply --stt-key
 $STT_MODEL --stt-model $STT_MODEL`). Set any of `REFRESH_MANIFESTS`, `ACOUSTIC_SCAN`,
@@ -208,6 +209,17 @@ CPU must not be able to stop a GPU run that would otherwise work); the sync warn
 than failing, because by then the audio is already fixed and the sync can be re-run by
 hand. The sync reads `improved/` and `improved_parrot/`, so the driver also warns up front
 when `OUTPUT` is something else and it will find nothing.
+
+Why the driver overrides the scan's own `--workers` default of 4: that default is sized
+for the scan's *other* job, running beside the GPU generator as stage 05's live QC. Here
+it cannot be beside anything, because the gate waited for generation to leave first. The
+work is pure CPU with every BLAS/OMP thread pinned to 1 before numpy loads (measured 122
+ms unpinned vs 42 ms pinned on one 20 s clip: the matrices are small, so the thread pool
+costs more than it buys), so it is one core per worker with nothing shared, and 4 workers
+on a 12-core box left two thirds of the machine idle: ~15 clips/s per worker, i.e. 60
+clips/s instead of 150, which is the difference between half an hour and an hour and a
+half over 533k clips. Set `ACOUSTIC_WORKERS` by hand when something else heavy shares the
+machine.
 
 ### Stopping it, and picking up where it was
 

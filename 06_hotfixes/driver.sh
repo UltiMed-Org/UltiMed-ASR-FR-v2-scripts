@@ -193,7 +193,11 @@
 #                       clip for self-similarity and writes qc_acoustic_sidecar.jsonl
 #                       beside the audio. Free (no GPU, no server), and its sidecar is a
 #                       STEMS_FROM file, so a cheap scan can aim an expensive pass.
-#   ACOUSTIC_WORKERS    worker processes for that scan (default 4).
+#   ACOUSTIC_WORKERS    worker processes for that scan (default: the host's cores
+#                       minus 2, floor 2). One core each, BLAS threads pinned to 1.
+#                       The script's own default of 4 is sized for sharing the box
+#                       with the GPU generator, which the gate below has already
+#                       waited out, so here the box is otherwise idle.
 #   ACOUSTIC_STAGES     generator stages to scan, space-separated (e.g. "01_dictionnary
 #                       04_PARROT"). Empty (default) = all of them.
 #   SYNC_RESULTS=1      (default) after every dataset has converged, carry stage 06's QC
@@ -605,7 +609,19 @@ REFRESH_EXPLICIT="${REFRESH_MANIFESTS+1}"
 flag REFRESH_MANIFESTS 1
 flag ACOUSTIC_SCAN 1
 flag SYNC_RESULTS 1
-ACOUSTIC_WORKERS="${ACOUSTIC_WORKERS:-4}"
+# Worker processes for the scan. The script's own default is 4, which is sized for
+# running BESIDE the GPU generator (that is what it does during stage 05, as the live
+# QC). Here it cannot be: the gate above waited for generation to leave, so the box is
+# otherwise idle and the scan is pure CPU with its BLAS threads pinned to 1, i.e. one
+# core per worker and nothing shared. Measured on this corpus at ~15 clips/s per worker,
+# so 4 workers left ~8 of 12 cores unused and turned a 30-minute sweep into 100 minutes.
+# Leave 2 cores for the rest of the machine (the TTS container idling, syncthing, a
+# session watching the log); set ACOUSTIC_WORKERS explicitly when something else heavy
+# shares the box.
+if [[ -z "${ACOUSTIC_WORKERS:-}" ]]; then
+  _cores="$(nproc 2>/dev/null || echo 4)"
+  ACOUSTIC_WORKERS=$(( _cores > 4 ? _cores - 2 : 2 ))
+fi
 # Which generator stages the acoustic scan looks at (space-separated, e.g.
 # "01_dictionnary 04_PARROT"). Empty = all of them, which is the script's own default.
 ACOUSTIC_STAGES="${ACOUSTIC_STAGES:-}"

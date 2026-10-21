@@ -451,6 +451,12 @@ def test_the_steps_are_on_by_default(tmp: Path) -> None:
     assert scripts == ["04_qc_acoustic_loops.py", "03_sync_hotfix_results.py"], \
         f"steps ran: {scripts}\n{out}"
     assert "Skipping the manifest refresh" in out, out
+    # The scan's worker count is the driver's business, not the script's: its own default
+    # of 4 is for running beside the generator, which the gate has already waited out.
+    cores = os.cpu_count() or 4
+    want = cores - 2 if cores > 4 else 2
+    assert f"--workers {want}" in steps[0], \
+        f"expected {want} workers on a {cores}-core host: {steps[0]}\n{out}"
     print("test_the_steps_are_on_by_default: OK")
 
 
