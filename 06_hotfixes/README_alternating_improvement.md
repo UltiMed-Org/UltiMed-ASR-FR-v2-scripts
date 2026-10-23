@@ -274,6 +274,57 @@ flight. Bash reads a script in chunks as it goes, so inserting lines above the p
 has reached shifts every byte after it and the running shell resumes parsing in the wrong
 place. Edit it, then relaunch, which is now cheap.
 
+### The candidate sidecars on disk, and `09_prune_drafts.py`
+
+A `tts` pass persists every draw it keeps as `<clip>.draft<seed>.<fmt>` next to the clip,
+so a flagged clip costs up to `--n-improv` extra files. They are not small: measured on
+the first v2 round, a candidate is **0.84 MiB** on average, so the 12.4k clips the judge
+flagged come to about **49 GiB** of sidecars while the round is in flight. Worth knowing
+before starting a round on a disk with 96 GiB free.
+
+Nothing needs doing in the normal cycle: the `stt` pass deletes a clip's whole candidate
+set the moment it judges it (win or lose), and a `tts` pass clears what it finds before
+redrawing, so the sidecars are transient by construction. `09_prune_drafts.py` is for the
+two cases that cleanup cannot reach, where files are left with nobody who will ever look
+at them again: a round that was **interrupted** (or whose dataset later converged by
+another route), and a queue **dropped after a scoring-rule change** (see `RESCORE=1`).
+
+```bash
+# always a dry run first: it prints each bucket with its size and deletes nothing
+uv run 06_hotfixes/09_prune_drafts.py \
+    --state 06_hotfixes/improved/full.stt.jsonl \
+    --audio-root 99_hf_release/data/NeMO_files
+# then the same line with --apply
+```
+
+Pass one `--state` per dataset (with its `--audio-root`, the manifest's own directory,
+the same value the driver passes; a single root covers every state file). Doing all of
+them at once is what makes the orphan count meaningful, since the datasets share audio
+directories.
+
+The rule, which is what the tool is really about: a clip whose row says **`pending_stt`
+keeps every candidate beside it**, because those are exactly the files the next `stt`
+pass is about to judge, including one the row does not list (a pass that died between
+writing a sidecar and recording it). `pending_tts`, `improved`, `exhausted` and "no
+marker at all" are all dead. A candidate whose clip is in none of the `--state` files is
+an **orphan**: counted and reported, deleted only with `--delete-orphans`, since the
+usual cause is a dataset that was not passed in. `<clip>.bak` backups are never touched:
+they hold the only remaining copy of the audio an improvement overwrote.
+
+Two guards, because what it deletes costs GPU hours to make. It is a dry run unless
+`--apply`, and it **refuses to delete while a pass is live**: the state file lags the
+filesystem by one flush (adaptive, a few minutes on a 900 MB file), so a clip can own
+fresh candidates while its row still reads `pending_tts`. Deleting those would not
+corrupt anything, the clip would simply be redrawn, but it would throw away real work.
+`--allow-running` overrides that, and `--min-age-min` (60 by default) stays in force
+either way. The live-pass check matches the script as its own argv element under a real
+interpreter rather than anywhere in the command line, so the shell you launch it from
+cannot look like a running pass (the `pkill -f` trap).
+
+Pinned by `tests/test_prune_drafts.py` (`uv run tests/...`), including the round trip
+against the pass's own `draft_path_for`, so the two halves of the naming convention
+cannot drift.
+
 ### Which judge, and where its reading is stored (`STT_MODEL`)
 
 `STT_MODEL` is both the model name sent to the STT server and the key the reading is
