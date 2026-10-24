@@ -81,7 +81,8 @@ seconds / audio seconds, < 1 = faster than real time). Every scored clip logs on
 CER line (with its STT time), and a clip over the threshold additionally dumps its
 source / target / transcript, exactly like ``01_compute_stt.py``. Every clip being
 redone also logs its per-attempt seed, CER and STT time above the bar (REDO /
-IMPROVED / EXHAUSTED lines). Per-clip stt_seconds / stt_rtf are also stored in the
+IMPROVED / REQUEUE / NOBEST lines, then SWAP or EXHAUSTED for a clip no draw won:
+NOBEST is one round giving up, EXHAUSTED is the clip giving up). Per-clip stt_seconds / stt_rtf are also stored in the
 output jsonl. Every row also carries a top-level ``cfg_alpha`` recording the TTS
 cfg_alpha behind its CURRENT audio: a regenerated clip stores its winning draw's
 cfg_alpha, while a clip that keeps its original audio (passed under the threshold, or
@@ -449,6 +450,47 @@ def scores_to_state(scores: Scores) -> dict:
             "orig_window": scores.window, "orig_bad_run": scores.bad_run}
 
 
+def seeds_burned(imp: dict) -> int:
+    """How many rungs of the seed ladder this clip has already drawn with.
+
+    A redraw must never reuse one: `_synthesize_draft` builds its draw as
+    ``--start-seed + seeds_burned + attempt`` and the TTS is deterministic per (voice,
+    seed, cfg_alpha), so a clip that comes back for another round WOULD reproduce the
+    audio sitting on its disk, which the byte-identical guard reads as a dead seed and
+    aborts the whole run on (SeedDeterminismError, exit 2). That is not hypothetical: the
+    draw a requeued win is carrying IS one of last round's draws. Only the seed advances;
+    the cfg_alpha ladder stays keyed to the within-round attempt index, so every round
+    walks the whole measured 2.0 -> 1.2 guidance band again instead of flattening onto
+    its floor.
+
+    The field is read when present, even as 0, and only a marker that LACKS it falls back
+    to ``attempts``: a marker an older run wrote records just that round's draws and
+    nothing cumulative, and the rows `--retry-improved` reopens are exactly those, so
+    without the fallback their first redraw would hit the guard above. Reading a present 0
+    is what keeps the other requeue honest: the incomplete-set hop
+    (`apply_result`'s ``requeue_tts``) throws its drafts away UNJUDGED, so that clip must
+    redraw the very same seeds to finally have the full set judged, and an `or` here would
+    have walked it past them instead.
+    """
+    if "seeds_spent" in imp:
+        return int(imp["seeds_spent"] or 0)
+    return int(imp.get("attempts") or 0)
+
+
+def seeds_after(row: dict, imp: dict) -> int:
+    """The seed base to write on the marker of a clip whose round has been JUDGED: where
+    its draws started plus how many it made, so the next round cannot repeat them.
+
+    Used by every hop that consumes a judged round (a promoted draw, a round no draw won,
+    a round where every draw was a duplicate) and by none that does not: a draft set that
+    was never judged has not spent its seeds. The base comes from the draw loop when it
+    ran in this same call (``both`` mode) and from the row's marker otherwise (a split
+    run, where the tts pass recorded it when it wrote the drafts)."""
+    base = (int(imp["seeds_spent"] or 0) if "seeds_spent" in imp
+            else seeds_burned(row.get("improvement") or {}))
+    return base + int(imp.get("attempts") or 0)
+
+
 #: The two marker fields a state hop must NOT drop: the voice a redraw has to use and
 #: how many rungs of the escalation ladder the clip has burned (see `swap_voice_for`).
 #: Everything else in the marker is rewritten from scratch at every hop, which is what
@@ -474,6 +516,13 @@ def set_improvement(row: dict, status: str, orig: Scores, **extra) -> dict:
         # is exactly what its absence says, so there is nothing to carry.
         if prev.get(field) and field not in state:
             state[field] = prev[field]
+    # Carried the same way, but through `seeds_burned` so it also survives a hop off a
+    # marker that predates the field (see that function), and settable by a caller that
+    # has just spent seeds of its own.
+    if "seeds_spent" not in state:
+        spent = seeds_burned(prev)
+        if spent:
+            state["seeds_spent"] = spent
     row["improvement"] = state
     return state
 
@@ -595,18 +644,28 @@ def finish_or_swap(row: dict, result: dict, orig: Scores, imp: dict,
     swap marker and the rung count survive the pending_stt hop in between.
     """
     attempts = imp.get("attempts", 0)
+    spent = seeds_after(row, imp)
     audio_path = result.get("audio_path")
     nxt = swap_voice_for(row, Path(audio_path), cfg) if audio_path else None
     if nxt is None:
-        set_improvement(row, "exhausted", orig, attempts=attempts)
+        set_improvement(row, "exhausted", orig, attempts=attempts, seeds_spent=spent)
         stats["exhausted"] += 1
+        # The one line that says a clip was actually given up on. It used to be silent,
+        # which left the four truly exhausted clips of a round indistinguishable in the
+        # log from the ~1600 that were merely handed to the next voice.
+        logger.info(
+            f"EXHAUSTED {Path(audio_path).name if audio_path else 'clip'}: no further "
+            f"voice to try after {attempts} attempt(s), shipping the original at "
+            f"{_fmt_scores(orig)}"
+        )
         return "exhausted"
     swap, rung = nxt
     rungs = len(_voices.VOICE_LADDER_FR_V2)
     # The voice that just failed is the previous rung's, not the row's: the row still
     # names the voice of the audio on disk, which is what it shipped with.
     failed = imp.get("swap_voice") or row.get("voice")
-    set_improvement(row, "pending_tts", orig, swap_voice=swap, voice_tier=rung)
+    set_improvement(row, "pending_tts", orig, swap_voice=swap, voice_tier=rung,
+                    seeds_spent=spent)
     stats["swapped"] += 1
     if rung >= rungs:
         # The last rung, so this clip either comes back fixed or exhausts. Counted
@@ -618,6 +677,29 @@ def finish_or_swap(row: dict, result: dict, orig: Scores, imp: dict,
         f"more round of draws with the new voice"
     )
     return "pending_tts"
+
+
+def reopened_statuses(cfg: SimpleNamespace) -> tuple[str, ...]:
+    """The improvement states a pass may re-judge instead of treating as settled.
+
+    ``pending_tts`` is always one: it is a QUEUE ENTRY, and the score stored beside it is
+    the number a candidate will have to beat, so re-deriving it is free and keeps a stale
+    threshold from costing a regeneration. The two resolved states open only on request,
+    because reopening them means spending draws again:
+
+    * ``--retry-exhausted``: the clips that gave up without a good draw.
+    * ``--retry-improved``: the clips a win resolved. Only ever interesting for the ones
+      promoted on ``--min-improvement`` alone, which `_apply_improvement` now leaves in
+      the queue by itself, so this is the MIGRATION for the rows an older run already
+      closed over a gate (and the one way to re-judge a win after a scoring change).
+
+    One function rather than the three hand-written tuples this used to be (two in
+    `apply_result`, one in `needs_work`), so a flag cannot open a door in one of them and
+    leave it shut in another.
+    """
+    return (("pending_tts",)
+            + (("exhausted",) if cfg.retry_exhausted else ())
+            + (("improved",) if getattr(cfg, "retry_improved", False) else ()))
 
 
 def is_bad(scores: Scores, cfg: SimpleNamespace) -> bool:
@@ -777,7 +859,7 @@ def tts_synthesize(
 def _synthesize_draft(
     attempt: int, cfg: SimpleNamespace, ident: str, text: str,
     orig_len: int, orig_hash: str, seen_hashes: set[str], voice: str | None = None,
-    audio_path: Path | None = None,
+    audio_path: Path | None = None, seeds_spent: int = 0,
 ) -> dict:
     """Synthesize ONE candidate for the given attempt index (the TTS-only half of a
     regeneration, shared by ``both`` mode's inline loop and ``tts`` mode's draft
@@ -832,7 +914,11 @@ def _synthesize_draft(
     byte-identical to the original raises ``SeedDeterminismError`` (the seed had no
     effect), both aborting the run rather than replacing a real clip with silence or
     wasting the whole run producing no change."""
-    seed = cfg.start_seed + attempt
+    # The seed ladder starts at --start-seed and is walked PAST on every later round for
+    # the same clip, which is what `seeds_spent` carries (see `seeds_burned`): round 1
+    # draws 43..47, round 2 draws 48..52. Reusing a seed would redraw audio the clip has
+    # already had, and the byte-identical guard below would then kill the run.
+    seed = cfg.start_seed + seeds_spent + attempt
     speed = attempt_speed(cfg.tts_speed, cfg.speed_jitter, attempt)
     # Walk the TTS guidance DOWN on each re-attempt: cfg_alpha starts at
     # --cfg-alpha-start (the value the dataset was generated at, the top of the usable
@@ -1030,7 +1116,7 @@ def _score_audio_file(
 def run_regeneration(
     pos: int, ident: str, audio_path: Path, text: str,
     source: str | None, target: str | None, orig: Scores, cfg: SimpleNamespace,
-    voice: str | None = None,
+    voice: str | None = None, seeds_spent: int = 0,
 ) -> dict:
     """Regenerate one bad clip, trying up to --n-improv draws to clear EVERY gate (CER,
     tail CER, window CER and the unsaid-run length, see ``is_bad``), stopping early the
@@ -1043,7 +1129,8 @@ def run_regeneration(
         orig_bytes = audio_path.read_bytes()
     except OSError as exc:
         logger.warning(f"{ident}: cannot read {audio_path} to regenerate: {exc}")
-        return {"payload": None, "attempts": 0, "all_duplicates": False}
+        return {"payload": None, "attempts": 0, "seeds_spent": seeds_spent,
+                "all_duplicates": False}
     orig_len = len(orig_bytes)
     orig_hash = hashlib.sha1(orig_bytes).hexdigest()
 
@@ -1063,7 +1150,8 @@ def run_regeneration(
         # byte-identical to the original abort the run (GenerationError /
         # SeedDeterminismError); a draw that merely repeats an earlier one is skipped.
         draft = _synthesize_draft(attempt, cfg, ident, text, orig_len, orig_hash,
-                                  seen_hashes, voice=voice, audio_path=audio_path)
+                                  seen_hashes, voice=voice, audio_path=audio_path,
+                                  seeds_spent=seeds_spent)
         seed, speed, cfg_alpha, dur = draft["seed"], draft["speed"], draft["cfg_alpha"], draft["dur"]
         alpha_s = f" alpha={cfg_alpha}" if cfg_alpha is not None else ""
         if draft["reject"]:
@@ -1127,7 +1215,8 @@ def run_regeneration(
                 f"{_fmt_scores(cand)} "
                 f"(attempt {attempt + 1}, seed {seed}, under every threshold)"
             )
-            return {**best, "attempts": attempts, "all_duplicates": False}
+            return {**best, "attempts": attempts,
+                    "seeds_spent": seeds_spent, "all_duplicates": False}
 
     # Exhausted every attempt without clearing the gates. Keep the best draw if it still
     # beats the original by --min-improvement, otherwise leave the original untouched.
@@ -1139,10 +1228,15 @@ def run_regeneration(
             f"{_fmt_scores(best['scores'])} "
             f"(best of {attempts}, still over threshold)"
         )
-        return {**best, "attempts": attempts, "all_duplicates": False}
+        return {**best, "attempts": attempts,
+                "seeds_spent": seeds_spent, "all_duplicates": False}
 
+    # NOBEST, not EXHAUSTED: this says only that no draw won THIS round. Whether the clip
+    # is actually given up on is `finish_or_swap`'s call one layer up (it logs SWAP when
+    # the ladder has a voice left, EXHAUSTED when it does not), and a log that spelled
+    # both the same made every swapped clip read as abandoned.
     logger.info(
-        f"EXHAUSTED {ident}: kept {_fmt_scores(orig)} after {attempts} attempt(s)"
+        f"NOBEST {ident}: kept {_fmt_scores(orig)} after {attempts} attempt(s)"
         + (f"; best draw {_fmt_scores(best['scores'])} did not beat it"
            if best is not None else "")
     )
@@ -1150,6 +1244,7 @@ def run_regeneration(
     if summary:
         logger.warning(summary)
     return {"payload": None, "attempts": attempts,
+            "seeds_spent": seeds_spent,
             "all_duplicates": bool(dup_count and dup_count == attempts)}
 
 
@@ -1172,7 +1267,7 @@ def clear_drafts(audio_path: Path) -> None:
 
 def generate_drafts(
     pos: int, ident: str, audio_path: Path, text: str, orig: Scores, cfg: SimpleNamespace,
-    voice: str | None = None,
+    voice: str | None = None, seeds_spent: int = 0,
 ) -> dict:
     """TTS-only half of a split regeneration (``--mode tts``): synthesize up to
     ``--n-improv`` candidates for one bad clip and persist each as a sidecar draft
@@ -1206,7 +1301,8 @@ def generate_drafts(
     for attempt in range(cfg.n_improv):
         attempts = attempt + 1
         draft = _synthesize_draft(attempt, cfg, ident, text, orig_len, orig_hash,
-                                  seen_hashes, voice=voice, audio_path=audio_path)
+                                  seen_hashes, voice=voice, audio_path=audio_path,
+                                  seeds_spent=seeds_spent)
         seed, cfg_alpha = draft["seed"], draft["cfg_alpha"]
         alpha_s = f" alpha={cfg_alpha}" if cfg_alpha is not None else ""
         if draft["reject"]:
@@ -1230,7 +1326,7 @@ def generate_drafts(
     summary = reject_summary(ident, rejects, attempts)
     if summary:
         logger.warning(summary)
-    return {"drafts": drafts, "attempts": attempts,
+    return {"drafts": drafts, "attempts": attempts, "seeds_spent": seeds_spent,
             "all_duplicates": bool(dup_count and dup_count == attempts and not drafts)}
 
 
@@ -1300,7 +1396,7 @@ def score_and_pick(
                 "all_duplicates": False}
 
     logger.info(
-        f"EXHAUSTED {ident}: kept {_fmt_scores(orig)} after {n} candidate(s)"
+        f"NOBEST {ident}: kept {_fmt_scores(orig)} after {n} candidate(s)"
         + (f"; best draw {_fmt_scores(best['scores'])} did not beat it"
            if best is not None else "")
     )
@@ -1366,7 +1462,7 @@ def combined_worker(pos: int, rec: dict, cfg: SimpleNamespace, model_key: str, i
             out["scores"] = scores_from_state(imp_state)
             out["improvement"] = generate_drafts(
                 pos, ident, audio_path, text, out["scores"], cfg,
-                voice=out["voice"],
+                voice=out["voice"], seeds_spent=seeds_burned(imp_state),
             )
         return out
 
@@ -1534,7 +1630,7 @@ def combined_worker(pos: int, rec: dict, cfg: SimpleNamespace, model_key: str, i
             and cfg.mode == "both" and not cfg.rescore_only):
         out["improvement"] = run_regeneration(
             pos, ident, audio_path, text, source, target, orig, cfg,
-            voice=out["voice"])
+            voice=out["voice"], seeds_spent=seeds_burned(imp_state))
     return out
 
 
@@ -1557,12 +1653,33 @@ def next_backup_path(audio_path: Path) -> Path:
 
 
 def _apply_improvement(
-    row: dict, result: dict, imp: dict, model_key: str, improved_records: dict, cfg: SimpleNamespace
-) -> None:
+    row: dict, result: dict, imp: dict, model_key: str, improved_records: dict,
+    cfg: SimpleNamespace, stats: dict,
+) -> str:
     """Single-threaded disk mutation for a winning clip: back up, overwrite,
     refresh duration, update the row, record the win. Both the backup and the
     replacement are written atomically (temp + fsync + os.replace) so an interrupted
-    run can never leave a half-written or corrupted clip."""
+    run can never leave a half-written or corrupted clip.
+
+    Returns the improvement status it wrote (`""` when the backup failed and nothing was
+    written), because a win is not always the end of the clip's story: a draw is promoted
+    when it clears every gate OR when it merely beats the original by
+    ``--min-improvement`` (see `score_and_pick` / `run_regeneration`), and the second kind
+    leaves BETTER AUDIO THAT IS STILL BAD on disk. Marking that `improved` would resolve
+    the clip for good, because nothing reopens an improved row (`needs_work`), so a clip
+    one round could have cleaned would ship over the gates. It goes back to `pending_tts`
+    instead, with the PROMOTED draw's scores as the number the next round has to beat (and
+    not the original's, which the audio on disk no longer has), so the next draws are
+    judged against what actually ships. That tightening baseline is also what makes the
+    loop finite: every extra round costs a real ``--min-improvement`` of CER, so a clip
+    runs out of room long before it runs out of rounds, and when no draw can beat it any
+    more the ladder in `finish_or_swap` takes over as usual.
+
+    Owns the `improved` / `improved_requeued` tally for the same reason: both call sites
+    (the `picked` branch of a split run, the inline win of a `both` run) would otherwise
+    have to re-derive which of the two happened, and a clip whose backup failed used to be
+    counted as improved although its audio was never replaced.
+    """
     audio_path = Path(result["audio_path"])
     # Always back up the current clip before overwriting it: the first win writes the
     # pristine original to .bak, later wins write the prior version to .bak2/.bak3/...
@@ -1572,7 +1689,7 @@ def _apply_improvement(
         _stt.atomic_write_bytes(backup, audio_path.read_bytes())
     except OSError as exc:
         logger.error(f"{audio_path.name}: could not write backup, skipping replace: {exc}")
-        return
+        return ""
 
     # Capture the pre-replacement transcript / duration for the audit record before
     # we overwrite them below.
@@ -1620,10 +1737,11 @@ def _apply_improvement(
         logger.info(f"VOICE {audio_path.name}: {row.get('voice')} -> {won_voice} "
                     f"(the swapped voice read it well enough to ship)")
         row["voice"] = won_voice
-    row["improvement"] = {
-        "status": "improved",
+    # Which draw is now on disk. The same fields travel whichever status the clip lands
+    # on, so a requeued win still says what it is carrying (seed, speed, cfg_alpha) and
+    # the audit trail reads the same for both.
+    won = {
         "attempts": imp["attempts"],
-        **scores_to_state(result["scores"]),
         "best_cer": new.cer,
         "best_tail": new.tail,
         "best_window": new.window,
@@ -1631,7 +1749,26 @@ def _apply_improvement(
         "seed": imp["seed"],
         "speed": imp["speed"],
         "cfg_alpha": imp.get("cfg_alpha"),
+        # So a requeued clip's next round draws seeds the clip has never had, and a win
+        # reopened later (--force / --retry-improved) does the same (see `seeds_burned`).
+        "seeds_spent": seeds_after(row, imp),
     }
+    stats["improved"] += 1
+    if is_bad(new, cfg):
+        # Promoted on --min-improvement alone: better audio, still over a gate. Back in
+        # the queue, judged from here on against the draw that just won (see the
+        # docstring). set_improvement, not a literal, so the swap voice and the ladder
+        # rung survive the hop the way they do on every other queueing path.
+        status = "pending_tts"
+        set_improvement(row, status, new, **won)
+        stats["improved_requeued"] += 1
+        logger.info(
+            f"REQUEUE {audio_path.name}: promoted draw is better but still over a gate "
+            f"({_fmt_scores(new)}), so it goes back for another round of draws"
+        )
+    else:
+        status = "improved"
+        row["improvement"] = {"status": status, **scores_to_state(result["scores"]), **won}
 
     now = time.time()
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -1681,6 +1818,7 @@ def _apply_improvement(
         "ts": now,
         "ts_iso": now_iso,
     }
+    return status
 
 
 def load_existing_improved(path: Path) -> dict[str, dict]:
@@ -1957,7 +2095,8 @@ def record_round(out_file: Path, snap: Snapshot, stats: dict, cfg: SimpleNamespa
         "scores": snap.scores or {},
         # What this pass did, as opposed to where the dataset now stands.
         "work": {key: stats.get(key, 0) for key in
-                 ("queued", "done", "transcribed", "rescored", "improved", "exhausted",
+                 ("queued", "done", "transcribed", "candidates_scored", "rescored",
+                  "improved", "improved_requeued", "exhausted",
                   "swapped", "swapped_last", "requeued", "unflagged",
                   "incomplete_drafts",
                   "deterministic")},
@@ -2002,6 +2141,17 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
              # built under the old rules, so some entries no longer belong in it.
              "rescored": 0, "transcribed": 0, "rescored_bad": 0,
              "unflagged": 0, "requeued": 0,
+             # improved_requeued = of the `improved` above, the wins that are only wins
+             # on --min-improvement: the audio on disk is better and still over a gate,
+             # so the clip is back in the pending_tts queue rather than resolved (see
+             # `_apply_improvement`). `improved` counts the audio replaced, this counts
+             # how much of that is not finished, and the two together are what keep an
+             # "impr" column from reading as "clips now clean".
+             "improved_requeued": 0,
+             # candidates_scored = candidate files a judging pass transcribed and scored.
+             # The real STT cost of an stt pass over drafts: `transcribed` only ever
+             # counts ORIGINAL clips, so without this a judging round reports 0 work.
+             "candidates_scored": 0,
              # incomplete_drafts = pending_stt clips handed BACK to the tts pass because
              # their candidate set was short of --n-improv (see combined_worker).
              "incomplete_drafts": 0}
@@ -2037,7 +2187,11 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
             drafts = imp.get("drafts") or []
             if drafts:
                 set_improvement(row, "pending_stt", orig,
-                                attempts=imp.get("attempts", 0), drafts=drafts)
+                                attempts=imp.get("attempts", 0), drafts=drafts,
+                                # The base these drafts were drawn from, NOT a total:
+                                # the stt pass bumps it when it judges them, and the
+                                # incomplete-set hop below redraws from it unchanged.
+                                seeds_spent=int(imp.get("seeds_spent") or 0))
             else:
                 # No usable candidate (unreadable clip / every draw a duplicate): try
                 # another voice if the clip has one coming, else give up on it so the
@@ -2066,9 +2220,12 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
             # (which touches the filesystem) only runs for a row that needs it.
             if "cfg_alpha" not in row:
                 row["cfg_alpha"] = original_cfg_alpha_for(row, cfg, input_file)
+            # Every candidate this clip handed to the judge, so the ledger says how much
+            # STT a judging pass really did: the clips are counted in `done`, but the work
+            # is up to --n-improv transcriptions each, which no other counter sees.
+            stats["candidates_scored"] += imp.get("attempts", 0)
             if imp.get("payload") is not None:
-                _apply_improvement(row, result, imp, model_key, improved_records, cfg)
-                stats["improved"] += 1
+                _apply_improvement(row, result, imp, model_key, improved_records, cfg, stats)
             else:
                 finish_or_swap(row, result, orig, imp, cfg, stats)
             for d in result.get("drafts") or []:
@@ -2112,15 +2269,22 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
         # only other rows holding a score computed under the old rules that nothing would
         # revisit, and the whole point of retrying them is to re-judge first (the ones a
         # scoring change makes clean cost no regeneration at all) and redraw second.
-        reopened = ("pending_tts", "exhausted") if cfg.retry_exhausted else ("pending_tts",)
+        prior_status = (row.get("improvement") or {}).get("status")
         if (cfg.rescore and not regenerates_inline
-                and (row.get("improvement") or {}).get("status") in reopened):
+                and prior_status in reopened_statuses(cfg)):
             if is_bad(orig, cfg):
                 # Back to the queue rather than left resolved, so the next tts pass draws
                 # for it again. The attempt count starts over: what matters downstream is
                 # the score a new candidate has to beat, and that is refreshed here.
                 set_improvement(row, "pending_tts", orig)
                 stats["requeued"] += 1
+            elif prior_status == "improved":
+                # A win that reads clean is not a stale flag: its marker is the only row
+                # level record of WHICH draw is on disk (seed, speed, cfg_alpha, the
+                # before/after), so --retry-improved leaves it exactly as it is. Dropping
+                # it the way a settled queue entry is dropped would erase the win from
+                # the state file and from every tally built on it.
+                pass
             else:
                 row.pop("improvement", None)
                 stats["unflagged"] += 1
@@ -2128,11 +2292,16 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
 
         if imp.get("payload") is not None:
             # both mode won inline.
-            _apply_improvement(row, result, imp, model_key, improved_records, cfg)
-            stats["improved"] += 1
+            status = _apply_improvement(row, result, imp, model_key, improved_records,
+                                        cfg, stats)
             if tts_bar is not None:
                 tts_bar.total += 1   # a bad clip, now counted in the backlog...
-                tts_bar.update(1)    # ...and successfully repaired, so fill it
+                if status == "improved":
+                    tts_bar.update(1)  # ...and successfully repaired, so fill it
+                else:
+                    # ...better but still over a gate (or not written at all), so it is
+                    # backlog that this pass did not clear: count it, do not fill it.
+                    tts_bar.refresh()
         elif is_bad(orig, cfg) and cfg.n_improv > 0 and not cfg.rescore_only:
             if cfg.mode == "both":
                 # both mode tried and exhausted inline.
@@ -2185,8 +2354,10 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
             # keeps the tts pass from regenerating clips that now read clean.
             # --retry-exhausted adds `exhausted` to that exception, for the same reason:
             # its stored score is old-rules too, and re-judging it offline is free.
-            reopened = ((None, "pending_tts", "exhausted") if cfg.retry_exhausted
-                        else (None, "pending_tts"))
+            # --retry-improved adds `improved`, which is the same bargain again: the
+            # promoted draw's transcript is already on the row, so asking whether it
+            # actually cleared the gates costs nothing here.
+            reopened = (None,) + reopened_statuses(cfg)
             if (out_rec.get("improvement") or {}).get("status") not in reopened:
                 return False
             prior = (out_rec.get("transcriptions") or {}).get(model_key) or {}
@@ -2208,9 +2379,13 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
         # Candidates a prior tts pass persisted always need this stt pass to score them.
         if cfg.mode == "stt" and status == "pending_stt":
             return True
-        # Resolved clips are skipped unless --force, or, for the ones that gave up
-        # without a good draw, unless --retry-exhausted reopens them specifically.
-        resolved = ("improved",) if cfg.retry_exhausted else ("improved", "exhausted")
+        # Resolved clips are skipped unless --force, or unless the matching --retry-*
+        # flag reopens them specifically (`reopened_statuses`). Without --rescore this
+        # admits only the ones that still read BAD, since the stored-score gate at the
+        # end of this function is what decides: reopening a resolved clip that passes
+        # would cost a transcription and change nothing.
+        reopened = reopened_statuses(cfg)
+        resolved = tuple(s for s in ("improved", "exhausted") if s not in reopened)
         if status in resolved and not cfg.force:
             return False
         # A clip already handed to the tts pass has nothing to do in an stt pass until
@@ -2462,6 +2637,7 @@ def _print_report(ctx, _param, value):
 @click.option("--refresh-duration/--no-refresh-duration", default=True, help="Re-probe and update each row's `duration` when its audio is replaced (keeps stage-99 splits correct).")
 @click.option("--force", is_flag=True, help="Re-process clips already marked improved/exhausted in a previous run.")
 @click.option("--retry-exhausted", is_flag=True, help="Give the clips marked `exhausted` (flagged bad, no draw good enough) another run: they are treated as if they carried no marker, so a rescore can clear them and an stt pass can send the ones that still read bad back through the tts queue. Unlike --force this leaves the clips that already passed and the ones already improved alone, so a retry costs only the known-weak tail (173 clips after the 0.08 sweep) instead of re-transcribing the corpus. Use it after a scoring-rule change or with a different seed / cfg_alpha ladder.")
+@click.option("--retry-improved", is_flag=True, help="Reopen the clips marked `improved` that still read BAD, i.e. the draws promoted on --min-improvement alone (better audio, still over a gate). Since 2026-10-24 a pass leaves those in the queue by itself, so this is the MIGRATION for the rows an older run already closed over a gate: they go back through the tts queue with the promoted draw's score as the number to beat. Clips whose win actually cleared the gates are left untouched, marker included (it is the only record of which draw is on disk), so this costs only the still-bad tail. Pair it with --rescore after a scoring-rule change, or use it alone to re-judge wins from the stored transcripts.")
 @click.option("--rescore", is_flag=True, help="Re-derive all four scores (cer, cer_tail, cer_window, bad_run_chars) for EVERY row that already has a stored transcript, under the current scoring rules, and re-apply the gates. Use after changing normalize_for_scoring or a threshold, which makes every score already on disk stale while leaving the transcripts themselves perfectly valid. Costs no STT call (the stored transcript is reused); only a row that now reads bad and has fewer than 3 readings spends a recheck. Also re-judges the regeneration queue: a pending_tts row that now reads clean drops its marker, one that stays bad gets a refreshed orig_cer.")
 @click.option("--rescore-only", is_flag=True, help="Offline rescore pass: like --rescore but makes NO request at all (no STT, no TTS), so it runs with both servers down. Only rows that already carry a transcript are touched: scores are refreshed in place, nothing new is flagged for regeneration and nothing is transcribed (rows the OLD rules already queued are re-judged, since that queue is exactly what a rules change invalidates). Run it once after a scoring-rule change, then run the normal passes, which pick up whatever now reads bad. Implies --rescore.")
 # Runtime. STT and TTS run in parallel against their own servers: each has its own
@@ -2483,7 +2659,7 @@ def main(
     start_seed, speed_jitter,
     cfg_alpha_start, cfg_alpha_step, cfg_alpha_floor, original_cfg_alpha,
     auto_token_budget, code_dump_dir, store_semantic_codes, voice_swap, refresh_duration,
-    force, retry_exhausted,
+    force, retry_exhausted, retry_improved,
     rescore, rescore_only,
     stt_parallel, tts_parallel, shuffle, flush_every, flush_interval, limit,
 ):
@@ -2545,6 +2721,7 @@ def main(
         refresh_duration=refresh_duration,
         force=force,
         retry_exhausted=retry_exhausted,
+        retry_improved=retry_improved,
         # --rescore-only is --rescore plus "never open a connection", so it implies it.
         rescore=(rescore or rescore_only),
         rescore_only=rescore_only,

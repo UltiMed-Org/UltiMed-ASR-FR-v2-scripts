@@ -58,8 +58,16 @@ def load_module():
     return mod
 
 
-def install_fakes(mod):
-    """Replace the two network calls with deterministic in-memory fakes."""
+def install_fakes(mod, transcripts=None):
+    """Replace the two network calls with deterministic in-memory fakes.
+
+    ``transcripts`` maps a draw's SEED to the text its audio transcribes to, defaulting to
+    the single clean draw this file's main flow is built on. Any other audio (the original
+    clip included) reads as garbage. Parameterized rather than copied so a test about a
+    PARTIAL win (a draw that is better than the original and still over a gate) needs no
+    second copy of the fakes: it just maps a seed to a half-right transcript.
+    """
+    transcripts = {GOOD_SEED: TARGET} if transcripts is None else transcripts
 
     # Every knob spelled out rather than **kwargs: this stub is also what catches a
     # caller that stopped passing one. The two generation guards carry defaults because
@@ -74,14 +82,15 @@ def install_fakes(mod):
 
     def fake_transcribe(path, *args, **kwargs):
         data = Path(path).read_bytes()
-        transcript = TARGET if data == f"AUD{GOOD_SEED}".encode() else BAD_TRANSCRIPT
-        return transcript, 0.1  # (text, stt_seconds)
+        by_bytes = {f"AUD{seed}".encode(): text for seed, text in transcripts.items()}
+        return by_bytes.get(data, BAD_TRANSCRIPT), 0.1  # (text, stt_seconds)
 
     mod.tts_synthesize = fake_tts
     mod._stt.transcribe_timed = fake_transcribe
 
 
-def make_cfg(mode, audio_root, n_improv=3, stt_recheck_temperature=None):
+def make_cfg(mode, audio_root, n_improv=3, stt_recheck_temperature=None,
+             min_improvement=0.0, retry_improved=False):
     return SimpleNamespace(
         audio_root=audio_root, audio_key="audio_filepath",
         stt_endpoint="http://stt.invalid/x", stt_token="", stt_model=None,
@@ -101,11 +110,14 @@ def make_cfg(mode, audio_root, n_improv=3, stt_recheck_temperature=None):
         # realistic readings), but set, because is_bad reads all four and a cfg missing
         # one would make every clip look clean.
         window_cer_threshold=0.5, bad_run_threshold=400,
-        min_improvement=0.0,
+        min_improvement=min_improvement,
         start_seed=43, speed_jitter=0.0, cfg_alpha_start=1.3, cfg_alpha_step=0.1,
         cfg_alpha_floor=None,
         original_cfg_alpha=1.3,
         refresh_duration=True, force=False, retry_exhausted=False,
+        # Spelled out for the same reason as the two filters above: `reopened_statuses`
+        # reads it, and a cfg missing it would quietly leave every resolved clip shut.
+        retry_improved=retry_improved,
         rescore=False, rescore_only=False,
         # Fake audio has no readable duration, so the frame-cap guard never fires here;
         # test_audio_truncation.py is what exercises it.
@@ -114,10 +126,16 @@ def make_cfg(mode, audio_root, n_improv=3, stt_recheck_temperature=None):
     )
 
 
-def run_pass(mod, cfg, row, improved_records, input_file, improved_file):
+def run_pass(mod, cfg, row, improved_records, input_file, improved_file, stats_out=None):
     """Run one file's worth of work for a single row through the real hooks, the way
-    process_file would, and return whether the row needed work this pass."""
-    worker, apply_result, needs_work, on_flush, _postfix, _stats, tts_bar = mod.make_hooks(
+    process_file would, and return whether the row needed work this pass.
+
+    ``stats_out``, when given, is updated with the pass's counters, so a test can assert
+    on what the pass TALLIED (improved vs improved_requeued, say) and not only on the
+    state it left behind. Kept as an out-parameter rather than a second return value so
+    the boolean call sites above stay as they are.
+    """
+    worker, apply_result, needs_work, on_flush, _postfix, stats, tts_bar = mod.make_hooks(
         cfg, "default", input_file, improved_file, improved_records
     )
     did_work = needs_work(row)
@@ -126,6 +144,8 @@ def run_pass(mod, cfg, row, improved_records, input_file, improved_file):
         apply_result(0, result, [row])
     if tts_bar is not None:
         tts_bar.close()
+    if stats_out is not None:
+        stats_out.update(stats)
     return did_work
 
 
@@ -1004,6 +1024,147 @@ def test_flush_backoff(mod):
     print("test_flush_backoff: OK")
 
 
+def test_a_partial_win_goes_back_in_the_queue(mod):
+    """A draw promoted on --min-improvement alone (better audio, STILL over a gate) must
+    not resolve the clip.
+
+    This is the bug the 2026-10-24 run surfaced: 1,387 clips of 602,789 shipped over the
+    CER gate because the promotion marked them `improved`, and nothing reopens an improved
+    row, so the 5 draws they were entitled to next round were never drawn. The clip now
+    goes back to pending_tts, and the number the NEXT round has to beat is the promoted
+    draw's score, not the original's (the original's audio is gone, so beating it proves
+    nothing).
+    """
+    # One draw reads half the sentence: better than garbage, still far over cer 0.4.
+    partial = "bonjour le patient"
+    partial_seed = 45
+    install_fakes(mod, {partial_seed: partial})
+    partial_cer = mod.best_cer(partial, TARGET, TARGET)
+    assert partial_cer >= 0.4, f"fixture broken: partial draw reads clean ({partial_cer})"
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        clip = root / "clip.flac"
+        clip.write_bytes(b"ORIG")
+        input_file = root / "manifest.jsonl"
+        improved_file = root / "manifest.improved.jsonl"
+        improved_records: dict = {}
+        row = {"audio_filepath": "clip.flac", "asr_training_source": TARGET,
+               "asr_training_target": TARGET, "index": 7, "term": "paracetamol",
+               "transcriptions": {}}
+
+        def cfg_for(mode):
+            return make_cfg(mode, root, min_improvement=0.1)
+
+        # stt -> flagged bad; tts -> three candidates; then the judging pass.
+        run_pass(mod, cfg_for("stt"), row, improved_records, input_file, improved_file)
+        # The ladder state a swapped clip carries, to pin that a requeue keeps it: losing
+        # it would restart the escalation and redraw with the voice that already failed.
+        row["improvement"]["swap_voice"] = "h_itf_arm"
+        row["improvement"]["voice_tier"] = 1
+        run_pass(mod, cfg_for("tts"), row, improved_records, input_file, improved_file)
+        assert_eq(row["improvement"]["status"], "pending_stt", "drafts were made")
+        orig_cer = row["improvement"]["orig_cer"]
+
+        stats: dict = {}
+        assert run_pass(mod, cfg_for("stt"), row, improved_records, input_file,
+                        improved_file, stats), "the judging pass should pick the row up"
+
+        # The better audio IS promoted: this is a win, just not a finished one.
+        assert_eq(clip.read_bytes(), f"AUD{partial_seed}".encode(), "promoted clip bytes")
+        bak = clip.with_suffix(clip.suffix + ".bak")
+        assert bak.is_file() and bak.read_bytes() == b"ORIG", "pristine .bak"
+        assert_eq(row["transcriptions"]["default"]["text"], partial, "stored transcript")
+        assert not list(root.glob("clip.flac.draft*")), "candidates should be cleaned up"
+        # ...and the clip stays in the queue, judged from here on against what ships.
+        assert_eq(row["improvement"]["status"], "pending_tts", "status after a partial win")
+        assert abs(row["improvement"]["orig_cer"] - partial_cer) < 1e-9, (
+            f"the next round must beat the PROMOTED draw ({partial_cer}), not the "
+            f"original ({orig_cer})")
+        assert_eq(row["improvement"]["swap_voice"], "h_itf_arm", "swap voice survives")
+        assert_eq(row["improvement"]["voice_tier"], 1, "ladder rung survives")
+        assert_eq(count_pending_rows(row), (1, 0), "back in the tts queue")
+        # Counted as both: the audio was replaced (improved) and the clip is not done
+        # (improved_requeued), which is what keeps the ledger's `impr` column honest.
+        assert_eq(stats["improved"], 1, "improved tally")
+        assert_eq(stats["improved_requeued"], 1, "improved_requeued tally")
+        assert_eq(stats["candidates_scored"], 3, "candidates the judge transcribed")
+        # Three seeds are spent, so the next round starts past them. Without this the
+        # redraw reproduces the audio it just promoted (same voice, seed and cfg_alpha,
+        # deterministic TTS) and `_synthesize_draft` kills the whole run on the
+        # byte-identical guard, which is what makes the requeue fatal rather than merely
+        # wasteful.
+        assert_eq(row["improvement"]["seeds_spent"], 3, "seeds the clip has burned")
+        # And the next tts pass really does draw for it again, with fresh seeds.
+        assert run_pass(mod, cfg_for("tts"), row, improved_records, input_file,
+                        improved_file), "a requeued win should need work in a tts pass"
+        assert_eq(row["improvement"]["status"], "pending_stt", "it drew again")
+        assert_eq([d["seed"] for d in row["improvement"]["drafts"]], [46, 47, 48],
+                  "round 2 draws the next three rungs of the seed ladder")
+        # The drafted hop records the base its draws started from, not a total: the
+        # stt pass is what bumps it, once it has actually judged them.
+        assert_eq(row["improvement"]["seeds_spent"], 3, "base of round 2's draws")
+
+    print("test_a_partial_win_goes_back_in_the_queue: OK")
+
+
+def test_retry_improved_reopens_only_the_still_bad_wins(mod):
+    """--retry-improved is the migration for the rows an OLDER run closed over a gate.
+
+    It must reopen a win that still reads bad and leave a win that reads clean completely
+    alone, marker included: that marker is the only row-level record of which draw is on
+    disk (seed, speed, cfg_alpha), so dropping it the way a settled queue entry is dropped
+    would erase the win from the state file and from every tally built on it.
+    """
+    partial = "bonjour le patient"
+    install_fakes(mod, {45: partial, 44: TARGET})
+    partial_cer = mod.best_cer(partial, TARGET, TARGET)
+
+    def improved_row(name, audio_bytes, text, cer):
+        return {"audio_filepath": name, "asr_training_source": TARGET,
+                "asr_training_target": TARGET, "index": 7, "term": "paracetamol",
+                "cfg_alpha": 1.5,
+                "transcriptions": {"default": {"text": text, "wer": None, "cer": cer}},
+                "improvement": {"status": "improved", "orig_cer": 0.9, "best_cer": cer,
+                                "attempts": 3, "seed": 45, "speed": None,
+                                "cfg_alpha": 1.5}}
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        (root / "bad.flac").write_bytes(b"AUD45")    # the win that is still over the gate
+        (root / "good.flac").write_bytes(b"AUD44")   # the win that actually cleared it
+        input_file = root / "manifest.jsonl"
+        improved_file = root / "manifest.improved.jsonl"
+        still_bad = improved_row("bad.flac", b"AUD45", partial, partial_cer)
+        clean = improved_row("good.flac", b"AUD44", TARGET, 0.0)
+
+        # Without the flag, both are settled: that is the behaviour --force exists for.
+        plain = make_cfg("stt", root)
+        for row, label in ((still_bad, "still-bad"), (clean, "clean")):
+            assert not run_pass(mod, plain, dict(row), {}, input_file, improved_file), \
+                f"an improved row ({label}) must be idle without --retry-improved"
+
+        cfg = make_cfg("stt", root, min_improvement=0.1, retry_improved=True)
+        assert run_pass(mod, cfg, still_bad, {}, input_file, improved_file), \
+            "--retry-improved should reopen a win that still reads bad"
+        assert_eq(still_bad["improvement"]["status"], "pending_tts", "reopened status")
+        assert abs(still_bad["improvement"]["orig_cer"] - partial_cer) < 1e-9, \
+            "the reopened row carries the score of the audio actually on disk"
+        assert_eq(still_bad["cfg_alpha"], 1.5, "the published cfg_alpha is not clobbered")
+        # The marker predates `seeds_spent`, so the count has to come from `attempts`:
+        # otherwise the redraw starts at --start-seed, reproduces the audio on disk and
+        # aborts the run (see `seeds_burned`).
+        assert_eq(still_bad["improvement"]["seeds_spent"], 3,
+                  "a legacy marker's attempts stand in for the seed count")
+
+        assert not run_pass(mod, cfg, clean, {}, input_file, improved_file), \
+            "--retry-improved must not reopen a win that cleared the gates"
+        assert_eq(clean["improvement"]["status"], "improved", "clean win stays improved")
+        assert_eq(clean["improvement"]["seed"], 45, "clean win keeps its draw's seed")
+
+    print("test_retry_improved_reopens_only_the_still_bad_wins: OK")
+
+
 if __name__ == "__main__":
     main()
     test_flush_backoff(load_module())
@@ -1019,3 +1180,5 @@ if __name__ == "__main__":
     test_retry_exhausted(load_module())
     test_incomplete_candidate_set_goes_back_to_tts(load_module())
     test_resume_drops_rows_whose_text_changed(load_module())
+    test_a_partial_win_goes_back_in_the_queue(load_module())
+    test_retry_improved_reopens_only_the_still_bad_wins(load_module())
