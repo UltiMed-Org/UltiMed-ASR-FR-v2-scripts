@@ -182,7 +182,8 @@ def render_dataset(path: Path, rows: Sequence[dict]) -> str:
         out.append("  (empty)")
         return "\n".join(out)
     header = (f"  {'rnd':>3} {'pass':>4} {'mode':<5} {'rows':>8} {'bad':>7} "
-              f"{'pend_tts':>8} {'pend_stt':>8} {'impr':>6} {'exh':>6} {'swap':>5} "
+              f"{'pend_tts':>8} {'pend_stt':>8} {'impr':>6} {'rq':>5} {'exh':>6} "
+              f"{'swap':>5} "
               + " ".join(f"{k.replace('cer_', ''):>13}" for k in SCORE_KEYS)
               + f" {'audio_h':>8} {'wall_h':>7}")
     out.append(header)
@@ -197,6 +198,9 @@ def render_dataset(path: Path, rows: Sequence[dict]) -> str:
                  f"{_fmt(states.get('pending_tts'), 8, ',d')} "
                  f"{_fmt(states.get('pending_stt'), 8, ',d')} "
                  f"{_fmt(work.get('improved'), 6, ',d')} "
+                 # rq = of those wins, the ones only good enough to requeue (better
+                 # audio, still over a gate), so `impr` is never read as "now clean".
+                 f"{_fmt(work.get('improved_requeued'), 5, ',d')} "
                  f"{_fmt(work.get('exhausted'), 6, ',d')} "
                  f"{_fmt(work.get('swapped'), 5, ',d')}"]
         for key in SCORE_KEYS:
