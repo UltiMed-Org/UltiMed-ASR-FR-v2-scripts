@@ -62,10 +62,12 @@ if [[ "${script}" != 01_recursive_improvement.py ]]; then
 fi
 mode=""
 retry=0
+reopen=0
 report=0
 while [[ $# -gt 0 ]]; do
   [[ "$1" == --mode ]] && mode="$2"
   [[ "$1" == --retry-exhausted ]] && retry=1
+  [[ "$1" == --retry-improved ]] && reopen=1
   [[ "$1" == --report ]] && report=1
   shift
 done
@@ -75,7 +77,7 @@ done
 if (( report )); then
   exit 0
 fi
-echo "${mode}|$(nice)|${retry}" >> "%(log)s"
+echo "${mode}|$(nice)|${retry}|${reopen}" >> "%(log)s"
 n=$(wc -l < "%(log)s")
 code=$(sed -n "${n}p" "%(plan)s")
 exit "${code:-99}"
@@ -133,8 +135,8 @@ def run_driver(tmp: Path, plan: list[int], env_extra: dict[str, str],
                work_dir: Path | None = None) -> tuple[int, list[str], list[str], str]:
     """Run driver.sh once with the passes stubbed. Returns (exit code, the --mode of
     each pass in order, the server switches in order, combined output). `record`, if
-    given, also receives one [mode, niceness, retry-exhausted] entry per pass, for the
-    cases that care about which flags a pass was handed. `steps`, if given, receives one
+    given, also receives one [mode, niceness, retry-exhausted, retry-improved] entry per
+    pass, for the cases that care about which flags a pass was handed. `steps`, if given, receives one
     "<script>|<args>" line per pre- or post-step, in the order they ran.
 
     `gen_plan` / `qc_plan` drive the stubbed `pgrep -f`: one line per call, each a
@@ -329,6 +331,28 @@ def test_retry_exhausted_defaults_off(tmp: Path) -> None:
     assert [e[2] for e in entries] == ["0"], f"unasked-for retry\n{out}"
     assert rc == 0, f"driver exited {rc}\n{out}"
     print("test_retry_exhausted_defaults_off: OK")
+
+
+def test_retry_improved_is_one_shot_per_dataset(tmp: Path) -> None:
+    """RETRY_IMPROVED=1 is the migration for the wins an older run closed while they were
+    still over a gate, and it has the same one-shot shape as RETRY_EXHAUSTED for the same
+    reason: the reopened clip ends the round on a fresh marker (improved if a draw finally
+    cleared the gates, pending_tts if the promoted one is still short), so a flag left on
+    for every stt pass would reopen its own output and the loop would never converge.
+    """
+    entries: list = []
+    rc, modes, _switches, out = run_driver(
+        tmp, [0, 0, 10, 0, 0, 10], {"MODE": "alternate", "RETRY_IMPROVED": "1"},
+        n_manifests=2, record=entries)
+    assert modes == ["stt", "tts", "stt", "stt", "tts", "stt"], f"passes ran: {modes}\n{out}"
+    reopened = [e[3] for e in entries]
+    assert reopened == ["1", "0", "0", "1", "0", "0"], (
+        "--retry-improved belongs on the first stt pass of each dataset only, got "
+        f"{list(zip(modes, reopened))}\n{out}")
+    # And it is independent of the other reopening flag: this run asked for neither.
+    assert [e[2] for e in entries] == ["0"] * 6, f"unasked-for --retry-exhausted\n{out}"
+    assert rc == 0, f"driver exited {rc}\n{out}"
+    print("test_retry_improved_is_one_shot_per_dataset: OK")
 
 
 def test_it_waits_for_the_generator_then_stops_the_qc(tmp: Path) -> None:
@@ -645,6 +669,7 @@ def main() -> None:
         test_dry_start_on_the_second_dataset(tmp)
         test_retry_exhausted_is_one_shot_per_dataset(tmp)
         test_retry_exhausted_defaults_off(tmp)
+        test_retry_improved_is_one_shot_per_dataset(tmp)
         test_the_steps_are_on_by_default(tmp)
         test_every_step_can_be_turned_off(tmp)
         test_an_explicit_refresh_refuses_unpinned_splits(tmp)

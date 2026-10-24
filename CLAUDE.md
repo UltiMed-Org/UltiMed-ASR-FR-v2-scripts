@@ -663,17 +663,23 @@ the transcript against the label (CER), regenerate the bad clips, keep the best 
   `--rescore-only` re-derive stored scores (and re-judge the regeneration queue) after a
   scoring-rule change; `--retry-exhausted` additionally reopens the clips a previous run
   gave up on, which are otherwise final, dropping the marker on the ones a scoring change
-  makes clean and requeueing the rest. Tested by
+  makes clean and requeueing the rest. A draw promoted on `--min-improvement` alone
+  (better audio, still over a gate) is itself requeued (`REQUEUE`, counted `rq` in
+  `--report`) rather than closed as `improved`, judged from then on against the draw that
+  won; `--retry-improved` is the migration for the rows an older run closed that way, and
+  it keeps the marker of a reopened win that now reads clean. Every later round for a clip
+  walks the seed ladder on from where the previous one stopped, because redrawing the seed
+  whose audio is on disk is what the byte-identical guard aborts the run on. Tested by
   `tests/test_recursive_improvement_modes.py`.
 - `driver.sh`: alternates the two modes, one dataset at a time, switching the docker
   server between passes; env-var driven (`MODE`, `RESCORE`, `RESCORE_ONLY`,
-  `RETRY_EXHAUSTED`, `CATEGORY`, `CER_THRESHOLD`, ...). See
+  `RETRY_EXHAUSTED`, `RETRY_IMPROVED`, `CATEGORY`, `CER_THRESHOLD`, ...). See
   `README_alternating_improvement.md`, the stage's real doc.
   Its loop is tested by `tests/test_driver_alternate_mode.py` (runs the real script with
   the passes stubbed), which pins that an `stt` pass with nothing to do (exit 11) makes
   the alternating run continue to the `tts` pass instead of dropping the dataset, and that
-  `RETRY_EXHAUSTED` rides the first `stt` pass of each dataset only (otherwise the retry
-  would reopen the markers it just wrote and never converge).
+  `RETRY_EXHAUSTED` and `RETRY_IMPROVED` ride the first `stt` pass of each dataset only
+  (otherwise the retry would reopen the markers it just wrote and never converge).
 - `04_flag_asr_defects.py`: the QC Whisper cannot do. Voxtral sometimes babbles a few
   words BEFORE the sentence and Whisper skips them, so those clips scored clean; a
   Parakeet fine-tuned on UltiMed transcribes them. From a hypotheses file (the NeMo repo's

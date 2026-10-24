@@ -796,14 +796,16 @@ it, and neither can a new seed or `cfg_alpha` ladder.
 ```bash
 # Re-judge them offline first (no GPU, no server call), then redraw for what is left.
 sudo -E RESCORE_ONLY=1 RETRY_EXHAUSTED=1 ./driver.sh
-sudo -E START_SEED=48 ./driver.sh
+sudo -E ./driver.sh
 ```
 
-`START_SEED` is not optional here. A clip's attempt count restarts when it is requeued,
-and draw N is seed `START_SEED + N`, so a retry at the default 43 asks the server for the
-exact five draws it already rejected: same seed, same `cfg_alpha`, same audio. Move it past
-the range the previous run used (43..47 for a five-draw redo) and the retry actually draws
-something new.
+`START_SEED` used to be mandatory here and no longer is. Draw N of a clip's first round is
+seed `START_SEED + N`, and the clip's marker now carries how many rungs of that ladder it
+has burned, so a second round draws 48..52 where the first drew 43..47. Without it a retry
+would ask the server for the exact draws it already rejected (same seed, same `cfg_alpha`,
+same audio), which is worse than wasteful once a clip has had a draw promoted: the redraw
+would reproduce the audio sitting on its disk, and the byte-identical guard reads that as a
+dead seed and aborts the whole run (exit 2).
 
 The first pass re-derives each one's score from its stored transcript. A clip that now
 reads clean **loses its marker** (nothing left to fix, no regeneration spent), and one that
@@ -819,6 +821,30 @@ sweep) instead of re-reading the corpus. Like `RESCORE` it rides the **first `st
 each dataset only**, and here that is not just about saving work: the retry ends by writing
 a fresh `exhausted` marker for whatever still fails, so a flag left on for every pass would
 reopen its own output and the alternating loop would never converge.
+
+### Giving the wins that still read bad another go: `RETRY_IMPROVED=1`
+
+A draw is promoted either because it clears every gate or because it merely beats the
+original by `--min-improvement`, and the second kind leaves **better audio that is still
+bad** on disk. The pass sends those back to the tts queue itself now (`REQUEUE` in the log,
+`rq` in `--report`), judged from then on against the draw that just won rather than against
+the original, whose audio is gone. Runs built before that existed marked them `improved`
+and nothing reopens an improved row, so round 1 of the v2 corpus closed **1,387** clips
+over a gate (13.5% of its 10,356 promotions).
+
+`RETRY_IMPROVED=1` is the migration for exactly those rows:
+
+```bash
+sudo -E RETRY_IMPROVED=1 ./driver.sh
+```
+
+Same one-shot shape as `RETRY_EXHAUSTED` (first stt pass of each dataset only, for the same
+self-reopening reason), and it is safe to pass over a corpus where most wins are clean: a
+reopened win that reads clean **keeps its marker** and stays `improved`. That is the one
+place where it differs from a reopened `exhausted` clip, which loses its marker instead:
+the win's marker is the only row-level record of which draw is on disk (its seed, speed and
+`cfg_alpha`), so dropping it would erase the win from the state file and from every tally
+built on it.
 
 ### Rescoring on its own first: `RESCORE_ONLY=1`
 

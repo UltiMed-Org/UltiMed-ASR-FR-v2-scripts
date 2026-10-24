@@ -89,8 +89,15 @@
 #                       put back in the tts queue if they do not. Also one-shot, and for
 #                       a stronger reason than RESCORE: see the block below. The clips
 #                       that passed and the ones already improved are left alone, unlike
-#                       --force. Pair it with START_SEED past the previous run's range,
-#                       or the redraws reproduce the draws that already lost.
+#                       --force. The redraws no longer need START_SEED moved: a reopened
+#                       clip walks the seed ladder on from where it stopped.
+#   RETRY_IMPROVED=1    give the clips a previous run closed as `improved` WHILE THEY WERE
+#                       STILL over a gate another chance (promoted on --min-improvement
+#                       alone: better audio, not good enough). Runs built before that
+#                       requeue existed left ~1.4k of them resolved, and nothing else
+#                       would ever look at them again. One-shot like the two above, and
+#                       harmless on a clip that now reads clean: it keeps its marker and
+#                       stays improved.
 #   START_SEED          seed of the first draw of a redo, +1 per draw (default 43, so a
 #                       five-draw redo uses 43..47). The only reason to move it is a
 #                       retry over clips that were already drawn for.
@@ -494,11 +501,14 @@ TTS_VOICE="${TTS_VOICE:-fr_female}"
 CFG_ALPHA_START="${CFG_ALPHA_START:-2.0}"
 CFG_ALPHA_STEP="${CFG_ALPHA_STEP:--0.2}"
 CFG_ALPHA_FLOOR="${CFG_ALPHA_FLOOR:-1.2}"
-# The other half of what makes one draw differ from the next: draw N uses seed START + N.
-# A clip's attempt count restarts when it is requeued, so a retry over already-drawn clips
-# (RETRY_EXHAUSTED=1) with this left at its default asks the server for the SAME five
-# draws it already rejected. Move it past the range the previous run used (43..47 for a
-# five-draw redo) or the retry only spends GPU time reproducing known losers.
+# The other half of what makes one draw differ from the next: draw N of a clip's FIRST
+# round uses seed START + N, and every later round for that clip walks on from where the
+# previous one stopped (the marker carries the count, see `seeds_burned` in the pass), so
+# round 2 of a five-draw redo draws 48..52. That is not a nicety: the TTS is deterministic
+# per voice, seed and cfg_alpha, so a clip that redrew the same seeds would reproduce the
+# audio it is already carrying, which the pass treats as a dead seed and ABORTS the run
+# on (exit 2). It is also why a retry over already-drawn clips (RETRY_EXHAUSTED=1,
+# RETRY_IMPROVED=1) no longer needs this moved by hand.
 START_SEED="${START_SEED:-43}"
 
 # Which passes to run. `alternate` is the stt <-> tts flow; `stt` / `tts` run that one
@@ -559,6 +569,21 @@ if (( RETRY_EXHAUSTED_ON )); then
   echo "driver: RETRY_EXHAUSTED=1, the first stt pass of each dataset reopens the clips that gave up"
   if [[ "${MODE}" == tts ]]; then
     echo "driver: ...but MODE=tts runs no stt pass, so RETRY_EXHAUSTED will not apply" >&2
+  fi
+fi
+
+# RETRY_IMPROVED=1 reopens the clips a previous run closed over a gate. A draw is promoted
+# either because it clears every gate or because it merely beats the original by
+# --min-improvement, and the second kind leaves better-but-still-bad audio on disk; the
+# pass now sends those back to the tts queue itself (`pending_tts`), so this flag is the
+# MIGRATION for the rows written before it did. Same one-shot shape and the same reason as
+# RETRY_EXHAUSTED: the cycle ends in a fresh marker, so a flag left on every pass would
+# reopen its own output and the loop would never converge.
+flag RETRY_IMPROVED 0 RETRY_IMPROVED_ON
+if (( RETRY_IMPROVED_ON )); then
+  echo "driver: RETRY_IMPROVED=1, the first stt pass of each dataset reopens the wins that still read bad"
+  if [[ "${MODE}" == tts ]]; then
+    echo "driver: ...but MODE=tts runs no stt pass, so RETRY_IMPROVED will not apply" >&2
   fi
 fi
 
@@ -966,6 +991,12 @@ run_pass() {  # $1 = stt|tts ; runs on the CUR_* dataset; returns the pass's exi
     echo "driver: reopening the clips a previous run gave up on (--retry-exhausted)"
     RETRY_EXHAUSTED_PENDING=0
   fi
+  # Same shape and the same self-reopening hazard, for the wins that shipped over a gate.
+  if [[ "${mode}" == stt ]] && (( RETRY_IMPROVED_PENDING )); then
+    extra+=(--retry-improved)
+    echo "driver: reopening the wins that still read bad (--retry-improved)"
+    RETRY_IMPROVED_PENDING=0
+  fi
   # `as_user` drops root and pins nice 19 (see its definition); the inner `env` adds the
   # STT config on top, because that is the only thing a pass needs beyond HOME and PATH.
   # runuser without -l keeps CWD (=HERE), so the relative --input/--audio-root resolve as
@@ -1009,6 +1040,8 @@ for i in "${!MANIFESTS[@]}"; do
   RESCORE_PENDING="${RESCORE_ON}"
   # Likewise: each manifest holds its own exhausted clips, so each gets one reopening.
   RETRY_EXHAUSTED_PENDING="${RETRY_EXHAUSTED_ON}"
+  # And its own wins closed over a gate, so each gets one reopening of those too.
+  RETRY_IMPROVED_PENDING="${RETRY_IMPROVED_ON}"
   # Rounds in a row whose tts pass found nothing to draft. Bounded below, see the loop.
   DRY_TTS_ROUNDS=0
   # A RESCORE_ONLY run is a one-pass migration, not convergence, so it records itself
