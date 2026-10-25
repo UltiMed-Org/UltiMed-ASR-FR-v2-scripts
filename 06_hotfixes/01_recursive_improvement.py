@@ -444,6 +444,19 @@ def scores_from_state(state: dict) -> Scores:
                   window=state.get("orig_window"), bad_run=state.get("orig_bad_run"))
 
 
+def scores_from_reading(reading: dict) -> Scores:
+    """The four scores a stored READING carries, i.e. one entry of a row's
+    ``transcriptions`` map, as ``01_compute_stt.py`` writes it. Different key names from
+    ``scores_from_state`` above (``cer_tail`` there, ``orig_tail`` here) because they
+    answer different questions: this is what a judge measured, that is what the clip
+    looked like when it was flagged. Shared so a second judge can be scored through the
+    exact same gates (see ``10_compare_judges.py``) rather than a second spelling of them.
+    """
+    return Scores(cer=reading.get("cer"), tail=reading.get("cer_tail"),
+                  window=reading.get("cer_window"),
+                  bad_run=reading.get("bad_run_chars"))
+
+
 def scores_to_state(scores: Scores) -> dict:
     """``scores_from_state``'s inverse, spread into an ``improvement`` marker."""
     return {"orig_cer": scores.cer, "orig_tail": scores.tail,
@@ -2050,9 +2063,7 @@ def scan_output(out_file: Path, *, model_key: str = "default",
                 value = reading.get(key)
                 if value is not None:
                     collected[key].append(float(value))
-            bad = is_bad(Scores(reading.get("cer"), reading.get("cer_tail"),
-                                reading.get("cer_window"), reading.get("bad_run_chars")),
-                         gates)
+            bad = is_bad(scores_from_reading(reading), gates)
             if bad:
                 counts["bad"] += 1
             elif status is None:
