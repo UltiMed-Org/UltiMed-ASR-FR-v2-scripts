@@ -501,7 +501,8 @@ def load_cpu_model(model_dir: Path, *, quantization: str, threads: int,
     model_dir
         A `parakeet-tdt-0.6b-v3-*-onnx` checkout.
     quantization
-        Subfolder/precision to load, e.g. ``"int8"``.
+        Subfolder/precision to load, e.g. ``"int8"``. Empty for the export's
+        unsuffixed files, which is what the fp32 pair is named.
     threads
         onnxruntime intra-op threads. Pinned deliberately: left alone, onnxruntime
         takes every core and starves the process feeding the GPU, which is the one
@@ -540,9 +541,13 @@ def load_cpu_model(model_dir: Path, *, quantization: str, threads: int,
                                    for k, v in original(quantization).items()})
     extra = {"providers": list(providers)} if providers else {}
     try:
+        # Empty string means "the files carry no precision infix at all"
+        # (`encoder-model.onnx`, not `encoder-model.int8.onnx`), which onnx-asr spells
+        # as None. The ultra export needs it: its fp16/ folder holds only an encoder,
+        # so the only pair that resolves is the unsuffixed one under fp32/.
         return onnx_asr.load_model(name, path=str(model_dir),
-                                   quantization=quantization, sess_options=opts,
-                                   **extra)
+                                   quantization=quantization or None,
+                                   sess_options=opts, **extra)
     finally:
         model_type._get_model_files = staticmethod(original)
 
@@ -1217,8 +1222,10 @@ def worker_loop(model, ctx: Context) -> None:
                    "impartial judge: see the module docstring.")
 @click.option("--quantization", default="int8", show_default=True,
               help="Precision subfolder of the export to load. int8 is the one "
-                   "measured on this host; fp16 is ~2x slower on CPU, and the one to "
-                   "pick with --providers CUDAExecutionProvider.")
+                   "measured on this host; fp16 is ~2x slower on CPU. Pass an EMPTY "
+                   "value for an export's unsuffixed files, which is the pair to use "
+                   "on the GPU: the ultra export's fp16/ folder ships an encoder only, "
+                   "so fp16 cannot resolve a decoder and only fp32/ has both halves.")
 @click.option("--providers", "providers_csv", default="", show_default=False,
               help="Comma-separated onnxruntime execution providers, e.g. "
                    "CUDAExecutionProvider. Empty (the default) leaves onnxruntime on "

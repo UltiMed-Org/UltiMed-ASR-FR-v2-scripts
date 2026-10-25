@@ -712,7 +712,8 @@ def calibrate_stage(watch, *, workers: int, clean_limit: int, out_name: str) -> 
     with ProcessPoolExecutor(max_workers=workers) as pool, \
          resumed_bar(total=len(paths), remaining=len(paths),
                      desc=f"{watch.name} calibrate") as bar:
-        for stem, score, _duration, error in pool.map(score_path, paths, chunksize=8):
+        for stem, score, _duration, _mtime, error in pool.map(score_path, paths,
+                                                               chunksize=8):
             bar.update(1)
             if error is not None or score is None:
                 continue
