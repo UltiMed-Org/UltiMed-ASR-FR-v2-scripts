@@ -385,18 +385,32 @@ def test_classify_defect_shapes() -> None:
         ref, ref + " Il a egalement signale des nausees, une asthenie marquee, "
         "une anorexie et des sueurs nocturnes abondantes depuis plusieurs jours "
         "sans fievre associee ni perte de poids documentee.") == "overrun"
-    # A clause of 6+ words said TWICE is a loop, even though no n-gram reaches
-    # `_LOOP_MIN_COUNT`: this is the common derailment, and it used to be filed as
-    # `wrong_words` (which is what made the mix read as "mostly no acoustic signature").
+    # A clause said TWICE is a loop: this is the common derailment, and it used to be
+    # filed as `wrong_words` (which is what made the mix read as "mostly no acoustic
+    # signature").
     doubled = ("La patiente recoit deux grammes par jour pendant dix jours "
                "recoit deux grammes par jour pendant dix jours puis une surveillance.")
     long_ref = ("La patiente recoit deux grammes par jour pendant dix jours "
                 "puis une surveillance.")
     assert qc.classify_defect(long_ref, doubled) == "loop"
-    # But the LABEL's own clause-length repetition does not become a loop: a dosage
-    # list that says the clause twice is matched by a take that says it twice.
+    # But the LABEL's own repetition does not become a loop: a dosage list that says the
+    # clause twice is matched by a take that says it twice, EVEN when the recognizer
+    # mishears the same word in both copies. That misread window is a span the label
+    # never contains, so comparing windows verbatim would call it a loop; the shared
+    # rule forgives a window the label writes that often within one word.
     twice = long_ref + " " + long_ref
     assert qc.classify_defect(twice, twice.replace("recoit", "recevait")) == "wrong_words"
+    # A four-word stutter is NOT named a loop, and that is a measured choice rather than
+    # an oversight: a window of four words cannot see one word said four times, and an
+    # arm for it would have added 10 clips per 19,120 to the repair list of which 4 were
+    # real, its misfires being normalization artefacts (a label's "100000" read back as
+    # "nil nil nil"). A word said over is also the most self-similar waveform there is,
+    # so the acoustic scan is its detector; this one keeps a single rule. Longer runs,
+    # which is the shape a derailed take actually produces, still read as loops.
+    assert qc.classify_defect("le patient tousse",
+                              "le patient tousse tousse tousse tousse") == "overrun"
+    assert qc.classify_defect("le patient tousse",
+                              "le patient" + " tousse" * 9) == "loop"
     # Same length, different words: the shape that no acoustic detector can see.
     assert qc.classify_defect("le patient tousse", "la patiente touche") == "wrong_words"
     # An empty transcript is a truncation, not a crash.
@@ -417,8 +431,9 @@ def test_defect_mix_report_reads_existing_rows() -> None:
         {"stem": "b", "over_gate": True, "cer": 0.4, "voice": "v1"},
         # Flagged with text, no stored shape: classified on the fly.
         {"stem": "c", "over_gate": True, "cer": 0.4, "voice": "v1",
-         "reference": "le patient tousse",
-         "transcript": "le patient tousse tousse tousse tousse"},
+         "reference": "le patient tousse depuis trois jours",
+         "transcript": "le patient tousse depuis trois jours tousse depuis trois "
+                       "jours tousse depuis trois jours"},
         # A stored shape is recomputed, not trusted: this row claims `overrun` while
         # its two texts are identical, so the current rule says `wrong_words`. That is
         # what lets a classifier change be re-measured over rows already on disk.

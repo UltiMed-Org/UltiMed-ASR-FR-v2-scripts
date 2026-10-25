@@ -237,31 +237,6 @@ def log_window_evidence(score, *, log=logger.warning, indent: str = "  ") -> Non
             score.bad_run_chars / _stt.NORM_CHARS_PER_SECOND,
             score.missing_heard, score.missing_context)
 
-#: Immediately-repeating n-gram sizes the loop test looks for. A derailed take
-#: repeats whole words, so word n-grams find it; 2 to 5 covers "de la" through a
-#: short clause, and anything longer is already caught by the shorter windows.
-_LOOP_NGRAMS = (2, 3, 4, 5)
-
-#: How many times an n-gram must occur before it is a loop rather than ordinary
-#: French repetition, and how far it must beat the LABEL's own repetition. Both
-#: are needed: clinical passages legitimately repeat "de la" or a drug name, so an
-#: absolute count alone flags healthy clips.
-_LOOP_MIN_COUNT = 3
-_LOOP_MARGIN = 1
-
-#: Long-clause arm of the same test, and the much looser count is the point: TWO
-#: occurrences are enough once the repeated span is 6 or more words, because correct
-#: French prose does not say a whole clause over verbatim unless the label does, and
-#: the label's own repetition is the baseline this is measured against (see
-#: `_added_clause_repeat`; the short arm needs 3 because its spans are as generic as
-#: "de la"). Measured on the 2026-10-16 dictionary sidecar: this arm fires on 151 of
-#: 250 flagged clips (60%) and on 0 of 2126 CER-passing ones, so a repeated clause is
-#: a more specific signal than the CER gate it explains. Sizes are sparse
-#: because a 12-word repeat contains a 6-word one; 8 and 10 only add the case where a
-#: clause's 6-word windows all straddle an edit.
-_LOOP_LONG_NGRAMS = (6, 8, 10)
-_LOOP_LONG_MIN_COUNT = 2
-
 #: Transcript-to-label word-count ratios that mean the take did not end where the
 #: text did. Wide on purpose: STT word counts drift a few percent on their own.
 _SHORT_RATIO = 0.75
@@ -279,10 +254,10 @@ def classify_defect(reference: str, transcript: str, *,
     ``loop``
         A span repeats more often than the label says it: the model derailed into
         saying the same thing over again. Audible as the repetitive mumbling, and the
-        one shape a self-similarity detector can find without transcribing. Two arms,
-        because loops come in two lengths: a short n-gram (2 to 5 words) has to occur
-        `_LOOP_MIN_COUNT` times, while a clause of 6 or more words counts from the
-        second occurrence, the label's own count of that same clause subtracted.
+        one shape a self-similarity detector can find without transcribing. Counted by `repeat_excess`, which asks how many word windows the take reads
+      more often than the label writes them, forgiving a window the label writes
+      that often within one word (an honestly repeated clause misheard the same way
+      twice is not a loop; see that function for the measurement).
     ``overrun``
         Materially more words than the label and no repeated span to explain them: the
         model kept talking, inventing new material rather than repeating. Rare once
@@ -317,8 +292,9 @@ def classify_defect(reference: str, transcript: str, *,
     overrun / 4% truncated, and the conclusion drawn from it was that most defects have
     no acoustic signature. That conclusion was an artefact of this function: printing
     the window texts (`log_window_evidence`) showed clause-length loops filed as
-    wrong_words, because `_LOOP_MIN_COUNT` wanted three occurrences and a derailed take
-    most often says a clause exactly twice. With the long-clause arm added, 250 flagged
+    wrong_words, because the rule of the day wanted three occurrences of a short n-gram
+    and a derailed take most often says a clause exactly twice. Once a clause said twice
+    counted (first as a second arm here, now as `repeat_excess`), 250 flagged
     clips read **63% loop, 36% wrong_words, 1% overrun** overall and **90% loop, 7%
     wrong_words** among the severe ones (CER >= 0.25), against 10% loop / 79%
     wrong_words as the old rule labelled the same rows. So a self-similarity pre-filter
@@ -361,13 +337,20 @@ def classify_defect(reference: str, transcript: str, *,
     if not hyp:
         return "truncated"
     ratio = len(hyp) / max(len(ref), 1)
-    hyp_rep, ref_rep = _max_ngram_count(hyp), _max_ngram_count(ref)
-    if hyp_rep >= _LOOP_MIN_COUNT and hyp_rep > ref_rep + _LOOP_MARGIN:
-        return "loop"
-    # Before the length ratios on purpose: a take that loops usually also runs long, and
-    # of the two names the loop is the cause and `overrun` the symptom. This is what
-    # moved 26 of the 28 stored `overrun` rows to `loop` on 2026-10-16.
-    if _added_clause_repeat(ref, hyp) is not None:
+    # One rule, shared with the offline scorer (`06_hotfixes/01_compute_stt.py`), because
+    # "did this take repeat itself" is one question and two spellings of it drift apart
+    # the first time either is tuned. It replaced a pair of arms here (a 2-to-5-word
+    # n-gram seen 3+ times, plus a 6+-word clause seen twice) that it measurably
+    # subsumes: over the 19,120 clips carrying both a Parakeet transcript and an
+    # independent acoustic verdict, the old pair fired on 308 (87.0% of them
+    # acoustically confirmed, 17.1% of the acoustic flags recovered) and this fires on
+    # 457 (81.2%, 23.7%), catching 307 of the old 308 plus 150 more of which 68.7% are
+    # acoustically confirmed against an 8.2% base rate. The one clip only the old pair
+    # flagged is acoustically clean. Asked before the length ratios on purpose: a take
+    # that loops usually also runs long, and of the two names the loop is the cause and
+    # `overrun` the symptom, which is what moved 26 of the 28 stored `overrun` rows to
+    # `loop` on 2026-10-16.
+    if _stt.repeat_excess(reference or "", transcript or "") >= _stt.DEFAULT_REPEAT_GATE:
         return "loop"
     if ratio < _SHORT_RATIO:
         return "truncated"
@@ -381,78 +364,6 @@ def classify_defect(reference: str, transcript: str, *,
     if bad_run is not None and bad_run >= _SKIP_RUN_CHARS:
         return "skipped"
     return "wrong_words"
-
-
-def _max_ngram_count(tokens: list[str]) -> int:
-    """How often the most repeated word n-gram occurs, over `_LOOP_NGRAMS` sizes.
-
-    Returns the plain count rather than a rate: a loop is three or more occurrences
-    whether the clip is 30 s or 70 s, while a rate would shrink as the clip grows and
-    hide exactly the long derailments that matter most.
-    """
-    best = 0
-    for n in _LOOP_NGRAMS:
-        if len(tokens) < n:
-            break
-        counts = Counter(tuple(tokens[i:i + n]) for i in range(len(tokens) - n + 1))
-        best = max(best, counts.most_common(1)[0][1])
-    return best
-
-
-def _added_clause_repeat(reference: list[str],
-                         hypothesis: list[str]) -> tuple[int, str] | None:
-    """The long clause the hypothesis repeats beyond the label's own repetitiveness.
-
-    A clause is only a loop relative to its label, so the test is per n-gram size: the
-    hypothesis's most repeated span of that size must occur at least
-    `_LOOP_LONG_MIN_COUNT` times AND strictly more often than ANY span of that size
-    occurs in the label. The label's own maximum is the baseline rather than its count
-    of that same clause, and the difference is not academic: when a label repeats a
-    clause and the take misreads a word the same way in both copies, the misread clause
-    is a span the label never contains, so a same-clause comparison would call that a
-    loop (it did; see `tests/test_qc_cpu_stt.py`). The baseline form cannot, since the
-    take says it no more often than the label says its own.
-
-    What that costs: a take that loops clause B twice inside a label that legitimately
-    repeats clause A twice is missed. Accepted knowingly, because labels that repeat a
-    6+ word clause at all are 6 of 2295 rows measured (0.26%), and a wrong `loop` on a
-    dosage list would be the more misleading error of the two.
-
-    Parameters
-    ----------
-    reference
-        Normalized label tokens, as `normalize_for_scoring().split()` returns them.
-    hypothesis
-        Normalized transcript tokens.
-
-    Returns
-    -------
-    tuple of (int, str) or None
-        Occurrences in the hypothesis and the clause itself, for the clause with the
-        most occurrences beyond the label's own count; None when nothing qualifies.
-
-    Examples
-    --------
-    >>> label = "la patiente recoit 2 grammes par jours pendant 10 jours".split()
-    >>> _added_clause_repeat(label, label + label[2:])[0]
-    2
-    >>> _added_clause_repeat(label, label) is None     # said once, heard once
-    True
-    >>> _added_clause_repeat(label + label, label + label) is None   # label repeats too
-    True
-    """
-    best: tuple[int, str] | None = None
-    for n in _LOOP_LONG_NGRAMS:
-        if len(hypothesis) < n:
-            break
-        ref_counts = Counter(tuple(reference[i:i + n])
-                             for i in range(len(reference) - n + 1))
-        floor = max(_LOOP_LONG_MIN_COUNT - 1, max(ref_counts.values(), default=0))
-        for gram, count in Counter(tuple(hypothesis[i:i + n])
-                                   for i in range(len(hypothesis) - n + 1)).items():
-            if count > floor and (best is None or count > best[0]):
-                best = (count, " ".join(gram))
-    return best
 
 
 def is_sampled(stem: str, *, percent: float, salt: str = QC_SAMPLE_SALT) -> bool:
