@@ -75,6 +75,7 @@ import re
 import sys
 import time
 import unicodedata
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import NamedTuple
@@ -778,6 +779,128 @@ def window_metrics(reference: str, hypothesis: str) -> tuple[float | None, int |
     """
     score = window_score(reference, hypothesis)
     return score.window_cer, score.bad_run_chars
+
+
+#: Width, in words, of the window the repeat detector slides over a transcript. Measured
+#: choice (2026-10-25), not a guess: the acoustic scan records the length of the stretch
+#: it found repeated, whose median over its own flags is 1.76 s, and this corpus is read
+#: at a median 2.23 words/s, so the typical repeated stretch is about 4 words. Agreement
+#: with that independent detector over 19.1k clips, firing at `repeat_excess > 0`:
+#:
+#:     n=2   838 fires   54.4% precision   29.1% recall
+#:     n=3   583 fires   73.1% precision   27.2% recall
+#:     n=4   457 fires   81.2% precision   23.7% recall
+#:     n=6   343 fires   86.0% precision   18.8% recall
+#:     n=8   245 fires   92.7% precision   14.5% recall
+#:
+#: 4 is the knee: it is where precision stops climbing steeply (54 -> 73 -> 81, then 86
+#: and 93 for most of the remaining recall) and it is also the width the stretch length
+#: above predicts, which is the agreement that makes it a measurement rather than a fit.
+#: One word said four times is below the window and stays below it on purpose: see the
+#: stutter case in `tests/test_qc_cpu_stt.py` for what an arm for it was worth. Recall is low at every width, and that is the acoustic flag's problem
+#: rather than this metric's: 55.7% of the clips it flags and this one does not have a
+#: reference that itself repeats a 4-gram, against 5.3% of unflagged clips. Those are
+#: clips whose TEXT says a phrase twice, so their audio is honestly self-similar; the
+#: scan compares a waveform against itself and cannot tell that apart from a stutter.
+REPEAT_NGRAM_WORDS = 4
+
+#: One excess window is enough to redraw a clip: a correct take repeats nothing its label
+#: does not, and the measured precision at this threshold is 81%.
+DEFAULT_REPEAT_GATE = 1
+
+
+def _repeat_baseline(reference: list[str], n: int) -> tuple[Counter, list[dict]]:
+    """How often the label writes each n-word window, verbatim and within one word.
+
+    Returns the exact counts, plus one index per word position mapping a window with
+    that position blanked to the highest count any label window matching it reaches. A
+    hypothesis window is then compared against the best of its `n` blanked forms, which
+    is a one-word-tolerant lookup in O(n) rather than a scan of the label.
+    """
+    exact = Counter(tuple(reference[i:i + n]) for i in range(len(reference) - n + 1))
+    near: list[dict] = [{} for _ in range(n)]
+    for window, count in exact.items():
+        for i in range(n):
+            blanked = window[:i] + (None,) + window[i + 1:]
+            if count > near[i].get(blanked, 0):
+                near[i][blanked] = count
+    return exact, near
+
+
+def repeat_excess(reference: str, hypothesis: str, n: int = REPEAT_NGRAM_WORDS) -> int:
+    """How many n-word windows the hypothesis says more often than the reference does.
+
+    The one defect no gate above can see. Whisper's decoder suppresses repeated n-grams,
+    so a clip that stutters a phrase four times comes back as a clean transcript and
+    scores pristine on all four of them: measured over 211 acoustically-flagged clips,
+    Whisper's transcript ran 0.968x the reference length at CER 0.017, while Parakeet
+    (CTC, no language model, no anti-repeat) transcribed the repeats verbatim and scored
+    0.180. So this metric only means anything on a transcript from a recognizer that does
+    not deduplicate, and it is the reason to run a second one at all.
+
+    Counting *excess* repeats rather than repeats is what makes it usable here, where the
+    labels themselves repeat constantly ("1 comprime matin midi et soir", once per drug in
+    a discharge summary). A window may be read as many times as its label writes it, so a
+    phrase the label says three times has to be read a fourth time to count.
+
+    It replaces rather than supplements a CER reading from the same transcript: Parakeet's
+    CER is not gradeable on this corpus (its errors are dominated by French medical
+    mishearings, `eliquis` -> `helichis`, and mid-sentence English language-id flips,
+    `le signataire est le docteur` -> `le signateur and le doctor`, neither of which is
+    the TTS's fault), and no looser ceiling separates those from real damage, because they
+    score HIGHER than it does: a confirmed loop sat at CER 0.197 while an innocent
+    `renaud` -> `renault` sat at 0.321. Scoring phonemes instead of letters does not help
+    either (median relative change -1.1% after both sides go through espeak's French G2P),
+    because a mishearing is not a homophone. A repeat is structural and survives both.
+
+    Parameters
+    ----------
+    reference : str
+        The label text, unnormalized (normalized here, like every other metric).
+    hypothesis : str
+        The STT transcript, unnormalized, from a recognizer that does not collapse
+        repeats.
+    n : int
+        Window width in words. See `REPEAT_NGRAM_WORDS`.
+
+    Returns
+    -------
+    int
+        0 when the hypothesis repeats nothing its reference does not, otherwise the count
+        of excess windows, which grows with how long the clip looped.
+    """
+    ref = normalize_for_scoring(reference).split()
+    hyp = normalize_for_scoring(hypothesis).split()
+    if len(hyp) < n:
+        return 0
+    exact, near = _repeat_baseline(ref, n)
+    hyp_counts = Counter(tuple(hyp[i:i + n]) for i in range(len(hyp) - n + 1))
+    total = 0
+    for window, count in hyp_counts.items():
+        allowed = exact.get(window, 0)
+        if allowed < count:
+            # Not written that often verbatim. Before calling it a loop, ask whether the
+            # label writes a window that differs by ONE word that often, because that is
+            # what a misheard clause looks like: a label that says "recoit 2 grammes par
+            # jours" twice, read by a voice the recognizer mishears as "recevait" BOTH
+            # times, yields a window the label never contains, repeated twice. Comparing
+            # windows verbatim calls that a loop; it is a mishearing of honestly repeated
+            # text, and the repo's earlier rule used the label's maximum repeat count as
+            # the baseline precisely to avoid it (`tests/test_qc_cpu_stt.py` pins the
+            # case). That blanket baseline also forgave a real loop sitting inside a
+            # repetitive label, which at n=4 is 10.2% of this corpus's clips, so the
+            # baseline is matched per window instead, within one word.
+            for i in range(n):
+                allowed = max(allowed, near[i].get(window[:i] + (None,) + window[i + 1:], 0))
+                if allowed >= count:
+                    break
+        # A window may be read as often as the label writes it, and a window the label
+        # does not write at all may be read once (an ordinary mishearing). Anything
+        # beyond is a reading nobody asked for. Note `max(allowed, 1)` rather than a flat
+        # extra forgiveness: a phrase written once and read twice IS the commonest loop
+        # shape, and a `- 1` term would wave exactly that one through.
+        total += max(0, count - max(allowed, 1))
+    return total
 
 
 def duration_of(rec: dict) -> float:
