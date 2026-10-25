@@ -127,8 +127,8 @@ def make_fixture(tmp: Path, *, mode: str = "row", voices=va.VOICES_FR_V2,
 
 
 def make_cfg(mod, mode: str, audio_root: Path, *, voice_swap: bool = True,
-             term_voices: dict | None = None):
-    cfg = harness.make_cfg(mode, audio_root)
+             term_voices: dict | None = None, retry_improved: bool = False):
+    cfg = harness.make_cfg(mode, audio_root, retry_improved=retry_improved)
     # The shipped default (driver.sh's MIN_IMPROVEMENT), not the harness's 0.0: at 0.0 a
     # draw that merely TIES the original counts as an improvement, so a clip could never
     # exhaust and there would be nothing here to swap.
@@ -275,6 +275,72 @@ def test_the_whole_ladder(mod):
               str(harness.count_pending_rows(row)))
 
 
+def test_a_win_keeps_the_ladder_rung(mod):
+    """A clean win must keep the rungs the clip has already burned.
+
+    `_apply_improvement` used to write the winning marker as a literal dict, which
+    dropped CARRIED_FIELDS. Nothing reads `voice_tier` while the clip stays improved,
+    which is what kept it quiet, but a win is not the end of the clip's story:
+    --retry-improved and a later round's re-score both REOPEN one. A reopened winner
+    with no `voice_tier` restarts the ladder at rung 0, so `swap_voice_for` hands it a
+    voice from the rung it has already spent five draws failing at, and the SWAP log
+    line misreports the rung. 1,320 wins were reopened that way on 2026-10-24.
+    """
+    print("\na win keeps the rungs it burned")
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        audio, row = make_fixture(tmp)
+        rung1 = va.ladder_voice(STEM, 0, roster=va.VOICES_FR_V2, tried=("fr_female",))
+        calls: list[tuple[str | None, int]] = []
+        install_fakes(mod, rung1, calls)   # only the rung-1 voice reads it well
+        improved: dict = {}
+
+        # stt (flag) -> tts (own voice) -> stt (exhausts it, swaps) -> tts -> stt (wins).
+        for mode in ("stt", "tts", "stt", "tts", "stt"):
+            cfg = make_cfg(mod, mode, audio)
+            run(mod, cfg, row, improved, audio)
+        imp = row["improvement"]
+        check("the swapped draw is promoted", imp["status"] == "improved",
+              json.dumps(imp))
+        check("and the win records the rung it was won at",
+              imp.get("voice_tier") == 1 and imp.get("swap_voice") == rung1,
+              json.dumps(imp))
+
+        # Now reopen it the way the 2026-10-24 migration reopened 1,320 wins: --rescore
+        # (a scoring-rule change made every stored number stale) plus --retry-improved
+        # (a resolved row is settled otherwise). Standing in for "promoted under looser
+        # rules", the stored reading is staled to one that no longer clears the gates,
+        # which is the state an older run left on disk. Nothing reads well any more
+        # either, so the reopened clip has to escalate rather than win again.
+        entry = row["transcriptions"]["default"]
+        entry["text"] = BAD
+        for field in ("cer", "cer_tail", "cer_window", "bad_run_chars"):
+            entry.pop(field, None)
+        install_fakes(mod, None, calls)
+        cfg = make_cfg(mod, "stt", audio, retry_improved=True)
+        cfg.rescore = True
+        check("--rescore --retry-improved reopens the win",
+              run(mod, cfg, row, improved, audio) is True)
+        check("the reopened row is back in the tts queue at the rung it reached",
+              row["improvement"]["status"] == "pending_tts"
+              and row["improvement"].get("voice_tier") == 1,
+              json.dumps(row["improvement"]))
+
+        calls.clear()
+        for mode in ("tts", "stt"):
+            cfg = make_cfg(mod, mode, audio)
+            run(mod, cfg, row, improved, audio)
+        imp = row["improvement"]
+        check("the redraw stays on the voice that won, not the one that failed",
+              {v for v, _ in calls} == {rung1}, str(calls))
+        check("the ladder resumes at the next rung instead of restarting",
+              imp.get("voice_tier") == 2, json.dumps(imp))
+        check("so the clip gets a rung-2 voice, not the rung-1 one it never tried",
+              imp.get("swap_voice") in va.VOICE_LADDER_FR_V2[1]
+              and imp.get("swap_voice") not in va.VOICE_LADDER_FR_V2[0],
+              str(imp.get("swap_voice")))
+
+
 def test_a_document_shares_its_new_reader(mod):
     """`group` mode swaps now, but one new reader for the whole document.
 
@@ -415,6 +481,7 @@ if __name__ == "__main__":
     module = harness.load_module()
     test_full_alternation(module)
     test_the_whole_ladder(module)
+    test_a_win_keeps_the_ladder_rung(module)
     test_a_document_shares_its_new_reader(module)
     test_what_never_swaps(module)
     test_term_voices_are_harvested(module)

@@ -1767,8 +1767,15 @@ def _apply_improvement(
             f"({_fmt_scores(new)}), so it goes back for another round of draws"
         )
     else:
+        # set_improvement, not a literal, for the same reason as the branch above: a win
+        # is not the end of the clip's story either, because --retry-improved and a later
+        # round's re-score both reopen it. A reopened winner that has lost `voice_tier`
+        # restarts the ladder at rung 0, so `swap_voice_for` hands it a voice it has
+        # already failed five draws at and the SWAP log line misreports the rung. The
+        # swap itself is consummated in `row["voice"]` just above either way, so carrying
+        # the marker costs nothing and only records which rungs are spent.
         status = "improved"
-        row["improvement"] = {"status": status, **scores_to_state(result["scores"]), **won}
+        set_improvement(row, status, result["scores"], **won)
 
     now = time.time()
     now_iso = datetime.now(timezone.utc).isoformat()
