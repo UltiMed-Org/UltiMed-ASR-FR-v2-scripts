@@ -41,7 +41,10 @@ This file was written by Claude Code.
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -170,6 +173,53 @@ def test_features_are_unit_norm_and_level_is_reported() -> None:
     # Silence is quieter than babble by far more than the voiced floor.
     _, quiet_db = ac.frame_features(np.zeros(20 * CHUNK, dtype=np.float32), SAMPLE_RATE)
     assert quiet_db.max() < level_db.max() - ac.VOICED_FLOOR_DB
+
+
+def test_a_replaced_clip_is_scored_again() -> None:
+    """A row whose clip has been rewritten since must not count as already scored.
+
+    This is the bug that made 9,829 of the 2026-10-21 scan's 22,710 `looped` flags
+    describe audio that no longer existed: a repair round regenerates a clip while
+    keeping its stem, the resume set matched on the stem alone, and the clip kept its
+    pre-redraw verdict forever. It is silent by nature, since a stale row looks exactly
+    like a fresh one, so it earns a test rather than a comment.
+
+    Four clips, one per case: scored after its last write (keep), rewritten since
+    (rescan), a legacy row carrying no `mtime` at all and so judged against the
+    sidecar's own mtime (rescan, the clip being newer than the file holding the row),
+    and a stem whose clip is gone (keep, there is nothing left to score).
+    """
+    mod = _load(ROOT / "05_generate_audio/04_qc_acoustic_loops.py", "qc_acoustic_loops")
+    with tempfile.TemporaryDirectory() as d:
+        audio = Path(d)
+        now = 1_700_000_000.0
+        rows = []
+        for stem, clip_mtime, recorded in (
+            ("fresh",    now - 600.0, now - 300.0),  # scored after its last write
+            ("redrawn",  now + 600.0, now - 300.0),  # rewritten after it was scored
+            ("legacy",   now + 600.0, None),         # no mtime field: fall back
+            ("vanished", None,        now - 300.0),  # clip deleted since
+        ):
+            row = {"stem": stem, "stage": "01_dictionnary", "looped": True}
+            if recorded is not None:
+                row["mtime"] = recorded
+            rows.append(json.dumps(row))
+            if clip_mtime is not None:
+                clip = audio / f"{stem}.flac"
+                clip.write_bytes(b"not really a flac, never read by this function")
+                os.utime(clip, (clip_mtime, clip_mtime))
+        sidecar = audio / "qc_acoustic_sidecar.jsonl"
+        sidecar.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        # The fallback for a legacy row is the sidecar's OWN mtime, so it has to be set
+        # explicitly here rather than left as "whenever this test happened to run".
+        os.utime(sidecar, (now, now))
+        done = mod._rows_already_scored(sidecar, audio)
+
+    assert "fresh" in done, "a clip older than its row must not be scored twice"
+    assert "redrawn" not in done, "a clip rewritten since its row must be scored again"
+    assert "legacy" not in done, \
+        "a pre-mtime row must be judged against the sidecar's own mtime"
+    assert "vanished" in done, "a deleted clip has nothing left to score"
 
 
 def main() -> None:

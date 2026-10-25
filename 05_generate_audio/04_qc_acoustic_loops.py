@@ -173,6 +173,11 @@ from progress import bar_safe_sink, resumed_bar  # noqa: E402
 from voice_assignment import voice_for_row  # noqa: E402
 
 #: Where the per-clip acoustic rows land: beside the audio and the STT sidecar, one
+#: Seconds a clip may be newer than its row before the row is called stale. Covers the
+#: sub-second gap between statting a clip and writing its row, and filesystem mtime
+#: granularity on a copy; a real redraw is minutes or days newer, never one second.
+_MTIME_SLACK = 2.0
+
 #: JSON line per clip, append-only so a killed run resumes from what is already there.
 ACOUSTIC_FILENAME = "qc_acoustic_sidecar.jsonl"
 
@@ -437,7 +442,7 @@ def loop_score(samples: np.ndarray, sample_rate: int, *,
 
 
 def score_path(path: Path) -> tuple[str, LoopScore | None, float, str | None]:
-    """Score one clip file. Returns `(stem, score, duration_seconds, error)`.
+    """Score one clip. Returns `(stem, score, duration_seconds, clip_mtime, error)`.
 
     Errors are returned rather than raised because this runs in a process pool over a
     directory that the generator is still writing to: a clip can vanish or be half
@@ -445,23 +450,42 @@ def score_path(path: Path) -> tuple[str, LoopScore | None, float, str | None]:
     the run.
     """
     stem = path.name[: -len(path.suffix)]
+    # Stat BEFORE the read, not after: a redraw round can replace this clip while the
+    # pool is scoring it, and an mtime taken afterwards would describe audio this row
+    # never heard, which is exactly the staleness the row is meant to let a later run
+    # detect. 0.0 on failure makes the row look infinitely old, so it is rescanned.
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
     try:
         samples, sample_rate = sf.read(str(path), dtype="float32", always_2d=False)
     except Exception as exc:                                        # noqa: BLE001
-        return stem, None, 0.0, str(exc)
+        return stem, None, 0.0, mtime, str(exc)
     duration = len(samples) / float(sample_rate or 1)
-    return stem, loop_score(samples, int(sample_rate)), duration, None
+    return stem, loop_score(samples, int(sample_rate)), duration, mtime, None
 
 
-def _rows_already_scored(path: Path) -> set[str]:
-    """Stems the sidecar already holds, so a restart is a resume.
+def _rows_already_scored(path: Path, audio_dir: Path) -> set[str]:
+    """Stems whose sidecar row still describes the clip on disk, so a restart is a resume.
 
     A torn final line (the run was killed mid-write) is skipped, same as everywhere else
     in this repo's sidecar readers, so that clip is simply scored again.
+
+    A row is also treated as absent when its clip has been REWRITTEN since it was
+    scored. That case is not hypothetical: a repair round regenerates a clip while
+    keeping its stem, so without this the clip keeps its pre-redraw verdict forever and
+    the scan reports on audio that no longer exists. It went unnoticed once already
+    (2026-10-21's scan against the T3 redraws: 9,829 of 22,710 `looped` flags described
+    replaced audio), and it is silent by nature, because a stale row looks exactly like
+    a fresh one. Rows carry the clip's mtime for the comparison; rows written before
+    that field existed fall back to the sidecar's own mtime, the latest moment they
+    could have been written, which is why that is read BEFORE this run appends to it.
     """
     seen: set[str] = set()
     if not path.is_file():
         return seen
+    legacy_scored_at = path.stat().st_mtime
     for line in path.read_text().splitlines():
         line = line.strip()
         if not line:
@@ -471,8 +495,19 @@ def _rows_already_scored(path: Path) -> set[str]:
         except json.JSONDecodeError:
             continue
         stem = row.get("stem")
-        if stem:
-            seen.add(stem)
+        if not stem:
+            continue
+        try:
+            clip_mtime = (audio_dir / f"{stem}.flac").stat().st_mtime
+        except OSError:
+            seen.add(stem)          # clip gone: nothing left to rescore
+            continue
+        scored_at = row.get("mtime")
+        if not isinstance(scored_at, (int, float)):
+            scored_at = legacy_scored_at
+        if clip_mtime > scored_at + _MTIME_SLACK:
+            continue                # audio replaced since: score it again
+        seen.add(stem)
     return seen
 
 
@@ -542,7 +577,7 @@ def scan_stage(watch, *, gate: float, workers: int, limit: int,
                out_name: str, log_every: int) -> tuple[int, int]:
     """Score every unscored clip of one stage. Returns `(scored, flagged)`."""
     out_path = watch.audio / out_name
-    done = _rows_already_scored(out_path)
+    done = _rows_already_scored(out_path, watch.audio)
     try:
         names = sorted(n for n in os.listdir(watch.audio) if parse_clip_name(n))
     except OSError as exc:
@@ -565,7 +600,8 @@ def scan_stage(watch, *, gate: float, workers: int, limit: int,
     with out_path.open("a") as sink, ProcessPoolExecutor(max_workers=workers) as pool, \
          resumed_bar(total=len(done) + len(todo), remaining=len(todo),
                      desc=f"{watch.name} loops", smoothing=0.02) as bar:
-        for stem, score, duration, error in pool.map(score_path, todo, chunksize=8):
+        for stem, score, duration, mtime, error in pool.map(score_path, todo,
+                                                           chunksize=8):
             bar.update(1)
             if error is not None or score is None:
                 logger.warning("{}: unreadable ({}), not scored", stem, error)
@@ -586,6 +622,9 @@ def scan_stage(watch, *, gate: float, workers: int, limit: int,
                 "start_s": round(score.start_seconds, 2),
                 "label_rep_s": round(label_rep, 2),
                 "looped": bool(looped),
+                # The clip this verdict actually describes, so a later run can tell that
+                # a redraw has replaced it. See `_rows_already_scored`.
+                "mtime": round(mtime, 3),
             }, ensure_ascii=False) + "\n")
             if looped:
                 sink.flush()                 # a flag is worth having on disk right away
