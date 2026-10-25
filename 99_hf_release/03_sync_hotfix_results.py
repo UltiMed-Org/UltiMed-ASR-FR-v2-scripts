@@ -124,11 +124,51 @@ def running_passes() -> list[int]:
     return sorted(pids)
 
 
+def merge_hotfix(prior: dict, fresh: dict) -> dict:
+    """One clip described by two of `HOTFIX_SOURCES`, merged rather than overwritten.
+
+    The PARROT clips sit in both sources: the root run reads them through
+    `data/NeMO_files/PARROT/<clip>` and the PARROT-only run through its own manifest, so
+    the two resolve to the SAME absolute path and collide in the index. The later source
+    used to win outright, and it is the one that knows less: its state file dropped the
+    stored state of 908 of its 1548 rows when their text changed (the pass logs "manifest
+    rebuilt?" and starts those clips over), so 126 clips whose audio the root run had
+    regenerated shipped as `regenerated: false` / `qc_status: "original"`. Their CER
+    columns were right, which is exactly what kept it quiet: the numbers described the
+    improved audio while the provenance denied the improvement had happened.
+
+    The rule, field by field:
+
+    * measurements (duration, cer, stt_transcript, voice, cfg_alpha, ...) take the later
+      source's value when it HAS one, since that source read the audio now on disk, and
+      fall back to the earlier source's when it is null;
+    * ``regenerated`` is the OR of the two: the audio was replaced if either run replaced
+      it, and neither run can un-replace it;
+    * ``qc_status`` takes the later source's only when that source carries a marker at
+      all. A pass never DROPS a marker on a clip it re-scores clean, so an absent marker
+      here means "this source knows nothing about the clip's history", not "this clip was
+      never flagged". A marker that IS there is the fresher judgement and wins, which is
+      what lets a clip the root run improved be labelled `exhausted` if a later run
+      re-judged the shipped draw and no redraw could save it.
+    """
+    merged = dict(prior)
+    for key, value in fresh.items():
+        if value is not None:
+            merged[key] = value
+    merged["regenerated"] = bool(prior.get("regenerated")) or bool(fresh.get("regenerated"))
+    if fresh["qc_status"] == "original" and prior["qc_status"] != "original":
+        merged["qc_status"] = prior["qc_status"]
+    return merged
+
+
 def load_hotfix(root: Path, stt_model: str, stt_key: str = STT_KEY) -> dict[str, dict]:
     """Everything stage 06 knows, keyed by absolute audio path.
 
     ``stt_key`` selects WHICH judge's reading to carry over when a row holds several;
     ``stt_model`` is only the name written into the manifest.
+
+    A clip described by more than one source goes through `merge_hotfix` instead of
+    being overwritten by whichever source happens to be read last.
     """
     index: dict[str, dict] = {}
     for rel_source, rel_base in HOTFIX_SOURCES:
@@ -137,7 +177,7 @@ def load_hotfix(root: Path, stt_model: str, stt_key: str = STT_KEY) -> dict[str,
             logger.warning(f"{source} not found, skipping (was that dataset never run?)")
             continue
         base = root / rel_base
-        n = pending = read = 0
+        n = pending = read = overlap = 0
         seen_keys: set[str] = set()
         for row in read_jsonl(source):
             all_readings = row.get("transcriptions") or {}
@@ -146,7 +186,7 @@ def load_hotfix(root: Path, stt_model: str, stt_key: str = STT_KEY) -> dict[str,
             read += bool(reading)
             imp = row.get("improvement") or {}
             status = imp.get("status")
-            index[resolve_audio(base, row["audio_filepath"])] = {
+            entry = {
                 "duration": row.get("duration"),
                 "cer": reading.get("cer"),
                 "cer_tail": reading.get("cer_tail"),
@@ -160,11 +200,21 @@ def load_hotfix(root: Path, stt_model: str, stt_key: str = STT_KEY) -> dict[str,
                 # is on disk right now, which is the original, so it ships as one.
                 "qc_status": status if status in ("improved", "exhausted") else "original",
             }
+            key = resolve_audio(base, row["audio_filepath"])
+            prior = index.get(key)
+            index[key] = entry if prior is None else merge_hotfix(prior, entry)
+            overlap += prior is not None
             n += 1
             if status in ("pending_tts", "pending_stt"):
                 pending += 1
         logger.info(f"{source.name}: {n} scored rows, {read} with a reading under "
                     f"'{stt_key}' (base {rel_base})")
+        if overlap:
+            # Not a warning: the overlap is by design (the root set covers every clip,
+            # the per-dataset sets re-run a subset), and `merge_hotfix` is what keeps the
+            # one that knows less from erasing the one that knows more.
+            logger.info(f"{source.name}: {overlap} clip(s) were already described by an "
+                        f"earlier source and were merged, not overwritten")
         if n and not read:
             # Every QC column would be written as null, which reads exactly like "this
             # clip was never judged". Say so instead, and name the keys that ARE there.
