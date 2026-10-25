@@ -492,7 +492,8 @@ def is_sampled(stem: str, *, percent: float, salt: str = QC_SAMPLE_SALT) -> bool
     return int.from_bytes(digest, "big") % SAMPLE_RESOLUTION < cut
 
 
-def load_cpu_model(model_dir: Path, *, quantization: str, threads: int):
+def load_cpu_model(model_dir: Path, *, quantization: str, threads: int,
+                   providers: tuple[str, ...] = ()):
     """Load an onnx-asr Parakeet model from a LOCAL per-precision export directory.
 
     Parameters
@@ -505,6 +506,10 @@ def load_cpu_model(model_dir: Path, *, quantization: str, threads: int):
         onnxruntime intra-op threads. Pinned deliberately: left alone, onnxruntime
         takes every core and starves the process feeding the GPU, which is the one
         thing this script must not do.
+    providers
+        onnxruntime execution providers, empty for onnxruntime's own default (CPU on
+        the wheel this script pins). See the `--providers` option for when the GPU is
+        worth it and what else has to be installed for it to exist.
 
     Notes
     -----
@@ -533,9 +538,11 @@ def load_cpu_model(model_dir: Path, *, quantization: str, threads: int):
     model_type._get_model_files = staticmethod(
         lambda quantization=None: {k: relocate(v)
                                    for k, v in original(quantization).items()})
+    extra = {"providers": list(providers)} if providers else {}
     try:
         return onnx_asr.load_model(name, path=str(model_dir),
-                                   quantization=quantization, sess_options=opts)
+                                   quantization=quantization, sess_options=opts,
+                                   **extra)
     finally:
         model_type._get_model_files = staticmethod(original)
 
@@ -1210,7 +1217,19 @@ def worker_loop(model, ctx: Context) -> None:
                    "impartial judge: see the module docstring.")
 @click.option("--quantization", default="int8", show_default=True,
               help="Precision subfolder of the export to load. int8 is the one "
-                   "measured on this host; fp16 is ~2x slower on CPU.")
+                   "measured on this host; fp16 is ~2x slower on CPU, and the one to "
+                   "pick with --providers CUDAExecutionProvider.")
+@click.option("--providers", "providers_csv", default="", show_default=False,
+              help="Comma-separated onnxruntime execution providers, e.g. "
+                   "CUDAExecutionProvider. Empty (the default) leaves onnxruntime on "
+                   "the CPU, which is what this script is named for and what lets it "
+                   "run beside a GPU job. The GPU is worth it for a whole-corpus pass: "
+                   "one needs ~230 h of CPU. NOTE the wheel pinned above is CPU-only, "
+                   "so a CUDA run needs `uv run --with onnxruntime-gpu ./03_qc_cpu_stt.py "
+                   "--providers CUDAExecutionProvider --quantization fp16 ...`. A "
+                   "provider onnxruntime does not have is a hard error here rather than "
+                   "a silent fall back to the CPU, since the difference is 100x and a "
+                   "pass that quietly took the slow path would look like a hung run.")
 @click.option("--sample-percent", default=5.0, show_default=True,
               help="Percent of clips to check beyond the retried ones. The draw is a "
                    "hash of the clip stem, so it is identical across restarts. 0 "
@@ -1284,7 +1303,7 @@ def worker_loop(model, ctx: Context) -> None:
 @click.option("--log-file", default="qc_cpu_stt.log", show_default=True,
               help="Append the log here as well as to stderr; empty string disables. "
                    "A bare filename lands beside this script.")
-def main(stages: tuple[str, ...], model_dir: Path, quantization: str,
+def main(stages: tuple[str, ...], model_dir: Path, quantization: str, providers_csv: str,
          sample_percent: float, do_retries: bool, threads: int, workers: int,
          nice_level: int, poll_seconds: float, max_queue: int, cer_threshold: float,
          tail_cer_threshold: float, window_cer_threshold: float,
@@ -1370,11 +1389,21 @@ def main(stages: tuple[str, ...], model_dir: Path, quantization: str,
         # never polled, so a list of already-generated clips would quietly check nothing.
         logger.warning("--stems-from given {} stem(s) but not --backfill: only clips "
                        "generated from now on can match", requested)
-    logger.info("loading {} ({}) with {} thread(s) x {} worker(s)...",
-                model_dir.name, quantization, threads, workers)
+    providers = tuple(x.strip() for x in providers_csv.split(",") if x.strip())
+    if providers:
+        import onnxruntime as ort
+        missing = [x for x in providers if x not in ort.get_available_providers()]
+        if missing:
+            raise click.BadParameter(
+                f"--providers: onnxruntime {ort.__version__} has no {', '.join(missing)} "
+                f"(it offers {', '.join(ort.get_available_providers())}). Install the "
+                f"GPU wheel: uv run --with onnxruntime-gpu ...")
+    logger.info("loading {} ({}) with {} thread(s) x {} worker(s) on {}...",
+                model_dir.name, quantization, threads, workers,
+                ", ".join(providers) if providers else "the onnxruntime default (CPU)")
     t0 = time.monotonic()
     model = load_cpu_model(model_dir.resolve(), quantization=quantization,
-                           threads=threads)
+                           threads=threads, providers=providers)
     logger.info("model loaded in {:.1f}s; sample {}%, retries {}, gates {} / {} (tail) "
                 "/ {} (window) / {} chars (missing run)",
                 time.monotonic() - t0, sample_percent,
