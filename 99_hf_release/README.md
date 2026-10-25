@@ -682,6 +682,7 @@ own paper. Readers reach the paper through the PARHAF dataset page linked below.
 - [Corentin Sautier](https://csautier.github.io/), PhD (Hugging Face [@csautier](https://huggingface.co/csautier)).
 - [Adrien Parrot](https://www.linkedin.com/in/adrien-parrot-doc/), MD, at [InterHop](https://interhop.org).
 - [Bastien Leguellec](https://bleguellec.org/), MD and currently pursuing a PhD.
+- [Zagitta/gpu-unlock](https://github.com/Zagitta/gpu-unlock), which substantially improved my GPU performance.
 
 ## Contact
 

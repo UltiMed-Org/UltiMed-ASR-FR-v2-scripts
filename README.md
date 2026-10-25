@@ -274,4 +274,6 @@ Full detail, in the form that ships with the dataset, is in [`99_hf_release/NOTI
 
 Built by Olivier Cornelis. The code, the prompts and the documentation in this repository were written with **[Claude Code](https://claude.com/claude-code)**, with some earlier passes in [aider](https://aider.chat/); the individual file docstrings note which where it matters.
 
+Thanks to [Zagitta/gpu-unlock](https://github.com/Zagitta/gpu-unlock), which substantially improved my GPU performance.
+
 Repository: <https://github.com/thiswillbeyourgithub/UltiMed-ASR-FR-v1-scripts>
