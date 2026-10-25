@@ -196,7 +196,13 @@ Each is one commit. Order is dependency order. All eight items are done. Items 7
    older spelling. Note the key is also the resume key: changing it makes readings stored
    under the old one invisible, which on a 602k-clip corpus means re-transcribing. For v2
    that is moot (new audio, nothing to reuse), but it is the reason to decide the judge's
-   name once and leave it alone. And `03_sync_hotfix_results.py` gained `--stt-key`, which the driver
+   name once and leave it alone. A second trap on the same variable surfaced when T2 was
+   actually launched on 2026-10-25: `.env` is sourced with `set -a` BEFORE the
+   `${VAR:-default}` lines, so its `STT_MODEL=...-turbo` pin beat the launch line and the
+   run announced the turbo judge while being told to use large-v3. The driver now hands
+   the launch line its value back after sourcing (the WDOC_WHISPER_* names and the
+   credentials stay .env-wins, since for those an inherited value is pollution rather
+   than intent), and says which knob the launch line took back. And `03_sync_hotfix_results.py` gained `--stt-key`, which the driver
    passes as `$STT_MODEL`: that script's `STT_KEY` default is v1's `whisper-1` alias,
    which against a v2 row matches nothing and would have written every QC column null, so
    it now also warns and lists the keys it did find.
@@ -281,9 +287,29 @@ also drives a display.
 # from 06_hotfixes/, inside the zellij run tab. Launch it whenever: it waits for stage
 # 05 to finish, stops the CPU QC itself, and runs the whole phase from there.
 sudo -E ./driver.sh                      # T1, then T3, alternating to convergence
-sudo -E MODE=stt STT_MODEL=whisper.cpp/ggml-large-v3 STEMS_FROM=flags.txt ./driver.sh  # T2
 ./01_recursive_improvement.py --report   # any time, from another tab
+
+# T2, the second opinion: non-turbo over T1's flags only, no state touched
+# (N_IMPROV=0 means transcribe-only, so no clip can be re-flagged and no provenance
+# marker can be stripped; RETRY_* only get the reopened rows past needs_work's early
+# return; SYNC_RESULTS=0 keeps the second judge's CERs out of the released manifests).
+sudo -E CRISPASR_ASR_GGML=ggml-large-v3.bin CRISPASR_STT_SCALE=4 MODE=stt N_IMPROV=0 \
+  STT_MODEL=whisper.cpp/ggml-large-v3 STEMS_FROM="$PWD/flags.txt" \
+  RETRY_IMPROVED=1 RETRY_EXHAUSTED=1 REFRESH_MANIFESTS=0 ACOUSTIC_SCAN=0 \
+  SYNC_RESULTS=0 ./driver.sh 2>&1 | tee t2_judge.log
+uv run 10_compare_judges.py              # then read the second opinion out
 ```
+
+`flags.txt` is generated, not tracked: it is the stems of every clip T1 flagged, i.e.
+`Path(row["audio_filepath"]).stem` for each row of `improved/full.stt.jsonl` and
+`improved_parrot/full.stt.jsonl` carrying an `improvement` marker (12,678 clips on
+2026-10-25). `10_compare_judges.py` then writes `second_opinion_flags.txt`, which is the
+input to a repair round: `sudo -E MODE=alternate STEMS_FROM=second_opinion_flags.txt
+./driver.sh`.
+
+Check the `driver.sh: judge ... at ...` line before walking away: it names the model AND
+the key the readings land under, and filing T2 under T1's key would overwrite 602k
+readings with no way back.
 
 ## Open TODOs
 

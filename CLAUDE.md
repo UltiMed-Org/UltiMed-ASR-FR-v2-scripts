@@ -693,6 +693,15 @@ the transcript against the label (CER), regenerate the bad clips, keep the best 
 - `02_statistics.py`: report over a scored file (CER by category, duration ceiling
   audit). `03_collect_suspicious.py`: copy every clip the gates flagged into one local
   folder with an index, so they can be listened to rather than trusted to a number.
+- `10_compare_judges.py`: reads out the second opinion. The phase scores everything with
+  `ggml-large-v3-turbo` and re-reads the flagged slice with non-turbo `ggml-large-v3`, so
+  one row carries two readings under two keys in `transcriptions`; this puts both through
+  the same four gates (imports `is_bad`) and keeps the two directions apart, since a clip
+  the better judge rejects and turbo waved through is a false negative that ships, while
+  the reverse is only a flag the better judge forgives. Writes
+  `judge_disagreements.jsonl` (both transcripts beside the source) and
+  `second_opinion_flags.txt`, a stem list the repair round takes as `STEMS_FROM`. Changes
+  no state. Tested by `tests/test_compare_judges.py`.
 
 ### `07_acronyms/` (active)
 Common medical acronyms missing from the other sources, from a Wikipedia list,

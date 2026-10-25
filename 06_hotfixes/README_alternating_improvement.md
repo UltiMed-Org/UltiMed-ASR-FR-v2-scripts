@@ -923,6 +923,35 @@ equivalent to granting full passwordless root, which is not what the file said.
 The `sudo -E ./driver.sh` flow above is one password prompt for an unattended run that
 lasts hours, and it drops back to your user for every Python pass, so use that.
 
+## The second opinion: `10_compare_judges.py`
+
+One judge cannot catch its own blind spots. So the phase scores every clip with
+`ggml-large-v3-turbo` (fast enough for 602k clips) and then re-reads only the clips that
+pass flagged with non-turbo `ggml-large-v3`, filed under its own key:
+
+```python
+row["transcriptions"]["whisper.cpp/ggml-large-v3-turbo"] = {"cer": 0.01, ...}  # T1
+row["transcriptions"]["whisper.cpp/ggml-large-v3"]       = {"cer": 0.19, ...}  # T2
+```
+
+That second pass is transcribe-only (`N_IMPROV=0`), so it cannot re-flag a clip or strip a
+provenance marker; it only adds a reading. `10_compare_judges.py` puts both readings
+through the same four gates (it imports `is_bad`, it does not re-spell it) and keeps the
+two directions of disagreement apart, because they mean opposite things:
+
+```bash
+uv run 10_compare_judges.py --dry-run --samples 20   # just look
+uv run 10_compare_judges.py                          # + write the two artefacts
+```
+
+A clip the better judge rejects while turbo waved it through is a **false negative that
+ships**, which is the entire reason for the pass. The reverse, turbo flagging what the
+better judge forgives, is cheap: that clip was redrawn for nothing. The tool writes
+`judge_disagreements.jsonl` (both transcripts beside the source text, so the call gets
+made by reading rather than by trusting a number) and `second_opinion_flags.txt`, the stem
+list of what the second judge rejects, worst CER first, which the repair round takes as
+it stands: `sudo -E MODE=alternate STEMS_FROM=second_opinion_flags.txt ./driver.sh`.
+
 ## Listening to what the numbers flagged: `03_collect_suspicious.py`
 
 Every gate here is a proxy. A high CER usually means bad audio, but it can also mean
