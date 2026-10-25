@@ -41,11 +41,18 @@ def load_stem_requests(
     invent. `on_file(path, jsonl_rows, bare_stems)` is called once per file read.
     """
     requests: StemRequests = {}
+    # (stage, stem) -> the LAST verdict seen for it. A sidecar is append-only, so a
+    # rescan of a clip leaves both its old and its new row in the file: keeping the
+    # union of everything ever flagged would mean a cleared flag never clears, and the
+    # clip would be re-confirmed on every pass forever. File order is scan order, so
+    # the last row for a stem is the current one.
+    verdicts: dict[tuple[str, str], bool] = {}
     for path in paths:
         path = Path(path)
         if not path.is_file():
             raise FileNotFoundError(f"stem list: no such file {path}")
-        rows = plain = 0
+        here: dict[tuple[str, str], bool] = {}
+        plain = 0
         for line in path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
@@ -56,15 +63,23 @@ def load_stem_requests(
                 except json.JSONDecodeError:
                     continue                 # torn final line, as everywhere else here
                 stem = row.get("stem")
-                if not stem or ("looped" in row and not row["looped"]):
+                if not stem:
                     continue
-                requests.setdefault(row.get("stage") or "", set()).add(stem)
-                rows += 1
+                # A row with no `looped` key at all counts, so a hand-filtered sidecar
+                # works: absence means "someone already chose this clip".
+                here[(row.get("stage") or "", stem)] = bool(row.get("looped", True))
             else:
                 requests.setdefault("", set()).add(line)
                 plain += 1
+        verdicts.update(here)
+        # Report what this file CONTRIBUTES, not how many lines it has, so the count
+        # still reads as "flagged row(s)" after a clip's flag has been cleared by a
+        # later row in the same file.
         if on_file is not None:
-            on_file(path, rows, plain)
+            on_file(path, sum(1 for flagged in here.values() if flagged), plain)
+    for (stage, stem), looped in verdicts.items():
+        if looped:
+            requests.setdefault(stage, set()).add(stem)
     return requests
 
 

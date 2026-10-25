@@ -50,6 +50,37 @@ def test_sidecar_contributes_only_its_flagged_rows() -> None:
                    "02_drugs": {"000003_0001_hand"}}, got
 
 
+def test_a_later_row_clears_an_earlier_flag() -> None:
+    """The newest verdict for a stem wins, because a sidecar is append-only.
+
+    Re-scoring a clip appends a row and leaves the old one in place, so taking the union
+    of everything ever flagged would mean a cleared flag never clears: the clip would be
+    handed to the expensive judge on every pass for the rest of the project, and a clip
+    the rescan newly condemns would be indistinguishable from one it cleared.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        path = write(tmp, "qc_acoustic_sidecar.jsonl", [
+            json.dumps({"stem": "000001_0001_fixed", "stage": "01_dictionnary",
+                        "looped": True}),
+            json.dumps({"stem": "000002_0001_broke", "stage": "01_dictionnary",
+                        "looped": False}),
+            # A redraw round replaced both clips and the rescan appended its verdicts:
+            # the first one came out clean, the second came back wrong.
+            json.dumps({"stem": "000001_0001_fixed", "stage": "01_dictionnary",
+                        "looped": False}),
+            json.dumps({"stem": "000002_0001_broke", "stage": "01_dictionnary",
+                        "looped": True}),
+        ])
+        got = sr.load_stem_requests([path])
+        counted: list[int] = []
+        sr.load_stem_requests([path], on_file=lambda p, rows, _: counted.append(rows))
+    assert got == {"01_dictionnary": {"000002_0001_broke"}}, got
+    # The count is what the file CONTRIBUTES, so the caller's "flagged row(s)" line
+    # stays true once a flag has been cleared by a later row.
+    assert counted == [1], counted
+
+
 def test_plain_list_applies_to_every_stage() -> None:
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
