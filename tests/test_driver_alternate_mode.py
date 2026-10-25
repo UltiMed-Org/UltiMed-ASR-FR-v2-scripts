@@ -132,7 +132,8 @@ def run_driver(tmp: Path, plan: list[int], env_extra: dict[str, str],
                qc_plan: list[str] | None = None,
                signals: list[str] | None = None,
                events: list[str] | None = None,
-               work_dir: Path | None = None) -> tuple[int, list[str], list[str], str]:
+               work_dir: Path | None = None,
+               env_file: str | None = None) -> tuple[int, list[str], list[str], str]:
     """Run driver.sh once with the passes stubbed. Returns (exit code, the --mode of
     each pass in order, the server switches in order, combined output). `record`, if
     given, also receives one [mode, niceness, retry-exhausted, retry-improved] entry per
@@ -154,6 +155,11 @@ def run_driver(tmp: Path, plan: list[int], env_extra: dict[str, str],
     # user's STT token and would override the test's env.
     driver = work / "driver.sh"
     shutil.copy(DRIVER, driver)
+    # `env_file` gives that copy an .env of its own, which is the only way to test the
+    # precedence question the real one raises: it is sourced BEFORE the
+    # `${VAR:-default}` lines that read the knobs, not after.
+    if env_file is not None:
+        (work / ".env").write_text(env_file, encoding="utf-8")
 
     pass_log, switch_log = work / "passes.log", work / "switches.log"
     # One log for the pre-/post-steps AND the process signals, so their relative order
@@ -578,6 +584,58 @@ def test_a_non_local_judge_is_refused(tmp: Path) -> None:
     print("test_a_non_local_judge_is_refused: OK")
 
 
+def test_the_launch_line_beats_the_env_file(tmp: Path) -> None:
+    """2026-10-25, and it cost a restart: T2 (the second opinion, non-turbo large-v3 over
+    the flagged slice) was launched as `sudo -E ... STT_MODEL=whisper.cpp/ggml-large-v3
+    ./driver.sh` and the driver answered `judge whisper.cpp/ggml-large-v3-turbo`, because
+    .env pins the turbo key and is sourced BEFORE the `${VAR:-default}` line that reads
+    it. Left unnoticed that pass would have filed large-v3's readings under T1's key, on
+    top of 602k turbo readings, destroying the thing the second opinion compares against.
+    So the driver's own knobs are launch-line-wins, and it says so when they differ."""
+    pin = "STT_MODEL=whisper.cpp/ggml-large-v3-turbo\n"
+    steps: list[str] = []
+    rc, modes, _switches, out = run_driver(
+        tmp, [10], {"MODE": "stt", "STT_MODEL": "whisper.cpp/ggml-large-v3",
+                    "SYNC_RESULTS": "1"}, env_file=pin, steps=steps)
+    assert rc == 0 and modes == ["stt"], f"exited {rc}, passes {modes}\n{out}"
+    assert "judge whisper.cpp/ggml-large-v3 at" in out, out
+    assert "ggml-large-v3-turbo" not in out, out
+    assert "comes from the launch line" in out, out
+    # The readings and the sync have to agree on the key, or T2 lands somewhere nothing
+    # reads it back.
+    assert "--stt-key whisper.cpp/ggml-large-v3 " in steps[-1] + " ", steps[-1]
+    assert "turbo" not in steps[-1], steps[-1]
+
+    # A bare launch keeps the .env pin: that line is what protects the judge from the
+    # inherited WDOC_WHISPER_MODEL, so it must still be the default.
+    rc, _modes, _switches, out = run_driver(
+        tmp, [10], {"MODE": "stt", "WDOC_WHISPER_MODEL": "whisper-1"}, env_file=pin)
+    assert rc == 0, f"exited {rc}\n{out}"
+    assert "judge whisper.cpp/ggml-large-v3-turbo at" in out, out
+    assert "comes from the launch line" not in out, out
+    print("test_the_launch_line_beats_the_env_file: OK")
+
+
+def test_the_env_file_still_wins_for_the_borrowed_names(tmp: Path) -> None:
+    """The mirror, and the reason the rule is not just "the environment wins": the
+    endpoint and model a shell profile exports for wdoc's own sake (70_wdoc.sh) are
+    pollution rather than intent, so .env must keep beating THOSE. Here the inherited
+    endpoint is v1's remote host, which the judge check refuses, and the .env line is the
+    local stack, so a run that proceeds proves .env won. Credentials are in the same
+    exception, and must additionally never be echoed by the loader."""
+    rc, modes, _switches, out = run_driver(
+        tmp, [10], {"MODE": "stt", "WDOC_WHISPER_ENDPOINT": "https://stt.example.invalid",
+                    "WDOC_WHISPER_MODEL": "whisper-1",
+                    "CRISPASR_API_KEY": "from-the-shell"},
+        env_file="WDOC_WHISPER_ENDPOINT=http://127.0.0.1:1\n"
+                 "WDOC_WHISPER_MODEL=whisper.cpp/ggml-large-v3-turbo\n"
+                 "CRISPASR_API_KEY=from-the-env-file\n")
+    assert rc == 0 and modes == ["stt"], f"exited {rc}, passes {modes}\n{out}"
+    assert "judge whisper.cpp/ggml-large-v3-turbo at http://127.0.0.1:1" in out, out
+    assert "from-the-env-file" not in out and "from-the-shell" not in out, out
+    print("test_the_env_file_still_wins_for_the_borrowed_names: OK")
+
+
 def test_a_stopped_run_picks_up_where_it_was(tmp: Path) -> None:
     """The phase is a day or more of work, so a relaunch must not redo the 18-minute
     manifest rebuild and the multi-hour acoustic scan before the first pass can run.
@@ -681,6 +739,8 @@ def main() -> None:
         test_wait_timeout_refuses_to_start_on_top_of_a_generator(tmp)
         test_the_gate_defaults_are_the_documented_ones(tmp)
         test_a_non_local_judge_is_refused(tmp)
+        test_the_launch_line_beats_the_env_file(tmp)
+        test_the_env_file_still_wins_for_the_borrowed_names(tmp)
         test_a_stopped_run_picks_up_where_it_was(tmp)
         test_a_dataset_that_did_not_converge_is_retried(tmp)
     print("test_driver_alternate_mode: OK")

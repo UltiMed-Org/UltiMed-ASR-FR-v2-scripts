@@ -253,10 +253,34 @@ SWITCH="${SWITCH_SERVER:-${HERE}/switch_server.sh}"
 # (switch_server.sh) inherit them too. This lets you run plain `sudo ./driver.sh`
 # without -E. .env holds a token, so it MUST be gitignored (see README).
 if [[ -f "${HERE}/.env" ]]; then
+  # Precedence: a knob you set on the launch line (`sudo -E STT_MODEL=... ./driver.sh`)
+  # has to BEAT the .env line, or the documented one-off override is silently a no-op.
+  # bash cannot tell a launch-line assignment from any other exported variable, so the
+  # exception is spelled out the other way round: the names .env BORROWS from another
+  # tool stay .env-wins, because for those the inherited value is pollution rather than
+  # intent (~/.scripts_oli/ubiquitous_scripts/shared_env/70_wdoc.sh exports
+  # WDOC_WHISPER_ENDPOINT and WDOC_WHISPER_MODEL for wdoc's own sake; see the STT_MODEL
+  # note below), as are credentials, which a stale shell export must not replace and
+  # which must never be echoed. Everything else .env assigns is only a default.
+  # This cost a sweep on 2026-10-25: `sudo -E MODE=stt STT_MODEL=whisper.cpp/ggml-large-v3`
+  # announced `judge whisper.cpp/ggml-large-v3-turbo` because .env pinned the turbo key,
+  # and the T2 second opinion would have been filed on top of T1's 602k readings.
+  declare -A _env_file_override=()
+  while IFS= read -r _name; do
+    case "${_name}" in WDOC_*|*API_KEY*|*TOKEN*) continue ;; esac
+    [[ -v ${_name} ]] && _env_file_override["${_name}"]="${!_name}"
+  done < <(sed -nE 's/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=.*$/\2/p' \
+             "${HERE}/.env")
   set -a
   # shellcheck disable=SC1091
   source "${HERE}/.env"
   set +a
+  for _name in "${!_env_file_override[@]}"; do
+    if [[ "${!_name}" != "${_env_file_override[${_name}]}" ]]; then
+      echo "driver.sh: ${_name} comes from the launch line, not from the .env line"
+    fi
+    export "${_name}=${_env_file_override[${_name}]}"
+  done
 fi
 
 # Normalise one 0/1 env flag in place. There are nine of them, hence a helper rather
@@ -312,6 +336,10 @@ STT_MODEL="${STT_MODEL:-${WDOC_WHISPER_MODEL:-whisper.cpp/ggml-large-v3-turbo}}"
 # 70_wdoc.sh exports the v1 remote endpoint and WDOC_WHISPER_MODEL=whisper-1, so two
 # launches with a clean .env still announced the remote judge. To pin the v2 judge, SET
 # the value in .env rather than removing it (an assignment beats the inherited one).
+# That holds for the WDOC_WHISPER_* names only. STT_MODEL is the driver's own knob, so
+# the .env loader above hands the launch line back its value after sourcing: a one-off
+# second opinion is `sudo -E STT_MODEL=whisper.cpp/ggml-large-v3 ... ./driver.sh` and the
+# .env pin stays where it is. Read the judge line below to confirm which one won.
 echo "driver.sh: judge ${STT_MODEL} at ${WDOC_WHISPER_ENDPOINT}" \
      "(readings stored under the key '${STT_MODEL}')"
 # A refusal, not a warning. A warning scrolls past in a pane that then prints one wait
