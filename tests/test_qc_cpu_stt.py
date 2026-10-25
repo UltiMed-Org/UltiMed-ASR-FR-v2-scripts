@@ -537,6 +537,172 @@ def test_the_loop_count_is_stored_on_clean_rows_too() -> None:
     assert make_cfg(repeat_threshold=0).repeat_threshold == 0
 
 
+def make_prep(seconds: float, *, sr: int = 24_000) -> qc.ClipInput:
+    """A ClipInput with only what the grouping reads: a waveform length and a rate."""
+    import numpy as np
+
+    return qc.ClipInput(row={}, reference="x", voice="v",
+                        wav=np.zeros(int(seconds * sr), "float32"), sr=sr,
+                        duration=seconds, t0=0.0)
+
+
+def test_batches_are_capped_by_padded_seconds_not_by_clip_count() -> None:
+    """The cap that actually binds, and the reason `--batch` can sit at 64.
+
+    What the encoder allocates for is the batch PADDED to its longest clip, so the cost
+    of a batch is clips x longest, not clips. With this corpus' p50 of 20.3 s a 600 s cap
+    is reached at ~29 clips, which is why `--batch 16` and `--batch 64` measured the same
+    rate: the seconds cap had already cut every batch. A count-only cap is what walked
+    the card to 23.4 GB and started losing batches to failed allocations.
+    """
+    # Ten 30 s clips, cap 120 s: four fit (4 x 30 = 120), a fifth would make 150.
+    groups = list(qc.batch_groups([(i, make_prep(30.0)) for i in range(10)],
+                                  batch=64, max_sec=120.0))
+    assert [len(g) for g in groups] == [4, 4, 2], [len(g) for g in groups]
+
+    # The clip count still caps, when it is the smaller of the two.
+    groups = list(qc.batch_groups([(i, make_prep(1.0)) for i in range(7)],
+                                  batch=3, max_sec=600.0))
+    assert [len(g) for g in groups] == [3, 3, 1], [len(g) for g in groups]
+
+    # One long clip takes a batch to itself rather than being dropped for exceeding the
+    # cap on its own: every clip must come back with a row.
+    groups = list(qc.batch_groups([(0, make_prep(5.0)), (1, make_prep(900.0)),
+                                   (2, make_prep(5.0))], batch=64, max_sec=600.0))
+    assert [len(g) for g in groups] == [1, 1, 1], [len(g) for g in groups]
+    assert sum(len(g) for g in groups) == 3
+
+    # A rate change splits too: `recognize()` takes ONE sample_rate for the whole batch,
+    # so a 16 kHz clip in a 24 kHz batch would be resampled as if it were 24 kHz.
+    groups = list(qc.batch_groups([(0, make_prep(1.0)), (1, make_prep(1.0)),
+                                   (2, make_prep(1.0, sr=16_000))],
+                                  batch=64, max_sec=600.0))
+    assert [len(g) for g in groups] == [2, 1], [len(g) for g in groups]
+
+
+def test_a_batch_that_cannot_allocate_is_halved_not_lost() -> None:
+    """The regression test for the first full-corpus launch, which lost 576 clips.
+
+    `batch_groups`' cap is sized from a measured peak, but onnxruntime's BFC arena never
+    returns GPU memory, so thousands of distinct padded shapes walk its high-water mark
+    up for hours: at a 900 s cap it reached 23.4 GB of a 24.6 GB card within 2500 clips
+    and the widest batches died on a single 1.47 GB conv buffer. The handler then sat
+    around the whole 192-clip sort window, so each failure charged 192 clips to `failed`
+    and left them unchecked. Halving keeps the cost at a repeated encode.
+    """
+    import numpy as np
+    import soundfile as sf
+
+    label = "la tension arterielle est a cent trente sur quatre vingt"
+
+    class ArenaBoundModel:
+        """Fails any batch wider than `width`, the way a full arena does."""
+
+        def __init__(self, width: int) -> None:
+            self.width, self.widths = width, []
+
+        def recognize(self, waveforms, sample_rate=None):
+            self.widths.append(len(waveforms))
+            if len(waveforms) > self.width:
+                raise RuntimeError("Failed to allocate memory for requested buffer "
+                                   "of size 1473806336")
+            return [label] * len(waveforms)
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        rows, jobs = [], []
+        watch = make_watch(tmp, rows=[
+            {"term_index": i, "variant_index": 1, "term": f"t{i}",
+             "source_id": "DOC1", "asr_training_source": label} for i in range(1, 5)])
+        ctx = qc.Context(make_cfg(), {"01_dictionnary": watch})
+        for i in range(1, 5):
+            stem = f"00000{i}_0001_t{i}"
+            sf.write(watch.audio / f"{stem}.flac", np.zeros(24_000, "float32"), 24_000)
+            job = qc.Job(stem=stem, stage="01_dictionnary", reason="sample",
+                         path=watch.audio / f"{stem}.flac", key=stem)
+            jobs.append((job, qc.prepare_clip(job, watch, ctx)))
+
+        model = ArenaBoundModel(width=2)
+        qc.run_group(model, jobs, ctx)
+        rows = [json.loads(line) for line in
+                (watch.audio / "qc_stt_sidecar.jsonl").read_text().splitlines()]
+
+    # Four clips in, four rows out, nothing charged to `failed`.
+    assert len(rows) == 4, rows
+    assert {r["stem"] for r in rows} == {j.stem for j, _ in jobs}
+    assert ctx.stats.failed == 0 and ctx.stats.checked == 4
+    # And the retry is a halving, not a fall back to one clip at a time.
+    assert model.widths == [4, 2, 2], model.widths
+
+    # A single clip that still fails is the clip's own problem, and is counted once.
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        watch = make_watch(tmp, rows=[{"term_index": 1, "variant_index": 1, "term": "t",
+                                       "source_id": "DOC1",
+                                       "asr_training_source": label}])
+        ctx = qc.Context(make_cfg(), {"01_dictionnary": watch})
+        stem = "000001_0001_t"
+        sf.write(watch.audio / f"{stem}.flac", np.zeros(24_000, "float32"), 24_000)
+        job = qc.Job(stem=stem, stage="01_dictionnary", reason="sample",
+                     path=watch.audio / f"{stem}.flac", key=stem)
+        prep = qc.prepare_clip(job, watch, ctx)
+        model = ArenaBoundModel(width=0)
+        qc.run_group(model, [(job, prep)], ctx)
+        assert not (watch.audio / "qc_stt_sidecar.jsonl").exists()
+    assert ctx.stats.failed == 1 and ctx.stats.checked == 0
+
+
+def test_a_batched_clip_is_scored_exactly_like_a_lone_one() -> None:
+    """The batched path must be a throughput change and nothing else.
+
+    It exists because the GPU sweep is 9x faster in batches (4.3 clips/s against 35.7),
+    and the way it stays only that is by reusing `score_clip`: both paths read the same
+    manifest row, compute the same five gates and write the same row. Verified end to end
+    too, on 318 real acronym clips, where 317 rows matched on every field and
+    `over_gate` matched on all 318 (the one difference was a hyphen, from fp16).
+    """
+    import numpy as np
+    import soundfile as sf
+
+    label = "le patient recoit de l amoxicilline un gramme trois fois par jour"
+    heard = "le patient recoit de l amoxicilline un gramme deux fois par jour"
+
+    def one_clip(batched: bool) -> dict:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            stem = "000001_0001_amoxicilline"
+            watch = make_watch(tmp, rows=[{"term_index": 1, "variant_index": 1,
+                                           "term": "amoxicilline", "source_id": "DOC1",
+                                           "asr_training_source": label}])
+            sf.write(watch.audio / f"{stem}.flac", np.zeros(48_000, "float32"), 24_000)
+            ctx = qc.Context(make_cfg(keep_transcripts=True),
+                             {"01_dictionnary": watch})
+            job = qc.Job(stem=stem, stage="01_dictionnary", reason="sample",
+                         path=watch.audio / f"{stem}.flac", key=stem)
+            if batched:
+                # The batch hands `recognize()` a LIST and gets a list back, which is
+                # the only difference in the call.
+                model = SimpleNamespace(recognize=lambda w, **k: [heard] * len(w))
+                qc.run_group(model, [(job, qc.prepare_clip(job, watch, ctx))], ctx)
+            else:
+                qc.check_clip(job, SimpleNamespace(recognize=lambda *a, **k: heard),
+                              watch, ctx)
+            line = (watch.audio / "qc_stt_sidecar.jsonl").read_text().splitlines()[0]
+            return json.loads(line)
+
+    lone, batched = one_clip(False), one_clip(True)
+    # `stt_s` is per clip in one path and a batch's cost divided by its clips in the
+    # other, so it is the one field that is expected to differ.
+    for field_name in sorted(set(lone) | set(batched)):
+        if field_name == "stt_s":
+            continue
+        assert lone.get(field_name) == batched.get(field_name), (
+            field_name, lone.get(field_name), batched.get(field_name))
+    # Not a pair of empty rows: the gates really ran and really stored their evidence.
+    assert batched["transcript"] == heard and batched["cer"] > 0
+    assert "window_cer" in batched and "repeat_excess" in batched
+
+
 def main() -> None:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

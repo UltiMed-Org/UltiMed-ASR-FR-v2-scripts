@@ -100,6 +100,7 @@ dropped, and the next run re-reads the output file and picks up where this one s
 
 from __future__ import annotations
 
+import concurrent.futures as cf
 import datetime as dt
 import hashlib
 import importlib.util
@@ -109,6 +110,7 @@ import signal
 import statistics
 import sys
 import threading
+import types
 import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
@@ -404,8 +406,103 @@ def is_sampled(stem: str, *, percent: float, salt: str = QC_SAMPLE_SALT) -> bool
     return int.from_bytes(digest, "big") % SAMPLE_RESOLUTION < cut
 
 
+# Batch defaults for the GPU sweep, measured on an RTX 3090 Ti over 300 dictionary
+# clips (p50 20.3 s): see docs/PARAKEET_SWEEP_THROUGHPUT.md. The clip count is a ceiling
+# the padded-seconds cap almost always reaches first, which is why it can sit this high.
+# The cap is 600 and not the fastest value measured (900 s, 39.9 clips/s against 35.7)
+# because that bench was 300 clips long and a sweep is half a million: onnxruntime's BFC
+# arena never returns GPU memory, so thousands of distinct padded shapes walk its
+# high-water mark up for hours. At 900 it reached 23.4 GB of a 24.6 GB card within 2500
+# clips and the largest batches then failed to allocate. 600 trades 10% of the rate for
+# a footprint measured at 8.6 GB, and `run_group` catches what still does not fit.
+DEFAULT_BATCH_SEC = 600.0
+# How many batches' worth of clips to pop and length-sort together. 3 keeps the audio
+# held in RAM near 400 MB at batch 64 while capturing the sort's full 20%.
+BATCH_SORT_WINDOW = 3
+# onnxruntime CUDA defaults this workload does not want. The conv algorithm search
+# re-benchmarks every unseen input shape, and nearly every clip has a unique length;
+# HEURISTIC picks instantly and was measured BIT-IDENTICAL over 60 clips (it costs only
+# 2% here, but there is nothing to lose). The arena doubles on a miss, so the peak
+# depended on allocation order: one configuration touched 24.0 GB of a 24.6 GB card
+# where the same work fits in 13 GB. Growing by exactly what was asked keeps a long
+# run's footprint where the batch cap puts it, on a card that also drives a display.
+CUDA_PROVIDER_OPTIONS = {"cudnn_conv_algo_search": "HEURISTIC",
+                         "arena_extend_strategy": "kSameAsRequested"}
+
+
+def batched_tdt_decoding(self, encoder_out, encoder_out_lens, /, **kwargs):
+    """Decode a whole batch of clips in lockstep, replacing onnx-asr's per-clip loop.
+
+    COPIED, deliberately and with the user's agreement, from the model repo's
+    `parakeet_web/scripts/wer-quants.py::batched_tdt_decoding`. It is the same function
+    in two repos: a fix to one belongs in the other, and neither copy can be changed
+    without the other. The alternative was importing it across repos by relative path,
+    which breaks as soon as `--model-dir` points at a bare HF download.
+
+    This is the single biggest throughput lever in the sweep, and it exists because
+    onnx-asr's batching is encoder-only: `NemoConformerTdt._decode` runs `decoder_joint`
+    with `encoder_outputs[None, :, None]` and `targets [[tok]]`, i.e. batch 1, one
+    encoder frame at a time. A 64-clip batch of 20 s clips (250 frames each at 12.5 fps)
+    therefore costs ~16,000 sequential ONNX calls, each a few hundred microseconds of
+    launch latency on a GPU that then sits 74% idle: measured 10 clips/s, against 38.5
+    for this function on the same clips and the same card.
+
+    Here each step feeds every clip still running as one row of ONE call, e.g. 8 clips ->
+    encoder_outputs (8, 1024, 1), targets (8, 1), states (2, 8, 640), so the batch costs
+    ~250 calls rather than 16,000. The per-clip rules are the stock loop's (argmax token,
+    keep the state only on a non-blank, advance by the predicted duration, else by 1 on a
+    blank or after `max_tokens_per_step`), so at batch 1 it IS the stock loop.
+
+    One correctness condition: batching reproduces the per-clip result only if the
+    decoder's rows cannot interact. That holds for the fp32 decoder and NOT for the
+    dynamic-int8 one, which derives a single activation scale per call, so a clip could
+    flip a near-tie word depending on its batch mates. That is why `--decoder-quantization
+    fp32` is the default and why `load_cpu_model` resolves the decoder separately.
+    """
+    import numpy as np
+    from onnx_asr.utils import log_softmax
+
+    need_logprobs = kwargs.get("need_logprobs")
+    lens = np.minimum(encoder_out_lens, encoder_out.shape[1])
+    n, blank, vocab, max_tokens = (len(lens), self._blank_idx, self._vocab_size,
+                                   self._max_tokens_per_step)
+    s1, s2 = (np.repeat(s, n, axis=1) for s in self._create_state())
+    last = np.full(n, blank, np.int32)   # previously emitted token, blank before the first
+    t = np.zeros(n, np.int64)
+    emitted = np.zeros(n, np.int64)      # tokens emitted at the current frame
+    tokens, stamps, logprobs = ([[] for _ in range(n)] for _ in range(3))
+    act = np.flatnonzero(lens > 0)       # the clips still running, shrinking every step
+    while len(act):
+        out, n1, n2 = self._decoder_joint.run(
+            ["outputs", "output_states_1", "output_states_2"],
+            {"encoder_outputs": encoder_out[act, t[act]][:, :, None],
+             "targets": last[act, None],
+             "target_length": np.ones(len(act), np.int32),
+             "input_states_1": s1[:, act], "input_states_2": s2[:, act]})
+        out = out.reshape(len(act), -1)
+        tok, step = out[:, :vocab].argmax(1), out[:, vocab:].argmax(1)
+        emit = tok != blank
+        for k in np.flatnonzero(emit):
+            b = act[k]
+            tokens[b].append(int(tok[k]))
+            stamps[b].append(int(t[b]))
+            if need_logprobs:
+                logprobs[b].append(log_softmax(out[k, :vocab])[tok[k]])
+        e = act[emit]
+        last[e], s1[:, e], s2[:, e] = tok[emit], n1[:, emit], n2[:, emit]
+        emitted[e] += 1
+        adv = np.where(step > 0, step,
+                       (~emit | (emitted[act] == max_tokens)).astype(np.int64))
+        t[act] += adv
+        emitted[act[adv > 0]] = 0
+        act = act[t[act] < lens[act]]
+    for b in range(n):
+        yield tokens[b], stamps[b], logprobs[b] if need_logprobs else None
+
+
 def load_cpu_model(model_dir: Path, *, quantization: str, threads: int,
-                   providers: tuple[str, ...] = ()):
+                   providers: tuple[str, ...] = (),
+                   decoder_quantization: str | None = None):
     """Load an onnx-asr Parakeet model from a LOCAL per-precision export directory.
 
     Parameters
@@ -441,6 +538,23 @@ def load_cpu_model(model_dir: Path, *, quantization: str, threads: int,
                 return folder + pattern
         return pattern
 
+    def model_files(quantization=None):
+        """Resolve the encoder at `quantization`, the decoder_joint independently.
+
+        onnx-asr's single `quantization` argument picks BOTH files, so asking for the
+        fp16 encoder makes it look for `decoder_joint-model.fp16.onnx`, which this
+        export does not ship (its fp16/ folder holds an encoder only), and the load
+        fails before a session is built. Pairing a quantized encoder with the fp32
+        decoder is also what keeps a BATCHED transcript independent of its batch mates:
+        the int8 decoder derives one activation scale per call, so a clip's near-tie
+        word could flip with its neighbours.
+        """
+        files = dict(original(quantization))
+        if decoder_quantization is not None and "decoder_joint" in files:
+            want = None if decoder_quantization in ("", "fp32") else decoder_quantization
+            files["decoder_joint"] = original(want)["decoder_joint"]
+        return {key: relocate(value) for key, value in files.items()}
+
     opts = ort.SessionOptions()
     opts.intra_op_num_threads = threads
     opts.inter_op_num_threads = 1
@@ -448,18 +562,28 @@ def load_cpu_model(model_dir: Path, *, quantization: str, threads: int,
     name = "nemo-parakeet-tdt-0.6b-v3"
     model_type = create_asr_resolver(name, str(model_dir)).model_type
     original = model_type._get_model_files
-    model_type._get_model_files = staticmethod(
-        lambda quantization=None: {k: relocate(v)
-                                   for k, v in original(quantization).items()})
-    extra = {"providers": list(providers)} if providers else {}
+    model_type._get_model_files = staticmethod(model_files)
+    extra = {"providers": [(p, CUDA_PROVIDER_OPTIONS) if p == "CUDAExecutionProvider"
+                           else p for p in providers]} if providers else {}
     try:
         # Empty string means "the files carry no precision infix at all"
         # (`encoder-model.onnx`, not `encoder-model.int8.onnx`), which onnx-asr spells
         # as None. The ultra export needs it: its fp16/ folder holds only an encoder,
         # so the only pair that resolves is the unsuffixed one under fp32/.
-        return onnx_asr.load_model(name, path=str(model_dir),
-                                   quantization=quantization or None,
-                                   sess_options=opts, **extra)
+        model = onnx_asr.load_model(name, path=str(model_dir),
+                                    quantization=quantization or None,
+                                    sess_options=opts, **extra)
+        # Swap in the batched TDT decode loop. Bound per instance rather than on the
+        # class so nothing else importing onnx-asr in this process is affected, and
+        # only on a TDT model, since the loop reads `_vocab_size` to split the token
+        # head from the duration head.
+        from onnx_asr.models.nemo import NemoConformerTdt
+        if isinstance(model.asr, NemoConformerTdt):
+            model.asr._decoding = types.MethodType(batched_tdt_decoding, model.asr)
+        else:
+            logger.warning("{} is not a TDT model, keeping onnx-asr's per-clip decode",
+                           name)
+        return model
     finally:
         model_type._get_model_files = staticmethod(original)
 
@@ -733,9 +857,24 @@ class Context:
                     return queue.popleft()
             return None
 
-    def done(self) -> None:
+    def next_batch(self, limit: int) -> list[Job]:
+        """Pop up to `limit` jobs, retries first, WITHOUT waiting for a full batch.
+
+        Returning a short list is deliberate: at the tail of a stage, or while following
+        a live generation, holding clips back until `limit` of them exist would park the
+        sweep behind the generator instead of behind the GPU.
+        """
         with self.lock:
-            self.in_flight -= 1
+            jobs: list[Job] = []
+            for queue in (self.retries, self.samples):
+                while queue and len(jobs) < limit:
+                    jobs.append(queue.popleft())
+            self.in_flight += len(jobs)
+            return jobs
+
+    def done(self, count: int = 1) -> None:
+        with self.lock:
+            self.in_flight -= count
 
     def idle(self) -> bool:
         with self.lock:
@@ -911,21 +1050,39 @@ def seed_handled(watch: StageWatch, out_path: Path) -> int:
     return count
 
 
-def check_clip(job: Job, model, watch: StageWatch, ctx: Context) -> None:
-    """Transcribe one clip, score it against its label, and append its QC row."""
+@dataclass
+class ClipInput:
+    """One clip read and ready to transcribe, plus what scoring it will need later.
+
+    Split out of `check_clip` so the batched path can read many clips on its loader
+    threads, hand every waveform to ONE `recognize()` call, and then score each with
+    the very same code the one-clip-at-a-time path uses.
+    """
+
+    row: dict
+    reference: str
+    voice: str
+    wav: object
+    sr: int
+    duration: float
+    t0: float
+
+
+def prepare_clip(job: Job, watch: StageWatch, ctx: Context) -> ClipInput | None:
+    """Find a clip's label and read its audio, or count it failed and return None."""
     cfg = ctx.cfg
     ensure_index(watch)
     row = manifest_row(watch, job.stem)
     if row is None:
         logger.warning("{}: no manifest row, not checked", job.stem)
         ctx.stats.bump("failed")
-        return
+        return None
     reference = _stt.get_reference(row, cfg.reference_key)
     if not reference:
         logger.warning("{}: manifest row has no {}, not checked",
                        job.stem, cfg.reference_key)
         ctx.stats.bump("failed")
-        return
+        return None
     voice = voice_for_row(row, field=watch.voice_field, mode=watch.mode)
 
     t0 = time.monotonic()
@@ -934,16 +1091,30 @@ def check_clip(job: Job, model, watch: StageWatch, ctx: Context) -> None:
     except Exception as exc:                 # noqa: BLE001 - a vanished/torn clip is
         logger.warning("{}: unreadable ({}), not checked", job.stem, exc)
         ctx.stats.bump("failed")                # reported, never fatal
-        return
+        return None
     if getattr(wav, "ndim", 1) > 1:
         wav = wav.mean(axis=1)
-    duration = len(wav) / sr if sr else 0.0
+    return ClipInput(row=row, reference=reference, voice=voice, wav=wav, sr=sr,
+                     duration=len(wav) / sr if sr else 0.0, t0=t0)
+
+
+def check_clip(job: Job, model, watch: StageWatch, ctx: Context) -> None:
+    """Transcribe one clip, score it against its label, and append its QC row."""
+    prep = prepare_clip(job, watch, ctx)
+    if prep is None:
+        return
     # onnx-asr resamples to the model's 16 kHz itself when handed a waveform plus its
     # rate; its path API cannot be used here because it reads WAV through the stdlib
     # `wave` module only, and this corpus is 24 kHz FLAC.
-    transcript = model.recognize(wav, sample_rate=sr)
-    stt_s = time.monotonic() - t0
+    transcript = model.recognize(prep.wav, sample_rate=prep.sr)
+    score_clip(job, prep, transcript, time.monotonic() - prep.t0, watch, ctx)
 
+
+def score_clip(job: Job, prep: ClipInput, transcript: str, stt_s: float,
+               watch: StageWatch, ctx: Context) -> None:
+    """Score one transcript against its clip's label and append the clip's QC row."""
+    cfg = ctx.cfg
+    reference, voice, duration = prep.reference, prep.voice, prep.duration
     wer, cer = _stt.compute_metrics(reference, transcript)
     tail = _stt.tail_cer(reference, transcript, duration)
     # Length-independent companions to the two averages above: see the gate constants.
@@ -1131,6 +1302,117 @@ def report_defect_mix(paths: dict[str, Path], *, severe_cer: float = 0.25,
     return total
 
 
+def batch_groups(prepared: list[tuple[Job, ClipInput]], batch: int, max_sec: float):
+    """Cut length-sorted clips into `recognize()` calls.
+
+    A call is capped BOTH by clip count and by PADDED seconds (clips x the longest clip
+    in the call), and the second cap is the one that binds: that product is what the
+    encoder allocates for. Measured on a 24 GB card over 300 clips, a 600 s call peaks at
+    8.6 GB and a 900 s one at 13.0 GB, while a 1300 s one asks for a single 4.24 GB
+    buffer and dies. Those peaks are a floor rather than a budget over a long run (see
+    `DEFAULT_BATCH_SEC`), which is why `run_group` can still be handed a batch that does
+    not fit. One rate per call, since `recognize()` takes one `sample_rate` for the whole
+    batch.
+    """
+    group: list[tuple[Job, ClipInput]] = []
+    longest = 0
+    for item in prepared:
+        prep = item[1]
+        if group and (len(group) == batch
+                      or prep.sr != group[0][1].sr
+                      or (len(group) + 1) * max(longest, len(prep.wav)) > max_sec * prep.sr):
+            yield group
+            group, longest = [], 0
+        group.append(item)
+        longest = max(longest, len(prep.wav))
+    if group:
+        yield group
+
+
+def run_group(model, group: list[tuple[Job, ClipInput]], ctx: Context) -> None:
+    """Transcribe ONE batch and score its clips, halving the batch if it cannot allocate.
+
+    The halving is what keeps a batch that does not fit from costing clips, and it is
+    needed because the cap `batch_groups` enforces is sized from a peak that MOVES:
+    onnxruntime's BFC arena never returns GPU memory to the driver, and a sweep hands it
+    thousands of distinct padded shapes, so its high-water mark climbs for hours. At a
+    900 s cap it reached 23.4 GB of a 24.6 GB card within 2500 clips and the widest
+    batches then died on a single 1.47 GB pre-encode conv buffer. Before this, that error
+    was caught one level up and charged every clip of the 192-clip window to `failed`.
+    Retrying in halves instead costs a repeated encode of one batch's clips, and bottoms
+    out at a single clip, where the blame really is the clip's.
+    """
+    t0 = time.monotonic()
+    try:
+        hyps = model.recognize([prep.wav for _, prep in group],
+                               sample_rate=group[0][1].sr)
+    except Exception as exc:                 # noqa: BLE001 - at >1 clip this is a batch
+        if len(group) > 1:                   # size problem, so say so and shrink it
+            logger.warning("batch of {} clip(s) failed ({}), retrying in halves",
+                           len(group), exc)
+            half = len(group) // 2
+            run_group(model, group[:half], ctx)
+            run_group(model, group[half:], ctx)
+            return
+        job = group[0][0]
+        logger.exception("{}: transcription failed ({}), not checked", job.stem, exc)
+        ctx.stats.bump("failed")
+        return
+    # Per clip, the batch's cost divided by the clips that shared it: the only reading of
+    # `stt_s` that stays comparable to the per-clip path's, and the one that makes the
+    # summary's rate line honest.
+    stt_s = (time.monotonic() - t0) / len(group)
+    for (job, prep), transcript in zip(group, hyps):
+        try:
+            score_clip(job, prep, transcript, stt_s, ctx.watches[job.stage], ctx)
+        except Exception as exc:             # noqa: BLE001 - one bad clip must not end
+            logger.exception("{}: scoring failed ({})", job.stem, exc)
+            ctx.stats.bump("failed")         # the run
+
+
+def batch_worker_loop(model, ctx: Context) -> None:
+    """Drain the queues through BATCHED recognize() calls instead of one per clip.
+
+    This is the whole reason a full-corpus sweep is hours rather than a day: the TDT
+    decode runs in lockstep over a batch, one decoder_joint call per step for every clip
+    at once, instead of per clip. Measured on an RTX 3090 Ti over 300 dictionary clips
+    (fp16 encoder, fp32 decoder), 35.7 clips/s at this cap against 4.3 one at a time. The two
+    details that carry most of it are in `batch_groups` (the padded-seconds cap) and in
+    the sort below; `docs/PARAKEET_SWEEP_THROUGHPUT.md` has the measurements.
+
+    Only ONE of these threads is started. A second would not help: the GPU sits around
+    56% busy here, idling inside the Python-side decode loop, but two concurrent streams
+    measured only 8% more throughput for 4 GB more VRAM, because without CUDA MPS the
+    kernels of two contexts time-slice rather than overlap. `--workers` becomes the
+    number of threads READING audio ahead of the GPU, and 4 already saturates it.
+    """
+    cfg = ctx.cfg
+    # Sorting by length only pays over a window bigger than one batch, so clips are
+    # popped several batches at a time: a batch then pads to a length close to its own.
+    # Unsorted costs 20% (31.5 clips/s against 39.5) and 42% padding waste against 23%.
+    window = max(1, cfg.batch) * BATCH_SORT_WINDOW
+    with cf.ThreadPoolExecutor(max_workers=max(1, cfg.workers)) as pool:
+        while not ctx.stop.is_set():
+            jobs = ctx.next_batch(window)
+            if not jobs:
+                ctx.stop.wait(1.0)
+                continue
+            try:
+                prepared = [(job, prep) for job, prep in
+                            zip(jobs, pool.map(lambda j: prepare_clip(
+                                j, ctx.watches[j.stage], ctx), jobs))
+                            if prep is not None]
+                prepared.sort(key=lambda item: len(item[1].wav))
+                for group in batch_groups(prepared, cfg.batch, cfg.batch_sec):
+                    run_group(model, group, ctx)
+            except Exception as exc:               # noqa: BLE001 - nor one bad window
+                logger.exception("window of {} clip(s) failed ({})", len(jobs), exc)
+                for _ in jobs:
+                    ctx.stats.bump("failed")
+            finally:
+                ctx.done(len(jobs))
+
+
 def worker_loop(model, ctx: Context) -> None:
     """Drain the queues until asked to stop, retries before samples."""
     while not ctx.stop.is_set():
@@ -1161,9 +1443,30 @@ def worker_loop(model, ctx: Context) -> None:
 @click.option("--quantization", default="int8", show_default=True,
               help="Precision subfolder of the export to load. int8 is the one "
                    "measured on this host; fp16 is ~2x slower on CPU. Pass an EMPTY "
-                   "value for an export's unsuffixed files, which is the pair to use "
-                   "on the GPU: the ultra export's fp16/ folder ships an encoder only, "
-                   "so fp16 cannot resolve a decoder and only fp32/ has both halves.")
+                   "value for an export's unsuffixed files. On the GPU the measured "
+                   "pick is `--quantization fp16 --decoder-quantization fp32`: the ultra "
+                   "export's fp16/ folder ships an encoder only, so fp16 needs the "
+                   "decoder named separately, and batched it is the fastest of the four.")
+@click.option("--decoder-quantization", default=None,
+              help="Precision for the fused decoder_joint, when it must differ from "
+                   "--quantization. Omitted, the decoder follows the encoder (onnx-asr's "
+                   "own behaviour). `fp32` means the unsuffixed files. Two reasons to "
+                   "split them: a quantized encoder may ship without a matching decoder "
+                   "(fp16, w4a8), and the int8 decoder derives one activation scale per "
+                   "CALL, so with --batch a clip's transcript could depend on its batch "
+                   "mates. fp32 is batch-invariant and the decoder is 18 MB.")
+@click.option("--batch", default=1, show_default=True,
+              help="Clips per recognize() call. 1 keeps the one-at-a-time path. Above "
+                   "that, the TDT decode runs in lockstep over the batch and a single "
+                   "thread does the transcribing: measured 38.5 clips/s at 64 against "
+                   "4.3 at 1 (fp16 encoder, RTX 3090 Ti, 300 dictionary clips). The "
+                   "padded-seconds cap below almost always binds first, so 64 is a "
+                   "ceiling rather than the real batch size.")
+@click.option("--batch-sec", default=DEFAULT_BATCH_SEC, show_default=True,
+              help="Cap on a batch's PADDED seconds (clips x the longest clip in it), "
+                   "which is what the encoder allocates for and the real VRAM knob: 900 "
+                   "peaks at 13.0 GB of a 24 GB card, 1300 asks for a single 4.24 GB "
+                   "buffer and dies. Lower it for a smaller card or a busier display.")
 @click.option("--providers", "providers_csv", default="", show_default=False,
               help="Comma-separated onnxruntime execution providers, e.g. "
                    "CUDAExecutionProvider. Empty (the default) leaves onnxruntime on "
@@ -1189,7 +1492,10 @@ def worker_loop(model, ctx: Context) -> None:
 @click.option("--workers", default=1, show_default=True,
               help="Parallel checks. 1 is deliberate: a 5% sample needs ~1.5x "
                    "realtime and one worker delivers ~7x, so a second one would only "
-                   "take threads from the process feeding the GPU.")
+                   "take threads from the process feeding the GPU. With --batch above 1 "
+                   "this is instead the number of threads READING audio ahead of the "
+                   "GPU, where 4 already saturates it (4/6/8/12 measured 39.5/41.8/39.9/"
+                   "40.1 clips/s): the transcribing itself stays one thread.")
 @click.option("--nice", "nice_level", default=10, show_default=True,
               help="Niceness applied to this process, so the generator wins every "
                    "contested timeslice. 0 to leave the priority alone.")
@@ -1255,7 +1561,9 @@ def worker_loop(model, ctx: Context) -> None:
 @click.option("--log-file", default="qc_cpu_stt.log", show_default=True,
               help="Append the log here as well as to stderr; empty string disables. "
                    "A bare filename lands beside this script.")
-def main(stages: tuple[str, ...], model_dir: Path, quantization: str, providers_csv: str,
+def main(stages: tuple[str, ...], model_dir: Path, quantization: str,
+         decoder_quantization: str | None, batch: int, batch_sec: float,
+         providers_csv: str,
          sample_percent: float, do_retries: bool, threads: int, workers: int,
          nice_level: int, poll_seconds: float, max_queue: int | None,
          cer_threshold: float,
@@ -1296,6 +1604,7 @@ def main(stages: tuple[str, ...], model_dir: Path, quantization: str, providers_
         window_cer_threshold=window_cer_threshold, bad_run_threshold=bad_run_threshold,
         repeat_threshold=repeat_threshold,
         reference_key=reference_key, out_name=out_name, workers=workers,
+        batch=batch, batch_sec=batch_sec,
         keep_transcripts=keep_transcripts, summary_every=summary_every,
         stem_requests=load_stem_requests(stems_from))
 
@@ -1357,12 +1666,17 @@ def main(stages: tuple[str, ...], model_dir: Path, quantization: str, providers_
                 f"--providers: onnxruntime {ort.__version__} has no {', '.join(missing)} "
                 f"(it offers {', '.join(ort.get_available_providers())}). Install the "
                 f"GPU wheel: uv run --with onnxruntime-gpu ...")
-    logger.info("loading {} ({}) with {} thread(s) x {} worker(s) on {}...",
-                model_dir.name, quantization, threads, workers,
-                ", ".join(providers) if providers else "the onnxruntime default (CPU)")
+    logger.info("loading {} (encoder {}, decoder {}) with {} thread(s) x {} worker(s)"
+                " on {}{}...",
+                model_dir.name, quantization or "fp32",
+                decoder_quantization or quantization or "fp32", threads, workers,
+                ", ".join(providers) if providers else "the onnxruntime default (CPU)",
+                f", batches of <={batch} clips / {batch_sec:g} padded s"
+                if batch > 1 else "")
     t0 = time.monotonic()
     model = load_cpu_model(model_dir.resolve(), quantization=quantization,
-                           threads=threads, providers=providers)
+                           threads=threads, providers=providers,
+                           decoder_quantization=decoder_quantization)
     logger.info("model loaded in {:.1f}s; sample {}%, retries {}, gates {} / {} (tail) "
                 "/ {} (window) / {} chars (missing run) / {} repeated windows",
                 time.monotonic() - t0, sample_percent,
@@ -1380,8 +1694,17 @@ def main(stages: tuple[str, ...], model_dir: Path, quantization: str, providers_
     # The model is shared by every worker on purpose: an onnxruntime session is
     # thread-safe for Run(), and a second copy of the encoder would cost another
     # 619 MB of RAM for nothing.
-    pool = [threading.Thread(target=worker_loop, args=(model, ctx), daemon=True,
-                             name=f"qc{i}") for i in range(max(workers, 1))]
+    #
+    # Batching replaces the workers with ONE consumer that transcribes whole batches
+    # (--workers becomes its loader threads). A second batch thread was measured to add
+    # only 8% for 4 GB more VRAM, because the GPU's idle 44% sits inside the Python
+    # decode loop and two CUDA contexts time-slice rather than overlap without MPS.
+    if batch > 1:
+        pool = [threading.Thread(target=batch_worker_loop, args=(model, ctx),
+                                 daemon=True, name="qcbatch")]
+    else:
+        pool = [threading.Thread(target=worker_loop, args=(model, ctx), daemon=True,
+                                 name=f"qc{i}") for i in range(max(workers, 1))]
     for thread in pool:
         thread.start()
 
