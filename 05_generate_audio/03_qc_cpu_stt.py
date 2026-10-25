@@ -182,6 +182,7 @@ DEFAULT_CER_GATE = _stt.DEFAULT_CER_GATE
 DEFAULT_TAIL_CER_GATE = _stt.DEFAULT_TAIL_CER_GATE
 DEFAULT_WINDOW_CER_GATE = _stt.DEFAULT_WINDOW_CER_GATE
 DEFAULT_BAD_RUN_GATE = _stt.DEFAULT_BAD_RUN_GATE
+DEFAULT_REPEAT_GATE = _stt.DEFAULT_REPEAT_GATE
 
 
 #: Defect shapes a flagged clip can have, cheapest-to-act-on first. See
@@ -950,10 +951,19 @@ def check_clip(job: Job, model, watch: StageWatch, ctx: Context) -> None:
     # the text excerpts the WARNING below prints, at no extra cost.
     score = _stt.window_score(reference, transcript)
     window_cer, bad_run = score.window_cer, score.bad_run_chars
+    # The fifth gate is not a distance at all, and that is the point: the four above all
+    # measure how far the transcript is from the label, and a loop can sit at any
+    # distance. The confirmed loop in `022432_0001_syndrome_de_frankl_hochwart_pellizzi`
+    # scores CER 0.338 while an innocent "monsieur renaud" read "monsieur renault"
+    # scores 0.321, so no threshold on these four separates them; raising the CER gate
+    # to 0.15 to catch loops drops recall from 98% to 68% and to 46% at 0.20. Counting
+    # repeats instead asks a different question of the same transcript, for free.
+    repeat = _stt.repeat_excess(reference, transcript)
     over = ((cer is not None and cer >= cfg.cer_threshold)
             or (tail is not None and tail >= cfg.tail_cer_threshold)
             or (window_cer is not None and window_cer >= cfg.window_cer_threshold)
-            or (bad_run is not None and bad_run >= cfg.bad_run_threshold))
+            or (bad_run is not None and bad_run >= cfg.bad_run_threshold)
+            or (cfg.repeat_threshold > 0 and repeat >= cfg.repeat_threshold))
 
     out_row = {
         "stem": job.stem,
@@ -969,6 +979,7 @@ def check_clip(job: Job, model, watch: StageWatch, ctx: Context) -> None:
         # transcribing 602,885 clips a second time.
         "window_cer": None if window_cer is None else round(window_cer, 4),
         "bad_run_chars": bad_run,
+        "repeat_excess": repeat,
         "over_gate": over,
         "stt_s": round(stt_s, 2),
         "ts": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -999,12 +1010,13 @@ def check_clip(job: Job, model, watch: StageWatch, ctx: Context) -> None:
         for line in ctx.stats.lines(workers=cfg.workers):
             logger.info(line)
     if over:
-        logger.warning("{} [{}, {}, {}]: CER {} tail {} window {} run {} ({:.1f}s) -> {}",
+        logger.warning("{} [{}, {}, {}]: CER {} tail {} window {} run {} repeat {}"
+                       " ({:.1f}s) -> {}",
                        job.stem, job.reason, voice, defect,
                        "n/a" if cer is None else f"{cer:.3f}",
                        "n/a" if tail is None else f"{tail:.3f}",
                        "n/a" if window_cer is None else f"{window_cer:.3f}",
-                       "n/a" if bad_run is None else bad_run,
+                       "n/a" if bad_run is None else bad_run, repeat,
                        duration, transcript[:160])
         # The two numbers above say a clip is bad; these lines say WHAT about it is bad,
         # which is what makes a flag actionable without opening the audio.
@@ -1203,6 +1215,11 @@ def worker_loop(model, ctx: Context) -> None:
               help="Longest contiguous run of missing label characters (~14.2 per "
                    "second of speech) at or above which a clip is flagged. 30 is five "
                    "French words, and above every clean clip in a 20k calibration.")
+@click.option("--repeat-threshold", default=DEFAULT_REPEAT_GATE, show_default=True,
+              help="Number of word windows the transcript may read more often than the "
+                   "label writes them before the clip is flagged. This is the only gate "
+                   "that can see a LOOP: Whisper deduplicates repeated speech, so the "
+                   "four CER gates above are structurally blind to it. 0 disables.")
 @click.option("--reference-key", default="asr_training_source", show_default=True,
               help="Manifest field holding the text the TTS was asked to say.")
 @click.option("--stems-from", "stems_from", multiple=True,
@@ -1243,7 +1260,8 @@ def main(stages: tuple[str, ...], model_dir: Path, quantization: str, providers_
          nice_level: int, poll_seconds: float, max_queue: int | None,
          cer_threshold: float,
          tail_cer_threshold: float, window_cer_threshold: float,
-         bad_run_threshold: int, reference_key: str, stems_from: tuple[Path, ...],
+         bad_run_threshold: int, repeat_threshold: int, reference_key: str,
+         stems_from: tuple[Path, ...],
          backfill: bool, once: bool,
          summary_every: int, keep_transcripts: bool, defect_mix: bool,
          examples: int, out_name: str,
@@ -1276,6 +1294,7 @@ def main(stages: tuple[str, ...], model_dir: Path, quantization: str, providers_
         sample_percent=sample_percent, max_queue=max_queue, backfill=backfill,
         cer_threshold=cer_threshold, tail_cer_threshold=tail_cer_threshold,
         window_cer_threshold=window_cer_threshold, bad_run_threshold=bad_run_threshold,
+        repeat_threshold=repeat_threshold,
         reference_key=reference_key, out_name=out_name, workers=workers,
         keep_transcripts=keep_transcripts, summary_every=summary_every,
         stem_requests=load_stem_requests(stems_from))
@@ -1345,10 +1364,11 @@ def main(stages: tuple[str, ...], model_dir: Path, quantization: str, providers_
     model = load_cpu_model(model_dir.resolve(), quantization=quantization,
                            threads=threads, providers=providers)
     logger.info("model loaded in {:.1f}s; sample {}%, retries {}, gates {} / {} (tail) "
-                "/ {} (window) / {} chars (missing run)",
+                "/ {} (window) / {} chars (missing run) / {} repeated windows",
                 time.monotonic() - t0, sample_percent,
                 "on" if do_retries else "off", cer_threshold, tail_cer_threshold,
-                window_cer_threshold, bad_run_threshold)
+                window_cer_threshold, bad_run_threshold,
+                repeat_threshold if repeat_threshold > 0 else "off")
 
     def _stop(signum, _frame):
         logger.warning("signal {}, finishing the clip in flight and stopping", signum)

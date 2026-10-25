@@ -21,8 +21,10 @@ take of a clip that was deleted and re-drawn (which is exactly the clip worth he
 and a queue without a cap would grow for eight days. So this test covers the selection,
 the dedup, the resume and the backlog policy, and never loads onnxruntime.
 
-What is NOT covered: `load_cpu_model` and `check_clip`, which need the 619 MB int8 ONNX
-export and real audio. Those were verified by hand against the live run instead.
+What is NOT covered: `load_cpu_model`, which needs the 619 MB int8 ONNX export. The
+scoring half of `check_clip` IS covered, by handing it a stub recognizer and a silent
+clip: the transcript is the only thing the model contributes, so the gates, the stored
+row and the defect shape can all be exercised without it.
 
     uv run tests/test_qc_cpu_stt.py
 
@@ -59,7 +61,9 @@ from voice_assignment import VOICES_FR_V2, voice_for_key  # noqa: E402
 def make_cfg(**over) -> SimpleNamespace:
     """The subset of the CLI the pollers and the queue actually read."""
     base = dict(sample_percent=5.0, max_queue=10, backfill=False, cer_threshold=0.08,
-                tail_cer_threshold=0.12, reference_key="asr_training_source",
+                tail_cer_threshold=0.12, window_cer_threshold=0.15, bad_run_threshold=30,
+                repeat_threshold=qc.DEFAULT_REPEAT_GATE,
+                reference_key="asr_training_source",
                 out_name="qc_stt_sidecar.jsonl", workers=1, keep_transcripts=False,
                 summary_every=0, stem_requests={})
     base.update(over)
@@ -457,6 +461,80 @@ def test_defect_mix_report_reads_existing_rows() -> None:
         assert "overrun" not in "".join(captured)
         # A missing file is reported, not fatal.
         assert qc.report_defect_mix({"st": Path(td) / "nope.jsonl"}) == 0
+
+
+def test_a_loop_is_flagged_even_when_every_cer_gate_is_happy() -> None:
+    """The gate that exists because the other four cannot see a loop.
+
+    Whisper deduplicates repeated speech, so a derailed take comes back from the primary
+    judge reading like a clean one and every CER gate passes it. This is the whole
+    reason the Parakeet sweep exists, and a metric computed but not gated on would have
+    left the clip in the dataset: before this gate, `classify_defect` was only ever
+    consulted AFTER a CER gate had already fired, so a loop that scored clean was never
+    named. Measured on real rows, the separation is not available to a threshold on the
+    four: a confirmed loop scores CER 0.338 while "monsieur renaud" read as "monsieur
+    renault" scores 0.321.
+    """
+    import numpy as np
+    import soundfile as sf
+
+    # Long label, short repeat: that ratio is the blind spot, because an insertion costs
+    # the CER gates only its own length. Here one four-word clause is read twice over a
+    # 385-character label, which is CER 0.052, worst window 0.094, nothing missing.
+    label = ("le patient de soixante douze ans est hospitalise pour une pneumopathie "
+             "aigue communautaire de la base droite il recoit de l amoxicilline un "
+             "gramme par voie intraveineuse toutes les huit heures pendant sept jours "
+             "puis un relais par voie orale la surveillance comporte la temperature la "
+             "saturation en oxygene et la numeration formule sanguine tous les deux "
+             "jours jusqu a la sortie du service de medecine interne")
+    looped = label.replace(" pendant sept jours",
+                           " toutes les huit heures pendant sept jours", 1)
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        stem = "000001_0001_paracetamol"
+        watch = make_watch(tmp, rows=[{"term_index": 1, "variant_index": 1,
+                                       "term": "paracetamol", "source_id": "DOC1",
+                                       "asr_training_source": label}])
+        sf.write(watch.audio / f"{stem}.flac", np.zeros(24_000, "float32"), 24_000)
+        ctx = qc.Context(make_cfg(), {"01_dictionnary": watch})
+        job = qc.Job(stem=stem, stage="01_dictionnary", reason="sample",
+                     path=watch.audio / f"{stem}.flac", key=stem)
+        qc.check_clip(job, SimpleNamespace(recognize=lambda *a, **k: looped),
+                      watch, ctx)
+        row = json.loads((watch.audio / "qc_stt_sidecar.jsonl").read_text().splitlines()[0])
+
+    # Every distance gate is satisfied, and the clip is flagged anyway.
+    assert row["cer"] < 0.08, row
+    # None where the clip is shorter than the tail window, which is not a failure.
+    assert row["tail_cer"] is None or row["tail_cer"] < 0.12, row
+    assert row["window_cer"] < 0.15 and row["bad_run_chars"] < 30, row
+    assert row["repeat_excess"] > 0 and row["over_gate"] is True, row
+    assert row["defect"] == "loop", row
+
+
+def test_the_loop_count_is_stored_on_clean_rows_too() -> None:
+    """Stored on every row for the same reason the window numbers are: so the gate can
+    be re-swept over the sidecar instead of transcribing the corpus a second time."""
+    import numpy as np
+    import soundfile as sf
+
+    label = "la tension arterielle est a cent trente sur quatre vingt"
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        stem = "000002_0001_tension"
+        watch = make_watch(tmp, rows=[{"term_index": 2, "variant_index": 1,
+                                       "term": "tension", "source_id": "DOC1",
+                                       "asr_training_source": label}])
+        sf.write(watch.audio / f"{stem}.flac", np.zeros(24_000, "float32"), 24_000)
+        ctx = qc.Context(make_cfg(), {"01_dictionnary": watch})
+        job = qc.Job(stem=stem, stage="01_dictionnary", reason="sample",
+                     path=watch.audio / f"{stem}.flac", key=stem)
+        qc.check_clip(job, SimpleNamespace(recognize=lambda *a, **k: label), watch, ctx)
+        row = json.loads((watch.audio / "qc_stt_sidecar.jsonl").read_text().splitlines()[0])
+    assert row["over_gate"] is False and row["repeat_excess"] == 0, row
+    # And `--repeat-threshold 0` turns the gate off without removing the measurement.
+    assert make_cfg(repeat_threshold=0).repeat_threshold == 0
 
 
 def main() -> None:
