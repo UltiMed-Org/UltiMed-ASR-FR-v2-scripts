@@ -770,6 +770,7 @@ class Context:
         self.in_flight = 0
         self.stats = Stats()
         self.write_lock = threading.Lock()
+        self.warned_drop = False
 
     def enqueue(self, job: Job) -> None:
         watch = self.watches[job.stage]
@@ -790,11 +791,25 @@ class Context:
                 self.retries.append(job)
                 return
             self.samples.append(job)
-            # The backlog is capped so a stall (a slow disk, a paused process, a
-            # --backfill of a finished stage) cannot grow the queue without bound.
-            # The OLDEST samples go, since a fresh clip says more about the run's
-            # current state than one from an hour ago.
+            # The backlog is capped so a stall (a slow disk, a paused process) cannot
+            # grow the queue without bound. The OLDEST samples go, since a fresh clip
+            # says more about the run's current state than one from an hour ago.
+            #
+            # A cap of 0 means no cap, which is what --backfill defaults to. There the
+            # queue is not a backlog but the KNOWN population on disk, and trimming it
+            # returns incomplete coverage while still exiting 0: a --backfill --once
+            # sweep of 602k clips under the old default of 2000 checked 2000 of them,
+            # logged "63795 sample(s) dropped to keep up", and looked finished.
+            if not self.cfg.max_queue:
+                return
             while len(self.samples) > self.cfg.max_queue:
+                if self.cfg.backfill and not self.warned_drop:
+                    self.warned_drop = True
+                    logger.warning(
+                        "--max-queue {} is smaller than the backfill population: the "
+                        "oldest queued clips are being DROPPED, so this pass will not "
+                        "cover the directory. Raise it, or pass 0 for no cap.",
+                        self.cfg.max_queue)
                 self.samples.popleft()
                 self.stats.bump("dropped")
 
@@ -1257,9 +1272,11 @@ def worker_loop(model, ctx: Context) -> None:
                    "contested timeslice. 0 to leave the priority alone.")
 @click.option("--poll-seconds", default=30.0, show_default=True,
               help="How often to look for new clips and new sidecar rows.")
-@click.option("--max-queue", default=2000, show_default=True,
+@click.option("--max-queue", default=None, type=int,
               help="Cap on QUEUED samples; the oldest are dropped past it (counted in "
-                   "the summary). Retries are never dropped.")
+                   "the summary). Retries are never dropped. 0 means no cap. Default: "
+                   "2000 when following a live run, no cap with --backfill, where the "
+                   "queue is the known population on disk rather than a backlog.")
 @click.option("--cer-threshold", default=DEFAULT_CER_GATE, show_default=True,
               help="Whole-clip CER at or above which a clip is logged and keeps its "
                    "transcript. Stage 06's own gate.")
@@ -1312,7 +1329,8 @@ def worker_loop(model, ctx: Context) -> None:
                    "A bare filename lands beside this script.")
 def main(stages: tuple[str, ...], model_dir: Path, quantization: str, providers_csv: str,
          sample_percent: float, do_retries: bool, threads: int, workers: int,
-         nice_level: int, poll_seconds: float, max_queue: int, cer_threshold: float,
+         nice_level: int, poll_seconds: float, max_queue: int | None,
+         cer_threshold: float,
          tail_cer_threshold: float, window_cer_threshold: float,
          bad_run_threshold: int, reference_key: str, stems_from: tuple[Path, ...],
          backfill: bool, once: bool,
@@ -1339,8 +1357,12 @@ def main(stages: tuple[str, ...], model_dir: Path, quantization: str, providers_
         except OSError as exc:
             logger.warning("could not renice to +{} ({})", nice_level, exc)
 
+    if max_queue is None:
+        # --backfill asks for a whole directory; --follow asks for whatever is arriving.
+        # Only the second one has a backlog that a cap protects.
+        max_queue = 0 if backfill else 2000
     cfg = SimpleNamespace(
-        sample_percent=sample_percent, max_queue=max_queue,
+        sample_percent=sample_percent, max_queue=max_queue, backfill=backfill,
         cer_threshold=cer_threshold, tail_cer_threshold=tail_cer_threshold,
         window_cer_threshold=window_cer_threshold, bad_run_threshold=bad_run_threshold,
         reference_key=reference_key, out_name=out_name, workers=workers,

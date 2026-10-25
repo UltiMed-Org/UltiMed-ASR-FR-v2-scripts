@@ -58,7 +58,7 @@ from voice_assignment import VOICES_FR_V2, voice_for_key  # noqa: E402
 
 def make_cfg(**over) -> SimpleNamespace:
     """The subset of the CLI the pollers and the queue actually read."""
-    base = dict(sample_percent=5.0, max_queue=10, cer_threshold=0.08,
+    base = dict(sample_percent=5.0, max_queue=10, backfill=False, cer_threshold=0.08,
                 tail_cer_threshold=0.12, reference_key="asr_training_source",
                 out_name="qc_stt_sidecar.jsonl", workers=1, keep_transcripts=False,
                 summary_every=0, stem_requests={})
@@ -245,6 +245,59 @@ def test_retries_are_served_first_and_never_dropped() -> None:
 
         assert [ctx.next_job().stem for _ in range(4)] == ["r0", "r1", "r2", "r3"]
         assert ctx.next_job().stem == "s3"
+
+
+def test_a_backfill_queue_is_uncapped_and_says_so_when_it_is_not() -> None:
+    """`--max-queue 0` means no cap, which is what a backfill needs.
+
+    The cap is a backlog policy: while following a live run, a clip from an hour ago
+    says less about the run's current state than the one just written, so dropping the
+    oldest is right. A --backfill is the opposite situation: the queue is not a backlog
+    but the known population on disk, and trimming it returns incomplete coverage while
+    still exiting 0. That shipped: a --backfill --once sweep of 602,789 clips under the
+    old default of 2000 checked 2000 of them, logged "63795 sample(s) dropped to keep
+    up", and looked finished.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        watch = make_watch(Path(td))
+        ctx = qc.Context(make_cfg(max_queue=0, backfill=True), {watch.name: watch})
+        for i in range(50):
+            ctx.enqueue(qc.Job(stage=watch.name, stem=f"s{i}", path=Path("x"),
+                               reason="sample", key=f"s{i}"))
+        assert len(ctx.samples) == 50, "a cap of 0 must not drop anything"
+        assert ctx.stats.dropped == 0
+
+        # A cap that IS set during a backfill is a mistake worth one loud line, not a
+        # silent 2% sample. One line, not one per dropped clip.
+        captured: list[str] = []
+        sink = qc.logger.add(lambda m: captured.append(m), level="WARNING")
+        try:
+            tight = qc.Context(make_cfg(max_queue=3, backfill=True),
+                               {watch.name: watch})
+            for i in range(10):
+                tight.enqueue(qc.Job(stage=watch.name, stem=f"t{i}", path=Path("x"),
+                                     reason="sample", key=f"t{i}"))
+        finally:
+            qc.logger.remove(sink)
+        assert tight.stats.dropped == 7, tight.stats.dropped
+        warnings = [m for m in captured if "max-queue" in m]
+        assert len(warnings) == 1, f"expected exactly one warning, got {len(warnings)}"
+
+        # Following a live run keeps the old behaviour, warning included: silence there
+        # is correct, the drop is the policy working.
+        captured.clear()
+        sink = qc.logger.add(lambda m: captured.append(m), level="WARNING")
+        try:
+            tail = qc.Context(make_cfg(max_queue=3, backfill=False),
+                              {watch.name: watch})
+            for i in range(10):
+                tail.enqueue(qc.Job(stage=watch.name, stem=f"f{i}", path=Path("x"),
+                                    reason="sample", key=f"f{i}"))
+        finally:
+            qc.logger.remove(sink)
+        assert tail.stats.dropped == 7
+        assert not [m for m in captured if "max-queue" in m], \
+            "a tail run drops by design and must not cry about it"
 
 
 def test_resume_reads_its_own_output() -> None:
