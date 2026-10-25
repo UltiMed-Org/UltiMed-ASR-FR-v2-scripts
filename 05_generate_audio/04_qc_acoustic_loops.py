@@ -171,13 +171,9 @@ sys.path.insert(0, str(ROOT / "utils"))
 from nemo_manifest import parse_clip_name  # noqa: E402
 from progress import bar_safe_sink, resumed_bar  # noqa: E402
 from voice_assignment import voice_for_row  # noqa: E402
+from clip_freshness import is_stale  # noqa: E402
 
 #: Where the per-clip acoustic rows land: beside the audio and the STT sidecar, one
-#: Seconds a clip may be newer than its row before the row is called stale. Covers the
-#: sub-second gap between statting a clip and writing its row, and filesystem mtime
-#: granularity on a copy; a real redraw is minutes or days newer, never one second.
-_MTIME_SLACK = 2.0
-
 #: JSON line per clip, append-only so a killed run resumes from what is already there.
 ACOUSTIC_FILENAME = "qc_acoustic_sidecar.jsonl"
 
@@ -497,15 +493,14 @@ def _rows_already_scored(path: Path, audio_dir: Path) -> set[str]:
         stem = row.get("stem")
         if not stem:
             continue
-        try:
-            clip_mtime = (audio_dir / f"{stem}.flac").stat().st_mtime
-        except OSError:
-            seen.add(stem)          # clip gone: nothing left to rescore
-            continue
+        # A row written before the `mtime` field existed falls back to the sidecar
+        # file's own mtime: an upper bound on when that row was written, and the only
+        # evidence such a row carries. Without the fallback every legacy row would read
+        # as stale and the whole corpus would be rescored on the next run.
         scored_at = row.get("mtime")
         if not isinstance(scored_at, (int, float)):
             scored_at = legacy_scored_at
-        if clip_mtime > scored_at + _MTIME_SLACK:
+        if is_stale(audio_dir / f"{stem}.flac", scored_at):
             continue                # audio replaced since: score it again
         seen.add(stem)
     return seen
