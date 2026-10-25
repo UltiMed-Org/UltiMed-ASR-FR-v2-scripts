@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["click", "loguru"]
+# dependencies = ["click", "loguru", "jiwer>=3.0", "requests>=2.31", "tqdm>=4.66"]
 # ///
 """The stage-05 sidecar -> stage-06 state join (`06_hotfixes/12_merge_judge_sidecars.py`).
 
@@ -188,6 +188,32 @@ def test_a_failed_write_leaves_the_state_intact() -> None:
             raise AssertionError("a malformed state line should have raised")
         assert state.read_text() == before, "the state must survive a failed merge"
         assert not list(tmp.glob("*.merge.tmp")), "the temp file must be cleaned up"
+
+
+def test_the_loop_count_is_computed_from_the_stored_texts() -> None:
+    """The reading that justifies this judge existing at all.
+
+    Whisper cannot report a loop, so the point of carrying a second judge is the count of
+    repeats in its verbatim transcript. The sweep's sidecars predate the metric, so it is
+    derived here from the reference and transcript they do store.
+
+    A sidecar written without `--keep-transcripts` has neither, and must NOT get a
+    fabricated zero: zero means "looked at, repeats nothing", and inventing one would
+    certify a clip no loop detector ever read.
+    """
+    label = "la dose est de 2 milligrammes par jours et le controle est a 1 mois"
+    looped = ("la dose est de 2 milligrammes par jours et la dose est de 2 milligrammes "
+              "par jours et le controle est a 1 mois")
+
+    clean = mod.to_reading(_row("x", reference=label, transcript=label), n_readings=1)
+    assert clean["repeat_excess"] == 0, clean
+
+    bad = mod.to_reading(_row("x", reference=label, transcript=looped), n_readings=1)
+    assert bad["repeat_excess"] > 0, bad
+
+    blind = mod.to_reading(_row("x"), n_readings=1)
+    assert "repeat_excess" not in blind, (
+        "a sidecar with no reference must not report a loop verdict")
 
 
 def main() -> int:

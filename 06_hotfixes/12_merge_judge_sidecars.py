@@ -1,7 +1,9 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["click", "loguru"]
+# dependencies = ["click", "loguru", "jiwer>=3.0", "requests>=2.31", "tqdm>=4.66"]
+#   # jiwer/requests/tqdm are not used here: they are what importing stage 06's
+#   # scorer costs, and the scorer owns `repeat_excess` (see `_load_stt`).
 # ///
 """Carry a stage-05 QC sidecar's readings into stage 06's state as another judge.
 
@@ -58,6 +60,31 @@ sys.path.insert(0, str(ROOT / "utils"))
 
 from clip_freshness import is_stale  # noqa: E402
 
+_STT = None
+
+
+def _load_stt():
+    """Stage 06's scorer, loaded on first use.
+
+    Imported rather than reimplemented because `repeat_excess` has to see exactly the
+    text the gates see: it compares word windows AFTER `normalize_for_scoring`, so a
+    second spelling of that normalizer here would count windows the pass does not. The
+    import is lazy because it costs jiwer and a few hundred regexes, and a `--dry-run`
+    that only wants the match counts should not pay for them.
+    """
+    global _STT
+    if _STT is None:
+        import importlib.util
+
+        path = ROOT / "06_hotfixes" / "01_compute_stt.py"
+        spec = importlib.util.spec_from_file_location("stt_for_merge", path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"cannot load {path}")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _STT = mod
+    return _STT
+
 #: What stage 05's judge calls its output. Overridable so this script can also merge the
 #: acoustic sidecar, or a sweep parked under its own name.
 DEFAULT_OUT_NAME = "qc_parakeet_ultra.jsonl"
@@ -103,9 +130,10 @@ def load_stage_dirs() -> dict[str, Path]:
 def to_reading(row: dict, *, n_readings: int) -> dict:
     """One sidecar row as a `transcriptions` reading.
 
-    `stt_rtf` is derived rather than stored by the sidecar, and only when the duration is
-    usable: a zero would divide, and a missing one would make an invented ratio look
-    measured.
+    `stt_rtf` and `repeat_excess` are derived rather than copied. The first only when the
+    duration is usable: a zero would divide, and a missing one would make an invented
+    ratio look measured. The second because it is the reading that justifies this judge
+    existing (see the module docstring) and the sweep's sidecars predate it.
     """
     reading: dict[str, object] = {}
     for src, dst in FIELD_MAP.items():
@@ -114,6 +142,14 @@ def to_reading(row: dict, *, n_readings: int) -> dict:
             value = (value or "").strip() or None
         if value is not None:
             reading[dst] = value
+    # The loop count is computed here rather than copied, because the sweep that wrote
+    # these rows predates the metric and its sidecars carry no such field. Computing it
+    # at merge time also keeps one rule for every row, old and new: a row swept in
+    # October and a row swept after a repair round get the same number from the same
+    # function, which is the only way the two are comparable.
+    reference, transcript = row.get("reference"), row.get("transcript")
+    if reference and transcript:
+        reading["repeat_excess"] = _load_stt().repeat_excess(reference, transcript)
     seconds = row.get("stt_s")
     duration = row.get("duration")
     if seconds is not None:
