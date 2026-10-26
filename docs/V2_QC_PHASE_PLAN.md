@@ -405,6 +405,35 @@ Two details make the refill cheap rather than another corpus sweep:
 
 **One decision is deliberately left open:** whether to add `RETRY_IMPROVED=1` to the round itself, for the 740 rows that won under turbo and still fail the non-turbo arbiter. The arbiter was commissioned for exactly those clips, so the upside is real; the risk is that a reopened win no draw can beat ends `exhausted`, and `04_drop_bad_rows.py` drops `exhausted`, so up to 740 currently-shipping clips could be lost to a stricter judge's opinion. The launcher defaults it off. `RETRY_EXHAUSTED=1` is upside-only (those 20 rows are already dropped) and is always on.
 
+## T3 in practice: two things the plan above got wrong
+
+**The arbiter must be handed its queue explicitly, because the non-turbo judge has only read 3.6 pct of the corpus.** T2 was a second opinion on T1's flagged slice, never a sweep, so only **21,474 of the 604,258** state rows carry a `whisper.cpp/ggml-large-v3` reading. `needs_work` reaches `if prior is None or prior.get("error"): return True` before it ever looks at a score, so pointing the driver at the whole corpus with `STT_MODEL=whisper.cpp/ggml-large-v3` does not redraw the bad clips: it enqueues the **582,784 rows the non-turbo judge has never seen**. That is what the 15:53 launch did, and tqdm showed it plainly once the rate stabilised: 1.5 clip/s and an 85 to 125 h ETA, transcribing clips whose displayed `cer=0.000`. Note `--force` is not the cause and could not be: it only bypasses the resolved-status skip, and the final `return is_bad(...)` still has to agree, so a clean-scoring clip can never be queued by it.
+
+The fix is a bounded queue computed up front and passed as `STEMS_FROM`, which the launcher's phase 0b now builds. It imports `is_bad` and `Scores` from `01_recursive_improvement.py` rather than reimplementing the four gates (a second copy of the thresholds is how the queue and the improver would disagree), and reads the status at `row["improvement"]["status"]`, which is where it lives on a state row:
+
+| rows | with a non-turbo reading | of those, `is_bad` | by status | queueable stems |
+| --- | --- | --- | --- | --- |
+| 604,258 | 21,474 (3.6 pct) | 1,640 | 893 `pending_tts`, 738 `improved`, 9 `untouched` | 902 |
+
+With `STEMS_FROM` the pass logs `clip filter: only 902 stem(s) from --stems-from` and every other row is passed through untouched, which turns a 107 h sweep into a round sized by the clips the arbiter actually disputes.
+
+**Four replicas, not six: the non-turbo model is 2.8x the resident size of turbo.** The 15:17 launch died with `switch_server: ... still 'unhealthy' after 900s` and `!!! stt pass exited 70`. The cause was in the replica's own log, `allocating 2951.01 MiB on device 0: cudaMalloc failed: out of memory`, not in any code: measured on this 24,564 MiB card (119 MiB of it held by the display), a `ggml-large-v3` replica resides at **4,534 MiB** against turbo's ~1.6 GB, so the `CRISPASR_STT_SCALE=6` that turbo runs at wants ~27.3 GB. Five load and leave 344 MiB; four leave ~6.3 GB spare. The launcher exports `CRISPASR_STT_SCALE=4` for the duration of a non-turbo round and the env plumbing itself was never at fault: the replica log says `type = 5 (large v3)`, so `CRISPASR_ASR_GGML` did reach the container through `./.env`.
+
+## The release gate's three finding classes were one artifact
+
+The gate (`99_hf_release/08_validate_manifests.py`, the chain's step 9) reported 1,747 findings on `full.jsonl` in three shapes, and all three are the same thing: **`05_normalize_text.py` rewrites the pronunciation respellings into `asr_training_source` after the clip was scored**, so a row scored against the source disagrees with a recomputation against `text`. The concrete case, one clip's two references: `"...récepteur à l'oestrogène montre 80 % de cell"` (the label) against `"...récepteur à l'éstrogène montre 80 pourcent d"` (the shipped source). `normalize_for_scoring` does not fold `oestrogènes` to `éstrogènes` or `foetal` to `fétal`, so the respelling is charged as a recognition error.
+
+| findings | shape | measured | commit |
+| --- | --- | --- | --- |
+| 1,271 + 469 | `stored cer` / `cer_tail` does not match the stored transcript | 1,278 of 1,278 flagged clips reproduce EXACTLY from `asr_training_source` | `8e4d2cb` |
+| 7 | row trips a QC gate on its own stored transcript | all 7 pass every gate against the source (cer 0.049 to 0.079 against the 0.080 gate, window 0.1455 to 0.1502 against 0.150) | `4fe4800` |
+
+Both fixes apply the same rule, which is the rule stage 06 already decides by: `best_cer` is the **min** over a row's references, so a score is honest when it matches **either** reference and a clip is bad only when its **best** reference still fails. Neither widens into "anything goes": a genuinely stale score matches neither and is still an error, a row with no source to fall back on still trips the gate, and both are pinned by checks in `tests/test_validate_score_reference.py`. The second alignment is computed only for the row that already disagreed, so the either-reference rule costs nothing on the 99.8 pct that match the label outright (jiwer is ~26 ms a row, and doubling that over 602,710 rows x 43 manifests is how the gate became a ten-hour job once before).
+
+An earlier measurement said the opposite (0 of 3,686 matched the source, 3,684 matched the label) and was true when taken: that population predates the chain re-running stage 05 and re-syncing, so the two measurements describe rows scored on either side of that rewrite. Accepting only one of the references fails on whichever ordering it was not measured against.
+
+Separately, `04_drop_bad_rows.py` gained rule 7, `cfg-off` (`c871c4a`): the 55 draws synthesized at `cfg_alpha` exactly 1.0, the rung the improver's ladder could reach before `utils/cfg_sidecar.py` grew `CFG_ALPHA_FLOOR = 1.2`. CFG off is the documented failure mode where the flow-matching decoder stops following the text. Their second-judge disagreement rate (4 of 55, 7.3 pct) is BELOW what `improved` rows show as a class (12.3 pct), so the audio is not measurably damaged; they are dropped anyway because 55 clips is 0.009 pct of the corpus and the alternative is softening the validator that catches the next ones.
+
 ## Open TODOs
 
 * Re-measure STT throughput on 500 clips against the local endpoint before trusting the
