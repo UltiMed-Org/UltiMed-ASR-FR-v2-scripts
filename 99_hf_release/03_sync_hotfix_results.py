@@ -39,10 +39,20 @@ can see WHICH model disagreed rather than a single blended number:
 
     whisper_stt       what ggml-large-v3-turbo heard (the judge over all 602,789 clips)
     whisper_cer       its CER, whisper_cer_window its worst-window CER
-    whisper_repeat_excess   its loop count (near-useless, see below, kept for symmetry)
+    whisper_repeat_excess   null on EVERY row, kept only for column symmetry: the
+                      whisper scorer in `06_hotfixes/01_compute_stt.py` deliberately
+                      does not compute `repeat_excess` (see the comment there and the
+                      decoder reason below), so there is no count to copy, not merely
+                      a weak one. Measured over the v2 release: the field is on 100%
+                      of the 604,337 parakeet readings and 0% of the whisper ones.
+                      `whisper_v3_repeat_excess` is null for the same reason, so the
+                      loop gate rides on `parakeet_repeat_excess` (>= 1 on 4,098
+                      readings) plus the acoustic self-similarity scan, and on nothing
+                      else.
     whisper_v3_*      the same four from non-turbo ggml-large-v3, the second opinion
                       run only over what turbo flagged, so null on most rows
-    parakeet_*        the same four from parakeet-tdt-0.6b-v3-ultra
+    parakeet_*        the same four from parakeet-tdt-0.6b-v3-ultra, and the only
+                      group whose repeat_excess is populated
     cer_max           the worst CER any judge gave the clip
     cer_window_max    the worst window CER any judge gave it
 
