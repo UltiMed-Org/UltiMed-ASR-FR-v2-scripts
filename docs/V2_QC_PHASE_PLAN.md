@@ -383,15 +383,39 @@ Two measurements came out of wiring it up, both recorded in full in that script'
 
 These ~210 clips are dropped rather than redrawn, against the usual preference for repair, and the reason is structural: the pass queues a clip from `is_bad` and promotes a draw only when it beats the stored score by `--min-improvement`, so a babbling clip is never queued (it scores clean) and a flawless new draw would not be promoted either. Repair would mean carrying the metric through scoring, queueing and promotion, and no post-redraw check could confirm the fix without a second parakeet sweep. The audio stays on disk.
 
+## T3: the arbiter round, and why its judge must be the non-turbo one
+
+With the chain's step 4 applied (208,235 stale durations repaired, 10,712 `cer_tail` values written for the first time and 12,016 recomputed over the right window), the redraw queue was counted directly instead of being read off `13_refresh_stale_durations.py`'s `tail_added_OVER_GATE`. That counter only sees a tail that went from absent to over the gate; it is blind to the 12,016 it *replaced*, where a tail measured over the wrong 30 seconds could cross the gate in either direction. So the queue was measured the way `01_recursive_improvement.py` measures it, `is_bad` on the four scores stored under each judge's own key, over both state files (604,337 rows):
+
+| judge | bad | queueable | per-gate (cer / window / tail / bad_run) |
+| --- | --- | --- | --- |
+| `whisper.cpp/ggml-large-v3-turbo` | 25 | 5 | 24 / 7 / 5 / 2 |
+| `whisper.cpp/ggml-large-v3` | 1,665 | 905 | 1,512 / 1,379 / 1,028 / 34 |
+
+Turbo now calls this corpus clean: 25 bad rows is 0.004 pct, and 20 of them are already `exhausted`, i.e. already dropped. The second opinion does not, and its 896 queueable rows in `improved/` are exactly the 896 rows sitting at `pending_tts`.
+
+**That makes the judge the whole design of T3.** A round judged by turbo would redraw 896 clips whose turbo CER is already clean, and a draw is promoted only when it beats the stored score by `--min-improvement` (0.02): `best["scores"].cer <= orig.cer - cfg.min_improvement`. A clip at turbo CER 0.03 cannot be beaten by 0.02, so the round would spend hours of GPU and promote almost nothing. This is the same structural trap written up for the preamble defect two sections above, in the opposite direction: the judge that FLAGS has to be the judge that PROMOTES. T3 therefore runs `STT_MODEL=whisper.cpp/ggml-large-v3` with `CRISPASR_ASR_GGML=ggml-large-v3.bin`, like T2, but in `alternate` mode so it draws.
+
+**A promotion now destroys the other judges' readings, so the round has a refill tail.** `_apply_improvement` rewrites only `transcriptions[model_key]`, which left every other judge's reading describing bytes that no longer existed, with nothing marking it; it now drops them instead (a missing reading is loud, a stale one is silent, and `utils/clip_freshness.py`'s mtime rule cannot arbitrate because a state reading carries no `ts`). Correct, and it opens two holes that matter downstream: the release's `stt_transcript` / `cer` / `cer_tail` columns are synced from the **turbo** key, and `04_flag_asr_defects.py` reads the **parakeet** one. Both are refilled on the redrawn stems only, which is why the launcher snapshots the set of rows missing each key before the round and diffs it after. Measured before launch, that snapshot is **0 and 0**: every one of the 604,337 rows carries a usable turbo transcript and a usable parakeet transcript, so the diff is exactly the clips the round touched and nothing else.
+
+Two details make the refill cheap rather than another corpus sweep:
+
+* The turbo refill needs `RETRY_IMPROVED=1`, and in `MODE=stt` that is not a gamble. A redrawn row is `improved`, and `needs_work` returns False on a resolved status *before* it ever checks whether the judge's key is present, so without the flag the pass transcribes nothing. Since no candidates are drawn, the worst a reopened row can become is `pending_tts`, which nothing drops.
+* The parakeet refill writes a **separate** sidecar (`qc_parakeet_refill.jsonl`), because `03_qc_cpu_stt.py::seed_handled` keys a finished clip by its bare stem and reads the sidecar it is about to write: aiming the normal `qc_parakeet_ultra.jsonl` at stems it already contains would skip every single one. `12_merge_judge_sidecars.py --out-name` then merges it as a second source, and its freshness rule means the main sidecar's now-stale rows for those stems are skipped rather than re-certified. `--stems-from` (which both tools take, via `utils/stem_requests.py`) plus `--sample-percent 0` is what keeps this at minutes instead of the 10 to 20 h a full GPU sweep costs.
+
+**One decision is deliberately left open:** whether to add `RETRY_IMPROVED=1` to the round itself, for the 740 rows that won under turbo and still fail the non-turbo arbiter. The arbiter was commissioned for exactly those clips, so the upside is real; the risk is that a reopened win no draw can beat ends `exhausted`, and `04_drop_bad_rows.py` drops `exhausted`, so up to 740 currently-shipping clips could be lost to a stricter judge's opinion. The launcher defaults it off. `RETRY_EXHAUSTED=1` is upside-only (those 20 rows are already dropped) and is always on.
+
 ## Open TODOs
 
 * Re-measure STT throughput on 500 clips against the local endpoint before trusting the
   31 h.
 * `99_hf_release/README.md` still carries four `TODO (v2)` cells, including the distinct
   voices per term numbers that work item 4 changes.
-* TODO: run `06_hotfixes/13_refresh_stale_durations.py --apply` in the export chain (see the
-  section above), then act on whatever the newly scored tails flag: 5,250 clips have never had
-  their ending checked, so the count of real end-of-clip defects in the corpus is still unknown.
+* DONE 2026-10-26: `06_hotfixes/13_refresh_stale_durations.py --apply` ran as the chain's
+  step 4 (208,235 durations, 213,957 `voice` values and 405,242 `stt_rtf` values repaired,
+  10,712 tails written, 12,016 rescored, 551 removed). The answer to "how many real
+  end-of-clip defects" is in the table in the T3 section above: 5 under turbo, 1,028 under
+  the non-turbo arbiter, which is what T3 redraws.
 * TODO: decide whether the voice swap should avoid `h_itf_def` and `h_frf_itm` as swap
   TARGETS, given the table above. Needs the full sweep's final per-voice numbers, not the
   dictionary-only slice.
