@@ -404,6 +404,20 @@ def check_scores(rows: list[dict], name: str, f: Findings, *, sample_percent: fl
             if tail is None and stored_tail is not None:
                 f.warn(name, "cer_tail stored on a clip too short to have a tail",
                        f"{ident} duration={dur:.1f}s cer_tail={stored_tail}")
+            elif tail is not None and stored_tail is None:
+                # The missing half of the check above, and the one that mattered: this is
+                # the shape 5,250 v2 clips were in on 2026-10-26. Their state rows carried
+                # a v1-era duration at or under TAIL_SECONDS, so `tail_cer` returned None
+                # and the ENDING of a clip that really runs past 30 s was never scored by
+                # anyone. A null is not evidence of a short clip once the row's own
+                # duration says otherwise, so say so rather than reading it as "fine".
+                # A warning, not an error, because a v1 row whose transcript predates the
+                # tail gate legitimately has none, and a release gate that always fails is
+                # a gate nobody reads.
+                f.warn(name, "no cer_tail on a clip long enough to have one",
+                       f"{ident} duration={dur:.1f}s recomputed={tail:.6f}",
+                       {"audio_filepath": ident, "duration": dur,
+                        "recomputed_cer_tail": tail})
             elif tail is not None and isinstance(stored_tail, (int, float)) \
                     and abs(tail - stored_tail) > SCORE_EPSILON:
                 f.error(name, "stored cer_tail does not match the stored transcript",

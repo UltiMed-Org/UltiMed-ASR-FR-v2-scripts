@@ -64,6 +64,12 @@ def score_errors(r: dict) -> list[str]:
     return [kind for _check, kind in f.errors]
 
 
+def score_warnings(r: dict) -> list[str]:
+    f = _mod.Findings()
+    _mod.check_scores([r], "unit", f, sample_percent=100.0, seed=0)
+    return [kind for _check, kind in f.warnings]
+
+
 def main() -> int:
     print("the reference the scores check recomputes against")
 
@@ -94,6 +100,25 @@ def main() -> int:
     long_row = row(duration=42.1, cer_tail=0.42)
     tail = [k for k in score_errors(long_row) if "cer_tail" in k]
     check("a stale cer_tail is reported too", len(tail) == 1, str(tail))
+
+    # A MISSING tail on a long clip: the shape 5,250 v2 clips were in, and the one this
+    # check used to read as "fine" because a null stored_tail skipped the comparison
+    # entirely. Both directions have to be reported or the stale-duration bug of
+    # 2026-10-26 can recur silently: a clip whose row says 42 s has an ending, and
+    # nothing scored it.
+    missing = [k for k in score_warnings(row(duration=42.1, cer_tail=None))
+               if "no cer_tail" in k]
+    check("a long clip with no cer_tail at all is reported", len(missing) == 1,
+          str(score_warnings(row(duration=42.1, cer_tail=None))))
+    # ...and it is a warning, not an error: a v1 row predating the tail gate has none
+    # legitimately, and a gate that always fails is a gate nobody reads.
+    check("and only as a warning, so the gate still passes",
+          score_errors(row(duration=42.1, cer_tail=None)) == [],
+          str(score_errors(row(duration=42.1, cer_tail=None))))
+    # The symmetric case must keep working, and a SHORT clip with no tail is correct.
+    check("a short clip with no cer_tail is not reported",
+          [k for k in score_warnings(row()) if "cer_tail" in k] == [],
+          str(score_warnings(row())))
 
     # A row with no transcript is the structure check's business, not this one's.
     check("a row with no transcript is skipped here",
