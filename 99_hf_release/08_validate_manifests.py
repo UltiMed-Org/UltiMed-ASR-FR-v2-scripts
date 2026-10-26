@@ -3,6 +3,7 @@
 # requires-python = ">=3.10"
 # dependencies = [
 #   "jiwer>=3.0",
+#   "requests>=2.31",  # unused here; stage 06's scorer imports it at module scope
 #   "tqdm>=4.66",
 #   "loguru>=0.7",
 #   "click>=8.1",
