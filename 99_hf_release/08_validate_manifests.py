@@ -362,12 +362,23 @@ def check_scores(rows: list[dict], name: str, f: Findings, *, sample_percent: fl
     """
     stt = _load_stt()
     rng = random.Random(seed)
-    todo = [r for r in rows
-            if r.get("qc_status") != "original"
-            or (r.get("cer") or 0) > 0
-            or rng.uniform(0, 100) < sample_percent]
+    # A row can only carry a STALE score if something rewrote its audio or its
+    # transcript, and `qc_status` is what records that: a redrawn clip ships as
+    # `regenerated`. This used to admit `(r.get("cer") or 0) > 0` as well, as a stand-in
+    # for the same idea, and that is not what a nonzero CER means: it is the NORMAL state
+    # of a TTS corpus judged by an ASR model (this release's median is 0.0115). So the
+    # clause admitted 530,557 of full.jsonl's 602,710 rows, made `--sample-percent` dead
+    # code, and turned the release gate into a ten-hour job: measured 2026-10-26 at
+    # 38.9 row/s, because jiwer's character alignment costs ~26 ms per row and this
+    # check runs it over 43 manifests. Dropped. The sample is what covers the residual
+    # case, a row rewritten without its `qc_status` following.
+    touched = [r for r in rows if r.get("qc_status") != "original"]
+    sampled = [r for r in rows if r.get("qc_status") == "original"
+               and rng.uniform(0, 100) < sample_percent]
+    todo = touched + sampled
     logger.info(f"{name}: recomputing scores for {len(todo)} of {len(rows)} row(s) "
-                f"(all non-pristine, plus {sample_percent}% of the rest)")
+                f"({len(touched)} touched by a redraw, plus {sample_percent}% of the "
+                f"rest = {len(sampled)})")
 
     checked = 0
     for r in tqdm(todo, desc=f"{name} scores", unit="row", leave=False):

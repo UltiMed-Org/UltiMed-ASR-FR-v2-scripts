@@ -70,6 +70,82 @@ def score_warnings(r: dict) -> list[str]:
     return [kind for _check, kind in f.warnings]
 
 
+#: The same read with one character wrong, so a PRISTINE row can carry a nonzero CER that
+#: is nevertheless correct. That combination is the normal state of every row in this
+#: release (median CER 0.0115) and it is what the todo list used to mistake for evidence
+#: that a redraw had touched the row.
+HEARD_TYPO = HEARD.replace("normal.", "normale.")
+
+
+class CountingStt:
+    """The scorer, wrapped to count how many rows actually get recomputed.
+
+    The cost of this check is one `compute_metrics` per row in the todo list, so counting
+    those calls is the only way to pin the SIZE of the list: a pristine row whose stored
+    score is correct produces no finding whether it was recomputed or skipped, which is
+    exactly why the 100-percent-coverage bug could sit here unnoticed through every run.
+    """
+
+    def __init__(self, real) -> None:
+        self._real = real
+        self.calls = 0
+
+    def compute_metrics(self, ref, hyp):
+        self.calls += 1
+        return self._real.compute_metrics(ref, hyp)
+
+    def __getattr__(self, name):
+        # Everything else (tail_cer, window_metrics, the gate constants) goes to the real
+        # module untouched: only the per-row recompute is being counted, and a hand-listed
+        # forwarder would break the next time this check reads one more thing from it.
+        return getattr(self._real, name)
+
+
+def run_counted(rows: list[dict], *, sample_percent: float) -> tuple[int, int]:
+    """(recomputes, errors) for one check_scores run over `rows`."""
+    counter = CountingStt(_mod._load_stt())
+    saved = _mod._load_stt
+    _mod._load_stt = lambda: counter
+    try:
+        f = _mod.Findings()
+        _mod.check_scores(rows, "unit", f, sample_percent=sample_percent, seed=0)
+        return counter.calls, len(f.errors)
+    finally:
+        _mod._load_stt = saved
+
+
+def test_only_touched_rows_are_recomputed() -> None:
+    """--sample-percent has to actually govern the pristine rows.
+
+    Before this was fixed the todo list also admitted every row with a nonzero CER, so a
+    602,710-row manifest recomputed 530,557 rows however small the sample was, at ~26 ms
+    each: 3 h 42 min for ONE of the release's 43 manifests, and the whole gate over ten
+    hours (measured 2026-10-26, which is when the chain was interrupted to fix this).
+    """
+    print("\nthe sample governs the pristine rows")
+    pristine_cer = _stt.compute_metrics(LABEL, HEARD_TYPO)[1]
+
+    # Guard the fixture: a pristine row has to carry a NONZERO but correct score, or the
+    # bug this pins would not have been reachable.
+    check("a correct pristine score is nonzero", pristine_cer > 0, str(pristine_cer))
+
+    pristine = [row(audio_filepath=f"../dictionary/{i:06d}_0000_x.flac",
+                    qc_status="original", stt_transcript=HEARD_TYPO, cer=pristine_cer)
+                for i in range(200)]
+    # One redrawn row with a genuinely stale score: the case the check exists for.
+    stale = row(audio_filepath="../PARHAF/000013_0000_x.flac", qc_status="regenerated",
+                cer=0.42)
+
+    calls, errors = run_counted(pristine + [stale], sample_percent=0.0)
+    check("at 0 percent only the redrawn row is recomputed", calls == 1, str(calls))
+    check("and its stale score is still caught", errors == 1, str(errors))
+
+    # The other half: the sample must not be dead the other way either.
+    calls_all, errors_all = run_counted(pristine + [stale], sample_percent=100.0)
+    check("at 100 percent every row is recomputed", calls_all == 201, str(calls_all))
+    check("and the pristine rows still report nothing", errors_all == 1, str(errors_all))
+
+
 def main() -> int:
     print("the reference the scores check recomputes against")
 
@@ -125,6 +201,8 @@ def main() -> int:
           score_errors(row(stt_transcript=None)) == [])
     # And a row with no label cannot be scored at all (the label is REQUIRED elsewhere).
     check("a row with no label is skipped here", score_errors(row(text=None)) == [])
+
+    test_only_touched_rows_are_recomputed()
 
     if failures:
         print(f"\nFAILED: {len(failures)}")
