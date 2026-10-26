@@ -381,6 +381,30 @@ def matches_a_reference(stored: float, *recomputed: float | None) -> bool:
     return any(v is not None and abs(v - stored) <= SCORE_EPSILON for v in recomputed)
 
 
+def gate_trips(stt, cer: float | None, window: float | None,
+               bad_run: int | None) -> list[str]:
+    """Which of the QC gates these three numbers fail, as printable labels.
+
+    `stt` is the lazily imported scorer module (`_load_stt()`), which owns the gate
+    constants; it is passed in rather than re-imported so a caller that stubbed it out
+    keeps its stub.
+    """
+    out = []
+    if cer is not None and cer >= stt.DEFAULT_CER_GATE:
+        out.append(f"cer={cer:.3f}")
+    if window is not None and window >= stt.DEFAULT_WINDOW_CER_GATE:
+        out.append(f"window={window:.3f}")
+    if bad_run is not None and bad_run >= stt.DEFAULT_BAD_RUN_GATE:
+        out.append(f"bad_run={bad_run}")
+    return out
+
+
+def kinder(a: float | int | None, b: float | int | None) -> float | int | None:
+    """The better of two measurements of one clip (lower is better); None = not measured."""
+    vals = [v for v in (a, b) if v is not None]
+    return min(vals) if vals else None
+
+
 def check_scores(rows: list[dict], name: str, f: Findings, *, sample_percent: float,
                  seed: int) -> None:
     """Recompute each row's scores from its own stored transcript and compare.
@@ -467,13 +491,20 @@ def check_scores(rows: list[dict], name: str, f: Findings, *, sample_percent: fl
         # The gates, applied to what the row actually says. A row whose own transcript
         # trips a gate while the row calls itself fine is the one that reaches training.
         window, bad_run = stt.window_metrics(ref, hyp)
-        tripped = []
-        if cer is not None and cer >= stt.DEFAULT_CER_GATE:
-            tripped.append(f"cer={cer:.3f}")
-        if window is not None and window >= stt.DEFAULT_WINDOW_CER_GATE:
-            tripped.append(f"window={window:.3f}")
-        if bad_run is not None and bad_run >= stt.DEFAULT_BAD_RUN_GATE:
-            tripped.append(f"bad_run={bad_run}")
+        tripped = gate_trips(stt, cer, window, bad_run)
+        if tripped and alt:
+            # The same either-reference rule as `matches_a_reference`, for the same
+            # reason: stage 06 gates on `best_cer`, the MIN over the row's references, so
+            # a clip is only bad when its BEST reference still fails. Against the label
+            # alone, 7 v2 rows tripped on 2026-10-26 and all 7 pass against the shipped
+            # source (cer 0.049-0.079 against the 0.080 gate, window 0.1455-0.1502
+            # against 0.150), i.e. a pronunciation respelling charged as a misread.
+            # Measured only for a row that already tripped, so it costs nothing on the
+            # rest.
+            alt_window, alt_bad_run = stt.window_metrics(alt, hyp)
+            tripped = gate_trips(stt, kinder(cer, stt.compute_metrics(alt, hyp)[1]),
+                                 kinder(window, alt_window),
+                                 kinder(bad_run, alt_bad_run))
         if tripped:
             f.warn(name, "row trips a QC gate on its own stored transcript",
                    f"{ident} {' '.join(tripped)} qc_status={r.get('qc_status')!r}",

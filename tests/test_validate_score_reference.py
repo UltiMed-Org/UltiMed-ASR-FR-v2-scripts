@@ -47,6 +47,25 @@ LABEL = ("Les récepteurs aux oestrogènes sont positifs et le bilan foetal est 
 SOURCE = ("Les récepteurs aux éstrogènes sont positifs et le bilan fétal est normal.")
 HEARD = ("Les récepteurs aux oestrogènes sont positifs et le bilan foetal est normal.")
 
+#: The same respelling story, but loud enough to trip a gate rather than just move the
+#: score: against the label this pair reads cer 0.0833, over the 0.080 gate, and against
+#: the shipped source 0.0000. The LABEL/SOURCE trio above cannot stand in for it (0.0444,
+#: under every gate), which is exactly why the gate half of the check went unnoticed.
+GATE_LABEL = "Le foetus et l'oesophage."
+GATE_SOURCE = "Le f\u00e9tus et l'\u00e9sophage."
+
+
+def gate_row(**over) -> dict:
+    """A row whose transcript matches its SOURCE, so only the label's spelling trips."""
+    base = {"text": GATE_LABEL, "asr_training_source": GATE_SOURCE,
+            "stt_transcript": GATE_SOURCE, "cer": 0.0}
+    base.update(over)
+    return row(**base)
+
+
+def gate_warnings(r: dict) -> list[str]:
+    return [k for k in score_warnings(r) if "QC gate" in k]
+
 
 def row(**over) -> dict:
     stored = _stt.compute_metrics(LABEL, HEARD)[1]
@@ -196,6 +215,20 @@ def main() -> int:
     # rule widens what counts as honest, it does not switch the gate off.
     check("a score matching neither reference is still reported",
           len(score_errors(row(cer=0.42))) == 1, str(score_errors(row(cer=0.42))))
+
+    # Third class from the same 2026-10-26 report: 7 rows "trip a QC gate on their own
+    # stored transcript", and all 7 pass every gate against the source (cer 0.049-0.079
+    # against 0.080, window 0.1455-0.1502 against 0.150). Stage 06 gates on `best_cer`,
+    # the MIN over the references, so the recomputation has to as well or the release gate
+    # accuses a respelling of being a misread.
+    kept = gate_warnings(gate_row())
+    check("a gate tripped only by the label's spelling is not reported", kept == [],
+          str(kept))
+    # And the gate must still fire when the BEST reference is the one failing: same row,
+    # no source to fall back on.
+    alone = gate_warnings(gate_row(asr_training_source=None))
+    check("a row with no kinder reference still trips the gate", len(alone) == 1,
+          str(score_warnings(gate_row(asr_training_source=None))))
 
     # A stale tail is its own finding, on a clip long enough to have a tail (over 30 s).
     long_row = row(duration=42.1, cer_tail=0.42)
