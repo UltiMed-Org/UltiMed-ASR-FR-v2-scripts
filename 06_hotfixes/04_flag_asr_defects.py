@@ -48,13 +48,39 @@ flagged: they cannot be told apart from a Parakeet error without listening.
 The live CPU QC (``05_generate_audio/03_qc_cpu_stt.py``) flags the same ``skipped``
 failure from a SINGLE recognizer, character-level: ``window_metrics`` in
 ``01_compute_stt.py`` returns the longest contiguous run of missing label characters,
-gated at 30 (~5 French words). The two are not merged on purpose. This file's output
-drops clips from the release, so it waits for two recognizers to agree; the live one
-only asks for a listen, so it can afford one and can therefore run during generation.
-Neither is a superset of the other (a character run catches a skipped phrase the word
-rule rejects as a compound; the word rule catches a skip the run splits in two), and
-the measurement that would settle whether one can replace the other is to run both over
-the same hypotheses file and diff their catches. Until then, do not add a third.
+gated at 30 (~5 French words). This file's output drops clips from the release, so it
+waits for two recognizers to agree; the live one only asks for a listen, so it can
+afford one and can therefore run during generation.
+
+**The 2026-10-26 measurement**, which earlier versions of this docstring asked for ("run
+both over the same hypotheses file and diff their catches"), is why ``skipped`` is now
+OFF by default (`DEFAULT_REASONS`). Both rules were run over the first 19,738 v2 clips of
+``improved/full.stt.jsonl``, with the parakeet-v3-ultra sweep as the hypothesis and the
+whisper-turbo reading as the confirmation:
+
+- ``preamble``: 7 clips, and all 7 are real, inspected one by one. Four are babble before
+  the sentence ("El Rusem l'a donné ce jour, le 13 mars..." for a label starting "Ce
+  jour le 13 mars"), three are the opening phrase spoken TWICE ("Sur le plan
+  hématologique. Sur le plan hématologique, l'évolution..."). Every one of them passed
+  the existing gates: whisper CER 0.0095 to 0.057 against a 0.08 threshold, and
+  ``bad_run_chars`` 1 to 7 against 30, because an INSERTION at the start is what no
+  current gate measures (``bad_run_chars`` counts missing reference characters only).
+  Projected corpus-wide: ~210 clips, and they are repairable, so they belong in a redraw
+  round before any drop.
+- ``skipped``: 17 clips, and the character-level evidence contradicts most of them. Their
+  spans are dosage and unit enumerations ("milligrammes est à porter de 8 heures à 20
+  heures", "lisinopril 10 milligrammes deux comprimés le matin il prend lercan 20
+  milligrammes un"), where both recognizers write digits for spelled numbers and
+  ``_merged_diffs`` then chains a dozen one-word diffs into one long "missing" span. The
+  tell is arithmetic: a clip that truly lost ten words of a ~500-character label cannot
+  score CER 0.0049 with ``bad_run_chars`` 1, and that is exactly what clip
+  ``006151_0000_cardiologie_00001_t0_c16`` scores. ``bad_run_chars`` was under 30 on all
+  17. So on this corpus the word rule catches nothing real that the character gate
+  misses, while it would drop ~520 long, dosage-dense PARHAF clips, which is the
+  long-form data this dataset is built for. Re-enable it with ``--reason skipped`` on a
+  corpus with fewer enumerations, or after teaching `_merged_diffs` a merge budget.
+
+Until then, do not add a third.
 
 Both texts are compared after lowercasing and dropping punctuation, like the NeMo
 normalizer, which is enough since only whole missing or extra words matter here.
@@ -73,6 +99,7 @@ import difflib
 import json
 import re
 import sys
+from collections.abc import Collection
 from pathlib import Path
 
 import click
@@ -88,6 +115,10 @@ DEFAULT_OUT = _HERE.parent / "99_hf_release" / "asr_flagged_clips.jsonl"
 DEFAULT_JUDGE_KEY = "onnx-asr/parakeet-tdt-0.6b-v3-ultra"
 PREAMBLE = "preamble"
 SKIPPED = "skipped"
+#: Which rules `--reason` may ask for, and which it asks for by default. `skipped` is OFF
+#: by default: see "The 2026-10-26 measurement" in the module docstring.
+REASONS = (PREAMBLE, SKIPPED)
+DEFAULT_REASONS = (PREAMBLE,)
 MIN_PREAMBLE_WORDS = 2
 MIN_SKIPPED_WORDS = 3
 _PUNCT = re.compile(r"[^\w\s']")
@@ -126,8 +157,12 @@ def _merged_diffs(ops: list[tuple]) -> list[tuple[int, int, int, int]]:
     return [tuple(sp) for sp in spans]
 
 
-def find_defect(label: str, hyp: str, stt: str | None) -> tuple[str, str] | None:
+def find_defect(label: str, hyp: str, stt: str | None,
+                reasons: Collection[str] = REASONS) -> tuple[str, str] | None:
     """Return ``(reason, offending words)`` for a defective clip, else ``None``.
+
+    `reasons` selects which rules run; the doctests below exercise both, while the CLI
+    defaults to `DEFAULT_REASONS`.
 
     >>> find_defect("Courrier de suivi.", "Jackie Orbad dit. Courrier de suivi.", None)
     ('preamble', 'jackie orbad dit')
@@ -149,9 +184,9 @@ def find_defect(label: str, hyp: str, stt: str | None) -> tuple[str, str] | None
     tag, i1, i2, j1, j2 = ops[0]
     # A pure insertion only: a "replace" at the start is usually the model splitting the
     # label's first word ("Suvreza" -> "Essus UV réza"), not extra audio.
-    if tag == "insert" and j2 - j1 >= MIN_PREAMBLE_WORDS:
+    if PREAMBLE in reasons and tag == "insert" and j2 - j1 >= MIN_PREAMBLE_WORDS:
         return PREAMBLE, " ".join(h[j1:j2])
-    if not stt:
+    if not stt or SKIPPED not in reasons:
         return None
     # Label word indices Whisper's transcript does match.
     s_ops = difflib.SequenceMatcher(a=ref, b=words(stt), autojunk=False).get_opcodes()
@@ -219,13 +254,17 @@ def load_hyps(path: Path, judge_key: str = DEFAULT_JUDGE_KEY) -> dict[str, str]:
               type=click.Path(path_type=Path))
 @click.option("--judge-key", default=DEFAULT_JUDGE_KEY, show_default=True,
               help="Reading to use when HYPS is a stage 06 state file.")
+@click.option("--reason", "reasons", multiple=True, type=click.Choice(REASONS),
+              default=DEFAULT_REASONS, show_default=True,
+              help="Which rules to apply. `skipped` is off by default, see the module "
+                   "docstring's 2026-10-26 measurement.")
 @click.option("--extra-hyps", "extra", multiple=True, metavar="FILE",
               type=click.Path(exists=True, path_type=Path),
               help="More hypothesis or state files, merged into HYPS. The corpus is held "
                    "in two state files (improved/ and improved_parrot/), and the second "
                    "one is how the separately licensed PARROT clips get checked too.")
 def main(hyps: Path, manifests: tuple[Path, ...], out: Path, judge_key: str,
-         extra: tuple[Path, ...]) -> None:
+         reasons: tuple[str, ...], extra: tuple[Path, ...]) -> None:
     """Flag TTS preambles and confirmed skips from a non-Whisper recognizer's output."""
     hyp_by_key: dict[str, str] = {}
     for source in (hyps, *extra):
@@ -239,10 +278,12 @@ def main(hyps: Path, manifests: tuple[Path, ...], out: Path, judge_key: str,
             if key in flagged or key not in hyp_by_key:
                 continue
             n_checked += 1
-            defect = find_defect(row["text"], hyp_by_key[key], row.get("stt_transcript"))
+            defect = find_defect(row["text"], hyp_by_key[key], row.get("stt_transcript"),
+                                 reasons)
             if defect:
                 flagged[key] = {"clip": key, "reason": defect[0], "words": defect[1],
                                 "text": row["text"], "hyp": hyp_by_key[key]}
+    logger.info(f"rules: {', '.join(reasons)}")
     logger.info(f"checked {n_checked} clips ({len(hyp_by_key)} hypotheses), flagged {len(flagged)}: "
                 f"{sum(f['reason'] == PREAMBLE for f in flagged.values())} {PREAMBLE}, "
                 f"{sum(f['reason'] == SKIPPED for f in flagged.values())} {SKIPPED}")

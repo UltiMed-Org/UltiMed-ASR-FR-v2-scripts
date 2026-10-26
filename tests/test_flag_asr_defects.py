@@ -69,6 +69,31 @@ def test_load_hyps_accepts_both_shapes() -> None:
     print("test_load_hyps_accepts_both_shapes: OK")
 
 
+def test_default_reasons_exclude_skipped() -> None:
+    """The default rule set must be `preamble` alone, and `skipped` must still work.
+
+    Pinned because the default is a release decision, not a style choice: the module
+    docstring's 2026-10-26 measurement found `skipped` firing on dosage enumerations
+    where the clip's own CER (0.0049) and bad_run_chars (1) rule a real omission out, so
+    leaving it on would drop ~520 good long PARHAF clips. A future change that flips it
+    back on by accident has to fail here.
+    """
+    mod = _load()
+    assert mod.DEFAULT_REASONS == (mod.PREAMBLE,), mod.DEFAULT_REASONS
+
+    label, hyp = "le patient est sorti hier soir", "le patient"
+    # The rule itself is unchanged: asked for, it still fires.
+    assert mod.find_defect(label, hyp, hyp, (mod.SKIPPED,))[0] == mod.SKIPPED
+    # Not asked for, it does not, and the preamble rule is unaffected either way.
+    assert mod.find_defect(label, hyp, hyp, mod.DEFAULT_REASONS) is None
+    assert mod.find_defect("Courrier de suivi.", "Jackie Orbad dit. Courrier de suivi.",
+                           None, mod.DEFAULT_REASONS)[0] == mod.PREAMBLE
+    # And a clip with no Whisper transcript must not crash the skipped branch.
+    assert mod.find_defect(label, hyp, None, (mod.SKIPPED,)) is None
+    print("test_default_reasons_exclude_skipped: OK")
+
+
 if __name__ == "__main__":
     test_find_defect()
     test_load_hyps_accepts_both_shapes()
+    test_default_reasons_exclude_skipped()
