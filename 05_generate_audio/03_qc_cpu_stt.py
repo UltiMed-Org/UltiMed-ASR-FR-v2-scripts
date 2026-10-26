@@ -1302,7 +1302,8 @@ def report_defect_mix(paths: dict[str, Path], *, severe_cer: float = 0.25,
     return total
 
 
-def rescore_sidecar(path: Path, cfg, *, apply: bool = False) -> dict:
+def rescore_sidecar(path: Path, cfg, *, apply: bool = False,
+                    all_rows: bool = False) -> dict:
     """Recompute every gate from each row's STORED transcript, no GPU and no audio.
 
     A gate added after a sweep has started does not mean re-transcribing the corpus,
@@ -1322,7 +1323,7 @@ def rescore_sidecar(path: Path, cfg, *, apply: bool = False) -> dict:
     original intact, but a sweep appending to the same sidecar would lose the rows it
     wrote in between. The caller refuses a file that was touched in the last 60 s.
     """
-    out = {"rows": 0, "rescored": 0, "skipped": 0, "gained_gate": 0,
+    out = {"rows": 0, "rescored": 0, "kept": 0, "skipped": 0, "gained_gate": 0,
            "flipped_on": 0, "flipped_off": 0, "changed_numbers": 0}
     tmp = path.with_suffix(path.suffix + ".rescored")
     with path.open() as src, tmp.open("w") as dst:
@@ -1344,6 +1345,18 @@ def rescore_sidecar(path: Path, cfg, *, apply: bool = False) -> dict:
                 continue
 
             had_gate = "repeat_excess" in row
+            # The default pass only touches rows that MISS a gate, because scoring one
+            # row costs ~26 ms of pure Python (the sliding window dominates) and the
+            # corpus is 602,789 rows: a full pass is ~4.3 h single-threaded, against
+            # ~21 min for the 49,339 rows that actually predate the loop gate. The rows
+            # a sweep wrote after the gate existed were scored by `score_clip` with
+            # these same functions on these same texts, so recomputing them can only
+            # reproduce what is already there. `--rescore-all` is for the other case, a
+            # threshold or `normalize_for_scoring` change, which does invalidate them.
+            if had_gate and not all_rows:
+                out["kept"] += 1
+                dst.write(json.dumps(row, ensure_ascii=False) + "\n")
+                continue
             # Only fields the row ALREADY carried can be said to have moved: a row
             # predating the loop gate gains `repeat_excess` from absent to 0, and
             # counting that as a changed number would mark every old row as drifted and
@@ -1652,7 +1665,15 @@ def worker_loop(model, ctx: Context) -> None:
               help="Do not transcribe anything: recompute every gate from the "
                    "transcripts already stored in the sidecars and report what would "
                    "change. Use when a gate is added or a threshold moves; 49,339 rows "
-                   "predate the loop gate. Writes nothing without --apply-rescore.")
+                   "predate the loop gate. By default only rows MISSING a gate are "
+                   "touched (see --rescore-all). Writes nothing without "
+                   "--apply-rescore.")
+@click.option("--rescore-all", "rescore_all", is_flag=True,
+              help="With --rescore, rescore every row instead of only the ones missing "
+                   "a gate. Needed after a threshold or normalize_for_scoring change, "
+                   "which invalidates scores that are otherwise reproducible. Costs "
+                   "~26 ms per row of pure Python, so ~4.3 h over the 602,789-row "
+                   "corpus against ~21 min for the default pass.")
 @click.option("--apply-rescore", is_flag=True,
               help="With --rescore, rewrite each sidecar in place (temp file + rename). "
                    "Refuses a sidecar written to in the last 60s, since a running sweep "
@@ -1668,7 +1689,7 @@ def worker_loop(model, ctx: Context) -> None:
               help="Append the log here as well as to stderr; empty string disables. "
                    "A bare filename lands beside this script.")
 def main(stages: tuple[str, ...], model_dir: Path, quantization: str, rescore: bool,
-         apply_rescore: bool,
+         apply_rescore: bool, rescore_all: bool,
          decoder_quantization: str | None, batch: int, batch_sec: float,
          providers_csv: str,
          sample_percent: float, do_retries: bool, threads: int, workers: int,
@@ -1743,17 +1764,20 @@ def main(stages: tuple[str, ...], model_dir: Path, quantization: str, rescore: b
                 logger.error("{}: {} was written {:.0f}s ago, so a sweep is probably "
                              "appending to it; not rewriting it", watch.name, out_name, age)
                 continue
-            got = rescore_sidecar(path, cfg, apply=apply_rescore)
+            got = rescore_sidecar(path, cfg, apply=apply_rescore, all_rows=rescore_all)
             total.update(got)
-            logger.info("{}: {} row(s), {} rescored, {} gained the loop gate, "
-                        "{} newly flagged, {} cleared, {} numbers moved{}",
-                        watch.name, got["rows"], got["rescored"], got["gained_gate"],
-                        got["flipped_on"], got["flipped_off"], got["changed_numbers"],
+            logger.info("{}: {} row(s), {} rescored, {} already had every gate, "
+                        "{} gained the loop gate, {} newly flagged, {} cleared, "
+                        "{} numbers moved{}",
+                        watch.name, got["rows"], got["rescored"], got["kept"],
+                        got["gained_gate"], got["flipped_on"], got["flipped_off"],
+                        got["changed_numbers"],
                         "" if apply_rescore else " (DRY RUN, nothing written)")
-        logger.info("total: {} row(s), {} rescored, {} gained the loop gate, {} newly "
-                    "flagged, {} cleared, {} numbers moved, {} skipped",
-                    total["rows"], total["rescored"], total["gained_gate"],
-                    total["flipped_on"], total["flipped_off"],
+        logger.info("total: {} row(s), {} rescored, {} already had every gate, {} gained "
+                    "the loop gate, {} newly flagged, {} cleared, {} numbers moved, "
+                    "{} skipped",
+                    total["rows"], total["rescored"], total["kept"],
+                    total["gained_gate"], total["flipped_on"], total["flipped_off"],
                     total["changed_numbers"], total["skipped"])
         if not apply_rescore:
             logger.info("dry run: pass --apply-rescore to write it")

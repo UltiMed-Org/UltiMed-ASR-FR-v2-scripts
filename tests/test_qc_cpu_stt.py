@@ -774,6 +774,59 @@ def test_rescore_adds_the_loop_gate_without_transcribing_anything() -> None:
     assert by_stem["a"]["rescored_ts"].endswith("Z")
 
 
+def test_rescore_leaves_rows_that_already_carry_every_gate_alone() -> None:
+    """The default pass must cost nothing on the rows the sweep scored itself.
+
+    Scoring one row is ~26 ms of pure Python (the sliding window dominates), so over
+    602,789 rows a blanket pass is ~4.3 h single-threaded while the rows that actually
+    need it, the 49,339 predating the loop gate, are ~21 min. A row that already carries
+    `repeat_excess` was scored by `score_clip` with these same functions on these same
+    texts, so recomputing it can only reproduce what is there. `--rescore-all` is the
+    escape hatch for a threshold or normalization change, which does invalidate them.
+    """
+    label = ("le patient recoit de l amoxicilline un gramme par voie intraveineuse "
+             "toutes les huit heures pendant sept jours puis un relais par voie orale")
+    new_row = {"stem": "new", "stage": "01_dictionnary", "reason": "sample", "voice": "v",
+               "duration": 30.0, "cer": 0.0, "wer": 0.0, "tail_cer": None,
+               "window_cer": 0.0, "bad_run_chars": 0, "repeat_excess": 0,
+               "over_gate": False, "stt_s": 1.0, "ts": "2026-10-26T01:00:00Z",
+               "transcript": label, "reference": label}
+    # Deliberately wrong stored numbers on a row that HAS the gate: the default pass must
+    # not silently correct them, which is what proves it never scored the row at all.
+    stale_row = dict(new_row, stem="stale", cer=0.9, window_cer=0.9, over_gate=True)
+    old_row = {"stem": "old", "stage": "01_dictionnary", "reason": "sample", "voice": "v",
+               "duration": 30.0, "cer": 0.0, "wer": 0.0, "tail_cer": None,
+               "window_cer": 0.0, "bad_run_chars": 0, "over_gate": False,
+               "stt_s": 1.0, "ts": "2026-10-25T20:00:00Z",
+               "transcript": label, "reference": label}
+
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "qc.jsonl"
+        with path.open("w") as fh:
+            for row in (new_row, stale_row, old_row):
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        cfg = make_cfg()
+
+        got = qc.rescore_sidecar(path, cfg, apply=True)
+        assert got["rows"] == 3, got
+        assert got["kept"] == 2 and got["rescored"] == 1, got
+        assert got["gained_gate"] == 1, got
+        by_stem = {json.loads(l)["stem"]: json.loads(l)
+                   for l in path.read_text().splitlines()}
+        assert "rescored_ts" not in by_stem["new"] and "rescored_ts" not in by_stem["stale"]
+        assert by_stem["stale"]["cer"] == 0.9, "a kept row must be passed through verbatim"
+        assert by_stem["old"]["repeat_excess"] == 0 and by_stem["old"]["rescored_ts"]
+
+        # --rescore-all is the opposite contract: it touches everything, and the wrong
+        # numbers on the stale row are then corrected.
+        allgot = qc.rescore_sidecar(path, cfg, apply=True, all_rows=True)
+        assert allgot["rescored"] == 3 and allgot["kept"] == 0, allgot
+        assert allgot["flipped_off"] == 1, allgot
+        fixed = {json.loads(l)["stem"]: json.loads(l)
+                 for l in path.read_text().splitlines()}
+        assert fixed["stale"]["cer"] == 0.0 and fixed["stale"]["over_gate"] is False
+
+
 def main() -> None:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
