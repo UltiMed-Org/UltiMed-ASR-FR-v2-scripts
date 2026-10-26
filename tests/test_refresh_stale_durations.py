@@ -73,6 +73,11 @@ def rows_for(tmp: Path) -> tuple[Path, Path]:
         # agrees already: must come out untouched
         {"audio_filepath": "../dictionary/000003_0000_z.flac", "duration": 20.0,
          "text": LABEL, "voice": "fr_male"},
+        # A swapped clip: the manifest's voice is the one the assignment hash derives,
+        # the state's is the one that actually read it. Its duration is stale too, so the
+        # row IS rewritten and the voice still has to survive.
+        {"audio_filepath": "../acronyms/000004_0000_w.flac", "duration": 44.0,
+         "text": LABEL, "voice": "fr_female"},
     ]), encoding="utf-8")
 
     def reading(text, **over):
@@ -89,6 +94,9 @@ def rows_for(tmp: Path) -> tuple[Path, Path]:
          "transcriptions": {"turbo": reading(LABEL, cer_tail=0.3333)}},
         {"audio_filepath": "../dictionary/000003_0000_z.flac", "duration": 20.0,
          "text": LABEL, "voice": "fr_male",
+         "transcriptions": {"turbo": reading(LABEL)}},
+        {"audio_filepath": "../acronyms/000004_0000_w.flac", "duration": 20.0,
+         "text": LABEL, "voice": "h_itf_def",
          "transcriptions": {"turbo": reading(LABEL)}},
     ]), encoding="utf-8")
     return manifest, state
@@ -140,7 +148,7 @@ def main() -> int:
         check("--apply exits 0", run(manifest, state, apply=True)[0].exit_code == 0)
         rows = read(state)
 
-        long_row, short_row, same_row = rows
+        long_row, short_row, same_row, swapped_row = rows
         check("the stale long duration is refreshed", long_row["duration"] == 61.4,
               str(long_row["duration"]))
         check("the missing voice is filled from the manifest",
@@ -168,6 +176,17 @@ def main() -> int:
 
         check("the already-correct row is left exactly as it was",
               same_row == json.loads(before.splitlines()[2]), str(same_row))
+
+        # The asymmetry that matters: the manifest owns length, the state owns who read
+        # the clip. A rebuilt manifest re-derives `voice` from the assignment hash and so
+        # cannot know about `--voice-swap`; taking its word here would hand a swapped clip
+        # back the voice that never read it, and the sync would ship that.
+        check("a voice the state and manifest disagree on keeps the STATE's value",
+              swapped_row.get("voice") == "h_itf_def", str(swapped_row.get("voice")))
+        check("while that row's stale duration is still refreshed",
+              swapped_row["duration"] == 44.0, str(swapped_row["duration"]))
+        check("and the disagreement is reported rather than silently kept",
+              "voice_disagrees_state_kept" in log, log[-400:])
 
         after_first = state.read_text(encoding="utf-8")
         run(manifest, state, apply=True)

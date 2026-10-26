@@ -44,6 +44,11 @@ Nothing else is touched. In particular `cer`, `cer_window`, `bad_run_chars` and
 them, and rewriting them here would make this script a second owner of metrics that
 already have one.
 
+`voice` is filled but never corrected, which is the opposite of how `duration` is treated
+here and is deliberate: see `refresh_row`. The manifest is the truth about length (it was
+probed from the file) and the state is the truth about who read the clip (a voice swap is
+recorded there and nowhere else).
+
 This file was written with Claude Code.
 """
 from __future__ import annotations
@@ -124,10 +129,20 @@ def refresh_row(row: dict, truth: dict, stt, counts: Counter) -> bool:
         row["duration"] = duration
         counts["duration_refreshed"] += 1
         changed = True
-    if voice and row.get("voice") != voice:
-        counts["voice_filled" if not row.get("voice") else "voice_corrected"] += 1
+    # FILL ONLY, never correct. The two sides are not symmetric here the way they are for
+    # duration: a clip no draw of its own voice could fix is redrawn by another voice
+    # (`01_recursive_improvement.py --voice-swap`), the state row is the only place that
+    # records it, and `01_build_nemo_manifest.py` RE-DERIVES the column from the
+    # assignment hash, which cannot know about the swap. So on a row that already has a
+    # voice the manifest's value is the derived guess and the state's is the measurement;
+    # overwriting would hand a swapped clip back the voice that never read it, and the
+    # sync would then copy that into the release. Disagreements are counted, not resolved.
+    if voice and not row.get("voice"):
         row["voice"] = voice
+        counts["voice_filled"] += 1
         changed = True
+    elif voice and row.get("voice") != voice:
+        counts["voice_disagrees_state_kept"] += 1
     if not changed:
         return False
 
