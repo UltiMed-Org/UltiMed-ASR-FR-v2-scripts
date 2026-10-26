@@ -219,9 +219,17 @@ def load_hyps(path: Path, judge_key: str = DEFAULT_JUDGE_KEY) -> dict[str, str]:
               type=click.Path(path_type=Path))
 @click.option("--judge-key", default=DEFAULT_JUDGE_KEY, show_default=True,
               help="Reading to use when HYPS is a stage 06 state file.")
-def main(hyps: Path, manifests: tuple[Path, ...], out: Path, judge_key: str) -> None:
+@click.option("--extra-hyps", "extra", multiple=True, metavar="FILE",
+              type=click.Path(exists=True, path_type=Path),
+              help="More hypothesis or state files, merged into HYPS. The corpus is held "
+                   "in two state files (improved/ and improved_parrot/), and the second "
+                   "one is how the separately licensed PARROT clips get checked too.")
+def main(hyps: Path, manifests: tuple[Path, ...], out: Path, judge_key: str,
+         extra: tuple[Path, ...]) -> None:
     """Flag TTS preambles and confirmed skips from a non-Whisper recognizer's output."""
-    hyp_by_key = load_hyps(hyps, judge_key)
+    hyp_by_key: dict[str, str] = {}
+    for source in (hyps, *extra):
+        hyp_by_key.update(load_hyps(source, judge_key))
     if not hyp_by_key:
         raise SystemExit(f"no hypotheses in {hyps} (wrong --judge-key for a state file?)")
     flagged, n_checked = {}, 0
