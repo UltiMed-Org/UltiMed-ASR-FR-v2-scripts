@@ -356,6 +356,19 @@ What the stale number cost is one gate. `_stt.tail_cer` returns None at or under
 
 Its place in the export chain, which matters in both directions: **after** the manifests are rebuilt from the audio (`REFRESH_MANIFESTS=1`, since it reads durations from them) and **before** `99_hf_release/03_sync_hotfix_results.py --apply`, which copies `cer_tail` into the release columns. Any clip it newly flags has to go through `03_collect_suspicious.py` to join the T3 repair round.
 
+That "before" turned out to be stronger than a preference, which is why the step is now wired into `driver.sh` (commit `3f71869`) rather than left to whoever runs the export. `03_sync_hotfix_results.py:341` copies the state row's `duration` INTO the manifest, on the premise its docstring spelled out: that stage 06's output "already carries the re-probed duration". It does not, for exactly the reason above. So the driver's own post-step sync, running last, was overwriting the rebuild's true durations with the 208,235 stale ones, which is how a blind spot opened by the generator kept being re-sealed by the release step meant to fix it. The refresh now runs immediately before the sync under the same step header (two scripts, one step, like the manifest rebuild), so the copy is a no-op; `tests/test_driver_alternate_mode.py::test_the_duration_refresh_runs_before_the_sync` pins the adjacency rather than the membership, because a refresh *after* the sync repairs the state file for a release that already shipped wrong numbers.
+
+One-time consequence for the T2 pass of 2026-10-26: it was already running when the driver was edited, and an edit replaces the file by rename, so the live `bash` kept the old inode and ran the old tail, i.e. the sync **without** the refresh. The export chain for this release therefore has to rebuild the manifests from the audio first, to undo that, before the refresh and a second sync. The canonical order, which is what the chain script runs:
+
+1. `99_hf_release/01_build_nemo_manifest.py --all --pin-splits-from <NeMO_files>`, durations back from the audio
+2. `99_hf_release/02_combine_nemo_manifests.py --pin-splits-from <NeMO_files>`, splits pinned so the old test set cannot leak into train
+3. `06_hotfixes/13_refresh_stale_durations.py` (dry run, read the `tail_added_OVER_GATE` count), then `--apply`
+4. `99_hf_release/03_sync_hotfix_results.py --apply --stt-key whisper.cpp/ggml-large-v3-turbo --stt-model whisper.cpp/ggml-large-v3-turbo`, turbo because it is the only judge that read all 602,789 clips (T2's own sync named the non-turbo key, which is right for T2 and wrong for the release's primary column)
+5. `99_hf_release/04_drop_bad_rows.py --apply`
+6. `99_hf_release/05_normalize_text.py --apply`
+7. `99_hf_release/08_validate_manifests.py`, the release gate
+8. the training repo's `python perso/build_ultimed_val_slices.py`, last because the nine per-voice slices are sampled from the manifests step 5 just shortened
+
 ## Open TODOs
 
 * Re-measure STT throughput on 500 clips against the local endpoint before trusting the
