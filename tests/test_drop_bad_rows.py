@@ -7,7 +7,9 @@ every manifest that references its audio, whatever directory that manifest lives
 that a label holding an ellipsis (truncated LLM output, anonymized date) is dropped,
 and that leaked LLM reasoning and a label too long for its clip are dropped.
 Also that the ASR-flagged list is recognized as stale once the audio it was measured
-on has been replaced (the list keys on file names, which a regenerated corpus reuses).
+on has been replaced (the list keys on file names, which a regenerated corpus reuses),
+and that a draw synthesized with CFG off (cfg_alpha 1.0) is dropped while the ladder's
+1.2 floor is kept.
 
 Run: python tests/test_drop_bad_rows.py
 """
@@ -152,6 +154,29 @@ def test_asr_flagged_stale() -> None:
     print("test_asr_flagged_stale: OK")
 
 
+def test_cfg_off() -> None:
+    """A draw made with CFG disabled (cfg_alpha exactly 1.0) is dropped; the rest of the
+    measured band is kept. The field holds the WINNING draw's value, so only a redrawn
+    row can carry 1.0, and 1.2 (the ladder's floor) must survive: it is the bottom rung
+    the improver is allowed to use, not a defect."""
+    mod = load_sync_module(script=SCRIPT)
+    rows = [
+        {"audio_filepath": "a.flac", "qc_status": "original", "cfg_alpha": 2.0},
+        {"audio_filepath": "b.flac", "qc_status": "improved", "cfg_alpha": 1.0},
+        {"audio_filepath": "c.flac", "qc_status": "improved", "cfg_alpha": 1.2},
+        {"audio_filepath": "d.flac", "qc_status": "original", "cfg_alpha": 1.3},
+        {"audio_filepath": "e.flac", "qc_status": "original"},          # no field at all
+        {"audio_filepath": "f.flac", "qc_status": "improved", "cfg_alpha": 1},  # int 1
+    ]
+    kept, dropped, _ = mod.filter_rows(rows, Path("/m"))
+    assert [r["audio_filepath"] for r in kept] == ["a.flac", "c.flac", "d.flac", "e.flac"], kept
+    assert [(r["audio_filepath"], why) for r, why in dropped] == [
+        ("b.flac", mod.CFG_OFF), ("f.flac", mod.CFG_OFF)], dropped
+    # Idempotent, like every other rule.
+    assert mod.filter_rows(kept, Path("/m"))[1] == []
+    print("test_cfg_off: OK")
+
+
 if __name__ == "__main__":
     test_filter_exhausted()
     test_eval_duplicates()
@@ -159,3 +184,4 @@ if __name__ == "__main__":
     test_llm_leak_and_too_fast()
     test_asr_flagged()
     test_asr_flagged_stale()
+    test_cfg_off()
