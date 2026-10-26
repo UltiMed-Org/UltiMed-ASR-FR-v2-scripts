@@ -37,7 +37,8 @@ not held hostage by the 20-minute acoustic one:
 
 ``scores``
     Recompute `cer`, `cer_tail`, `cer_window` and `bad_run_chars` from the row's OWN
-    stored `stt_transcript` against its `asr_training_source`, with stage 06's scorer
+    stored `stt_transcript` against its `text` (the label; see the comment at the
+    recompute for why the label and not `asr_training_source`), with stage 06's scorer
     (imported, not re-spelled), and compare to what the row claims. A mismatch means the
     stored score describes a different transcript than the stored one, i.e. a stale score,
     which is the bug class that bit this corpus twice in 2026-10. Expensive (jiwer per
@@ -362,7 +363,19 @@ def check_scores(rows: list[dict], name: str, f: Findings, *, sample_percent: fl
 
     checked = 0
     for r in tqdm(todo, desc=f"{name} scores", unit="row", leave=False):
-        ref, hyp = r.get("asr_training_source"), r.get("stt_transcript")
+        # `text`, the LABEL, not `asr_training_source`. Stage 06 scores against the source
+        # (what the TTS read) at QC time, and the two normally fold to the same string
+        # under `normalize_for_scoring` (it already folds `%` vs `pour cent`, digits vs
+        # words, accents). But 05_normalize_text.py rewrites the SOURCE afterwards with
+        # pronunciation respellings the fold does not reach: `oestrogènes` ->
+        # `éstrogènes`, `foetal` -> `fétal`, which is deliberate (it is what the TTS is
+        # given) and leaves the shipped source one character from the audio's spelling.
+        # Recomputing against it charges that respelling as a recognition error. Measured
+        # on this validator's own 3,686 flagged v2 rows: 0 match a recompute against
+        # `asr_training_source`, 3,684 match one against `text`, and all 318 tail scores
+        # match `text`. So the source was the reason this check fired, not stale scores,
+        # and the 2 rows left over are the only genuinely stale ones in the release.
+        ref, hyp = r.get("text"), r.get("stt_transcript")
         if not ref or not hyp:
             # Not an error here: a row with no transcript is structure's business.
             continue
