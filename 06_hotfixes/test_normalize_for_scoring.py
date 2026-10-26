@@ -209,6 +209,27 @@ if not (cer("hepatique", "renale") or 0) > 0.2:
 # Empty reference -> None (nothing to score), unchanged contract:
 eq("empty ref -> None cer", cer("", "anything"), None)
 
+# --- score_texts: the one place a stored QC number is produced ---
+# It was extracted out of compute_entry, so what it returns has to be exactly the
+# fields that used to be written there, with the same omission rules: a caller that
+# invents a cer_tail=0.0 on a short clip would hand the gates a clean-looking number
+# for a window that was never measured.
+_long = " ".join(["le patient presente une douleur thoracique constrictive"] * 6)
+_scored = _cs.score_texts(_long, _long, 40.0)
+eq("score_texts keys on a long clip",
+   sorted(_scored),
+   ["bad_run_chars", "cer", "cer_tail", "cer_window", "wer"])
+approx0("identical texts score 0 cer", _scored["cer"])
+approx0("identical texts score 0 tail", _scored["cer_tail"])
+# A 2 s clip is shorter than the tail window, so cer_tail must be ABSENT, not 0.0.
+_short = _cs.score_texts("bonjour docteur", "bonjour docteur", 2.0)
+if "cer_tail" in _short:
+    _failures.append("score_texts: cer_tail must be omitted on a clip shorter than the tail window")
+eq("score_texts always reports wer/cer", ("wer" in _short, "cer" in _short), (True, True))
+# repeat_excess has ONE owner (12_merge_judge_sidecars.py); it must not appear here.
+if "repeat_excess" in _scored:
+    _failures.append("score_texts: repeat_excess belongs to the merge script, not here")
+
 if _failures:
     print("FAILED:")
     for f in _failures:

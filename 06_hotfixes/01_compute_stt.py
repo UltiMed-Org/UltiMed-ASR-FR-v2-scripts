@@ -1017,6 +1017,51 @@ def transcribe_timed(*args, **kwargs) -> tuple[str, float]:
     return text, time.monotonic() - t0
 
 
+def score_texts(reference: str, transcript: str, duration: float) -> dict:
+    """Every stored QC number for one reference/hypothesis pair, and the only
+    place they are produced. `compute_entry` calls it right after transcribing;
+    `--rescore` calls it again on rows whose reference text was rewritten after
+    they were scored, which is what makes a recompute agree with the original
+    to the last digit instead of drifting by a hotfix.
+
+    Returns the keys to merge into a judge entry. `wer`/`cer` are always
+    present (possibly None); the other three are omitted when they do not
+    apply, e.g. `cer_tail` on a clip shorter than the tail window, so a caller
+    writing them must not invent a 0.0.
+    """
+    wer, cer = compute_metrics(reference, transcript)
+    out: dict = {"wer": wer, "cer": cer}
+    # Same reading scored again over its last ~30s only, so an ending that
+    # derailed or was cut off does not average away (omitted on short clips).
+    t_cer = tail_cer(reference, transcript, duration)
+    if t_cer is not None:
+        out["cer_tail"] = t_cer
+    # And once more over the worst WINDOW_CHARS-long window, the only one of the
+    # three scores that sees a phrase dropped in the MIDDLE of a long clip: five
+    # lost words are ~30 normalized characters, i.e. 0.14 of a 213-char window
+    # but 0.04 of a 48 s PARHAF chunk, so no whole-clip threshold can catch that
+    # without flagging every clean long clip with it.
+    #
+    # Stored, not left to each consumer to re-derive, because there are several
+    # (the repair pass gates on it once per clip per round, 02_statistics reports
+    # it, the T2 flag list is built from it) and it costs a measured 10.9 ms
+    # median / 22.3 ms on the longest clips, which is about what compute_metrics
+    # + tail_cer already cost here (11.4 ms median). Those milliseconds are pure
+    # Python and hold the GIL, so on the full corpus they are roughly 2 h of
+    # wall clock added to a ~31 h sweep rather than 2 h spread over the threads.
+    w_cer, bad_run = window_metrics(reference, transcript)
+    if w_cer is not None:
+        out["cer_window"] = w_cer
+    if bad_run is not None:
+        out["bad_run_chars"] = bad_run
+    # Deliberately NOT `repeat_excess` here. The loop gate reaches a whisper
+    # reading from `12_merge_judge_sidecars.py`, which computes it with this
+    # module's own function at merge time; producing it here too would give the
+    # field two owners for no gain, and whisper's decoder collapses repeated
+    # speech anyway, so its reading is the weak one.
+    return out
+
+
 def compute_entry(
     rec: dict,
     input_file: Path,
@@ -1066,32 +1111,11 @@ def compute_entry(
             entry["error"] = "no reference text, cannot score"
             logger.warning(f"{ident}: {entry['error']}")
         else:
-            wer, cer = compute_metrics(reference, transcript)
-            entry["wer"] = wer
-            entry["cer"] = cer
-            # Same reading scored again over its last ~30s only, so an ending that
-            # derailed or was cut off does not average away (omitted on short clips).
-            t_cer = tail_cer(reference, transcript, dur)
-            if t_cer is not None:
-                entry["cer_tail"] = t_cer
-            # And once more over the worst WINDOW_CHARS-long window, the only one of the
-            # three scores that sees a phrase dropped in the MIDDLE of a long clip: five
-            # lost words are ~30 normalized characters, i.e. 0.14 of a 213-char window
-            # but 0.04 of a 48 s PARHAF chunk, so no whole-clip threshold can catch that
-            # without flagging every clean long clip with it.
-            #
-            # Stored, not left to each consumer to re-derive, because there are several
-            # (the repair pass gates on it once per clip per round, 02_statistics reports
-            # it, the T2 flag list is built from it) and it costs a measured 10.9 ms
-            # median / 22.3 ms on the longest clips, which is about what compute_metrics
-            # + tail_cer already cost here (11.4 ms median). Those milliseconds are pure
-            # Python and hold the GIL, so on the full corpus they are roughly 2 h of
-            # wall clock added to a ~31 h sweep rather than 2 h spread over the threads.
-            w_cer, bad_run = window_metrics(reference, transcript)
-            if w_cer is not None:
-                entry["cer_window"] = w_cer
-            if bad_run is not None:
-                entry["bad_run_chars"] = bad_run
+            scored = score_texts(reference, transcript, dur)
+            entry.update(scored)
+            wer, cer = scored["wer"], scored["cer"]
+            t_cer, w_cer = scored.get("cer_tail"), scored.get("cer_window")
+            bad_run = scored.get("bad_run_chars")
             wer_s = f"{wer:.3f}" if wer is not None else "n/a"
             cer_s = f"{cer:.3f}" if cer is not None else "n/a"
             tail_s = f" cer_tail={t_cer:.3f}" if t_cer is not None else ""
