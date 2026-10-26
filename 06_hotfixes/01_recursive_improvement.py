@@ -1746,6 +1746,21 @@ def _apply_improvement(
     # The bad-CER recheck-count marker described the ORIGINAL reading; the clip now has
     # fresh, good audio + transcript, so drop it (harmless if it was never set).
     row["transcriptions"][model_key].pop("n_stt_check", None)
+    # Every OTHER judge on this row read the bytes we just overwrote, and this run talks
+    # to one judge only, so those readings cannot be refreshed here. They are DROPPED
+    # rather than kept, because a missing reading is loud and a stale one is silent: the
+    # next sweep re-reads a key that is absent (`needs_work` skips a row that already has
+    # its key), 08_validate_manifests.py reports a row with no transcript, and
+    # 03_sync_hotfix_results.py cannot copy a verdict about gone audio into the release.
+    # Keeping them is how the committed ASR flag list came to hold 63 verdicts measured
+    # on audio v2 had already replaced, and how 9,829 acoustic loop flags did the same in
+    # October (see `utils/clip_freshness.py`). That module's mtime rule cannot help here:
+    # a state-file reading carries no `ts`, so `is_stale` would call every one of them
+    # stale. It does not need to: the function overwriting the clip is the one dropping
+    # them, which is as certain as staleness gets.
+    stale_judges = [key for key in row["transcriptions"] if key != model_key]
+    for key in stale_judges:
+        row["transcriptions"].pop(key)
     # Record the cfg_alpha behind the clip's CURRENT (just-overwritten) audio at the
     # row level, so every clip carries the value that synthesized its shipping audio.
     # A regeneration draw's cfg_alpha is authoritative here (may be None if the knob
