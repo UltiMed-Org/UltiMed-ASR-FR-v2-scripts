@@ -364,10 +364,24 @@ One-time consequence for the T2 pass of 2026-10-26: it was already running when 
 2. `99_hf_release/02_combine_nemo_manifests.py --pin-splits-from <NeMO_files>`, splits pinned so the old test set cannot leak into train
 3. `06_hotfixes/13_refresh_stale_durations.py` (dry run, read the `tail_added_OVER_GATE` count), then `--apply`
 4. `99_hf_release/03_sync_hotfix_results.py --apply --stt-key whisper.cpp/ggml-large-v3-turbo --stt-model whisper.cpp/ggml-large-v3-turbo`, turbo because it is the only judge that read all 602,789 clips (T2's own sync named the non-turbo key, which is right for T2 and wrong for the release's primary column)
-5. `99_hf_release/04_drop_bad_rows.py --apply`
-6. `99_hf_release/05_normalize_text.py --apply`
-7. `99_hf_release/08_validate_manifests.py`, the release gate
-8. the training repo's `python perso/build_ultimed_val_slices.py`, last because the nine per-voice slices are sampled from the manifests step 5 just shortened
+5. `06_hotfixes/04_flag_asr_defects.py improved/full.stt.jsonl --extra-hyps improved_parrot/full.stt.jsonl <full.jsonl>`, rebuilding `asr_flagged_clips.jsonl`. After the sync, because the rules read the manifest's `stt_transcript`; before the drop, because the drop is what reads the list
+6. `99_hf_release/04_drop_bad_rows.py --apply`
+7. `99_hf_release/05_normalize_text.py --apply`
+8. `99_hf_release/08_validate_manifests.py`, the release gate
+9. the training repo's `python perso/build_ultimed_val_slices.py`, last because the nine per-voice slices are sampled from the manifests step 6 just shortened
+
+## The ASR flag list is keyed by clip NAME, so v2 inherited v1's verdicts
+
+Step 5 above was added on 2026-10-26, after noticing that `asr_flagged_clips.jsonl`, which `04_drop_bad_rows.py` drops on, holds 63 clip keys measured on **v1** audio. v2 regenerated the corpus under v1's file names, so 60 of those 63 clips now have audio newer than the list and 3 have no audio at all: the drop would have removed 60 good clips for defects that no longer exist. `04_drop_bad_rows.py::asr_flagged_stale` was already warning about precisely this, loudly and non-fatally, and the warning had simply never been acted on.
+
+The rebuild costs no GPU pass. The detector needs a recognizer that is not Whisper, and the parakeet-v3-ultra sweep already read the whole corpus; its readings sit in the state files under `transcriptions["onnx-asr/parakeet-tdt-0.6b-v3-ultra"]`, and no `.flac` under the release root is newer than the last redraw round (2026-10-25 20:45), so every one of those readings describes the audio that ships. `load_hyps` therefore accepts a state file as well as a `transcribe_manifests.py` hypotheses file.
+
+Two measurements came out of wiring it up, both recorded in full in that script's docstring:
+
+* **`preamble` earns its keep, `skipped` does not.** Over the first 19,729 clips: 7 preamble flags, all 7 real on inspection (four are babble before the sentence, three are the opening phrase spoken twice), and every one passed the existing gates, whisper CER 0.0095 to 0.057 against 0.08 and `bad_run_chars` 1 to 7 against 30. An *insertion* at the start is the one defect shape nothing else measures. Meanwhile `skipped` produced 17 flags whose spans are dosage and unit enumerations, where both recognizers write digits for spelled numbers and `_merged_diffs` chains a dozen one-word diffs into one long "missing" span; a clip that truly lost ten words cannot score CER 0.0049 with `bad_run_chars` 1, which is what `006151_0000_cardiologie_00001_t0_c16` scores. So `--reason` now defaults to `preamble` alone, and `skipped` would have dropped ~520 long dosage-dense PARHAF clips, the long-form data this dataset exists for.
+* **The judge has to be parakeet.** The same rule with the turbo reading as hypothesis flags 9 clips, of which only 3 overlap parakeet's 7 and **none of the 6 turbo-only flags is real**: they are whisper's LM pulling a filler forward ("Il y a compte rendu de l'hospitalisation" for a label starting "Compte rendu") or re-spelling the first word. That is the same prior that makes whisper blind to the real babble, and it also rules out making this a gate in `is_bad`, since the alternating loop judges with whisper.
+
+These ~210 clips are dropped rather than redrawn, against the usual preference for repair, and the reason is structural: the pass queues a clip from `is_bad` and promotes a draw only when it beats the stored score by `--min-improvement`, so a babbling clip is never queued (it scores clean) and a flawless new draw would not be promoted either. Repair would mean carrying the metric through scoring, queueing and promotion, and no post-redraw check could confirm the fix without a second parakeet sweep. The audio stays on disk.
 
 ## Open TODOs
 
