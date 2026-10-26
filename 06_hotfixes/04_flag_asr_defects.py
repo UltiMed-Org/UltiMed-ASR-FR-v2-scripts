@@ -12,10 +12,22 @@ so the clip scored clean. A Parakeet fine-tuned on UltiMed transcribes it faithf
 Found on 2026-09-28 by transcribing val/test/PARROT with run 1.6.0 step 8000 (~14 such
 clips in 116k), then the whole corpus.
 
-Input: a hypotheses file ``{"audio": <path>, "hyp": <text>}`` per line, written by the
-NeMo repo's ``perso/transcribe_manifests.py``, plus the manifests whose labels to check.
-Only the last two path components (``dictionary/012095_0006_sonde_de_churet.flac``) are
-compared, so the hypotheses may have been made from another checkout or symlink.
+Input: the hypotheses of a recognizer that is not Whisper, plus the manifests whose
+labels to check. Either shape is accepted (see ``load_hyps``): a hypotheses file
+``{"audio": <path>, "hyp": <text>}`` per line, written by the NeMo repo's
+``perso/transcribe_manifests.py``, or stage 06's own state file
+(``improved/full.stt.jsonl``), where the parakeet sweep's readings already sit under
+``transcriptions[<judge>]["text"]``. Only the last two path components
+(``dictionary/012095_0006_sonde_de_churet.flac``) are compared, so the hypotheses may
+have been made from another checkout or symlink.
+
+The state file is the shape to reach for when the list is being REBUILT, which it has to
+be whenever the audio is regenerated: these verdicts are keyed by clip name, so a list
+measured on one generation of the audio would drop good clips of the next for defects
+that no longer exist (``99_hf_release/04_drop_bad_rows.py::asr_flagged_stale`` is the
+alarm for exactly that, and on 2026-10-26 it was ringing on 60 of the 63 listed clips).
+Reading the state file costs no second transcription pass, and the readings there are the
+ones the shipped audio produced.
 
 A clip is flagged when, aligning label and hypothesis word by word:
 
@@ -71,6 +83,9 @@ sys.path.insert(0, str(_HERE.parent / "utils"))
 from nemo_manifest import clip_key, read_jsonl, resolve_audio  # noqa: E402
 
 DEFAULT_OUT = _HERE.parent / "99_hf_release" / "asr_flagged_clips.jsonl"
+#: The judge whose readings `--judge-key` picks out of a state file: the parakeet sweep,
+#: because the defect this script exists for is the one Whisper is blind to.
+DEFAULT_JUDGE_KEY = "onnx-asr/parakeet-tdt-0.6b-v3-ultra"
 PREAMBLE = "preamble"
 SKIPPED = "skipped"
 MIN_PREAMBLE_WORDS = 2
@@ -157,17 +172,58 @@ def find_defect(label: str, hyp: str, stt: str | None) -> tuple[str, str] | None
     return None
 
 
+def load_hyps(path: Path, judge_key: str = DEFAULT_JUDGE_KEY) -> dict[str, str]:
+    """``{clip_key: hypothesis}`` from either shape of input file.
+
+    Two shapes, one meaning, so the caller does not have to care which it was handed:
+
+    - ``{"audio": ..., "hyp": ...}``, what ``perso/transcribe_manifests.py`` writes;
+    - a stage 06 state row, ``{"audio_filepath": ..., "transcriptions": {<judge>:
+      {"text": ...}}}``, where a sweep's readings already live.
+
+    ``hyp`` present decides, rather than the file name, so a hand-made file works too. A
+    state row without `judge_key` is skipped silently: the sweeps are resumable, so a
+    partial one is a normal state, and `main` reports the count it ended up with.
+
+    Parameters
+    ----------
+    path : Path
+        The hypotheses file or state file.
+    judge_key : str
+        Which reading to take out of a state row's ``transcriptions``.
+
+    Returns
+    -------
+    dict[str, str]
+        Hypothesis text by `nemo_manifest.clip_key`.
+    """
+    hyp_by_key: dict[str, str] = {}
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if "hyp" in row:
+                hyp_by_key[clip_key(row["audio"])] = row["hyp"]
+                continue
+            reading = (row.get("transcriptions") or {}).get(judge_key)
+            if isinstance(reading, dict) and reading.get("text"):
+                hyp_by_key[clip_key(row["audio_filepath"])] = reading["text"]
+    return hyp_by_key
+
+
 @click.command()
 @click.argument("hyps", type=click.Path(exists=True, path_type=Path))
 @click.argument("manifests", nargs=-1, required=True, type=click.Path(exists=True, path_type=Path))
 @click.option("--out", default=str(DEFAULT_OUT), show_default="99_hf_release/asr_flagged_clips.jsonl",
               type=click.Path(path_type=Path))
-def main(hyps: Path, manifests: tuple[Path, ...], out: Path) -> None:
-    """Flag TTS preambles and confirmed skips from a Parakeet hypotheses file."""
-    hyp_by_key = {}
-    for line in hyps.open():
-        r = json.loads(line)
-        hyp_by_key[clip_key(r["audio"])] = r["hyp"]
+@click.option("--judge-key", default=DEFAULT_JUDGE_KEY, show_default=True,
+              help="Reading to use when HYPS is a stage 06 state file.")
+def main(hyps: Path, manifests: tuple[Path, ...], out: Path, judge_key: str) -> None:
+    """Flag TTS preambles and confirmed skips from a non-Whisper recognizer's output."""
+    hyp_by_key = load_hyps(hyps, judge_key)
+    if not hyp_by_key:
+        raise SystemExit(f"no hypotheses in {hyps} (wrong --judge-key for a state file?)")
     flagged, n_checked = {}, 0
     for m in manifests:
         for row in read_jsonl(m):
