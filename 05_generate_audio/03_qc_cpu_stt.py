@@ -1302,6 +1302,137 @@ def report_defect_mix(paths: dict[str, Path], *, severe_cer: float = 0.25,
     return total
 
 
+#: Every column a sidecar row must declare, and whether it may be null.
+#: `tail_cer` is the one legitimately-null score: a clip at or under the tail window has
+#: no tail to isolate, and 58,375 rows are in that case, so a 0.0 there would be a
+#: measurement nobody made. `defect` is absent by design on a clean row and so is not
+#: listed; `--audit` checks it against `over_gate` instead.
+SIDECAR_COLUMNS = {
+    "stem": False, "stage": False, "reason": False, "voice": False,
+    "duration": False, "cer": False, "wer": False, "tail_cer": True,
+    "window_cer": False, "bad_run_chars": False, "repeat_excess": False,
+    "over_gate": False, "stt_s": False, "ts": False,
+}
+
+
+def audit_sidecars(paths: dict[str, Path], cfg, *, examples: int = 3,
+                   coverage: bool = True) -> dict:
+    """Are the rows on disk complete, well typed, and consistent with themselves?
+
+    This is the column audit, and it deliberately does NOT re-score anything: it reads
+    each row's OWN stored numbers and asks whether the row's verdict follows from them.
+    That is a different question from `--rescore`, which recomputes the numbers from the
+    stored texts, and it is the cheaper and stricter of the two: pure arithmetic, so the
+    whole 602,789-row corpus costs well under a minute, and a row whose `over_gate`
+    disagrees with its own `cer` cannot be explained away by a scoring-rule change.
+
+    What it reports:
+
+    * rows that do not parse (a torn last line from a killed sweep);
+    * a missing or null column, per column, against `SIDECAR_COLUMNS`;
+    * a column of the wrong type (a CER that came back as a string, say);
+    * a verdict that does not follow from the row's own five numbers, in both
+      directions: flagged with every gate clear, or clean with a gate tripped;
+    * a `defect` on a clean row, or a flagged row with none;
+    * duplicate stems, and whether the duplicates AGREE. A stem queued once as
+      `reason=retry` and once as `reason=acoustic` is benign double work, which is why
+      the count alone is not an error, but two rows disagreeing on `over_gate` would
+      make the downstream dedup order-dependent;
+    * coverage: rows against the `.flac` files actually in the stage's directory, so a
+      stage the sweep never finished is visible as a number rather than as silence.
+    """
+    out: dict = {"rows": 0, "torn": 0, "missing": Counter(), "null": Counter(),
+                 "mistyped": Counter(), "verdict_mismatch": 0, "defect_mismatch": 0,
+                 "duplicate_stems": 0, "duplicates_disagreeing": 0, "stages": {}}
+    for name, path in sorted(paths.items()):
+        if not path.is_file():
+            logger.warning("{}: no {}", name, path.name)
+            continue
+        seen: dict[str, bool] = {}
+        rows = torn = mismatch = defect_bad = dupes = disagree = 0
+        shown = 0
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                torn += 1
+                continue
+            rows += 1
+            for col, nullable in SIDECAR_COLUMNS.items():
+                if col not in row:
+                    out["missing"][f"{name}:{col}"] += 1
+                elif row[col] is None and not nullable:
+                    out["null"][f"{name}:{col}"] += 1
+                elif row[col] is not None:
+                    want_bool = col == "over_gate"
+                    want_str = col in ("stem", "stage", "reason", "voice", "ts")
+                    value = row[col]
+                    ok = (isinstance(value, bool) if want_bool
+                          else isinstance(value, str) if want_str
+                          else isinstance(value, (int, float))
+                          and not isinstance(value, bool))
+                    if not ok:
+                        out["mistyped"][f"{name}:{col}"] += 1
+
+            # The verdict, re-derived from the row's own numbers only.
+            def over(key, threshold):
+                value = row.get(key)
+                return isinstance(value, (int, float)) and value >= threshold
+            want = (over("cer", cfg.cer_threshold)
+                    or over("tail_cer", cfg.tail_cer_threshold)
+                    or over("window_cer", cfg.window_cer_threshold)
+                    or over("bad_run_chars", cfg.bad_run_threshold)
+                    or (cfg.repeat_threshold > 0
+                        and over("repeat_excess", cfg.repeat_threshold)))
+            got = row.get("over_gate")
+            if isinstance(got, bool) and got is not want:
+                mismatch += 1
+                if shown < examples:
+                    shown += 1
+                    logger.warning(
+                        "{}: {} says over_gate={} but its own numbers say {} "
+                        "(cer {} tail {} window {} run {} repeat {})",
+                        name, row.get("stem"), got, want, row.get("cer"),
+                        row.get("tail_cer"), row.get("window_cer"),
+                        row.get("bad_run_chars"), row.get("repeat_excess"))
+            if bool(row.get("defect")) is not bool(got):
+                defect_bad += 1
+
+            stem = row.get("stem")
+            if isinstance(stem, str):
+                if stem in seen:
+                    dupes += 1
+                    if isinstance(got, bool) and seen[stem] is not got:
+                        disagree += 1
+                else:
+                    seen[stem] = got if isinstance(got, bool) else False
+
+        clips = None
+        if coverage:
+            try:
+                clips = sum(1 for _ in path.parent.glob("*.flac"))
+            except OSError as exc:
+                logger.warning("{}: cannot count clips ({})", name, exc)
+        out["stages"][name] = {"rows": rows, "unique": len(seen), "clips": clips,
+                              "torn": torn, "verdict_mismatch": mismatch,
+                              "duplicate_stems": dupes}
+        out["rows"] += rows
+        out["torn"] += torn
+        out["verdict_mismatch"] += mismatch
+        out["defect_mismatch"] += defect_bad
+        out["duplicate_stems"] += dupes
+        out["duplicates_disagreeing"] += disagree
+        pct = f"{100.0 * len(seen) / clips:.1f}%" if clips else "n/a"
+        logger.info("{}: {} row(s), {} unique stem(s) of {} clip(s) on disk ({}), "
+                    "{} torn, {} verdict mismatch(es), {} duplicate(s)",
+                    name, rows, len(seen), clips if clips is not None else "?", pct,
+                    torn, mismatch, dupes)
+    return out
+
+
 def rescore_sidecar(path: Path, cfg, *, apply: bool = False,
                     all_rows: bool = False) -> dict:
     """Recompute every gate from each row's STORED transcript, no GPU and no audio.
@@ -1678,6 +1809,15 @@ def worker_loop(model, ctx: Context) -> None:
               help="With --rescore, rewrite each sidecar in place (temp file + rename). "
                    "Refuses a sidecar written to in the last 60s, since a running sweep "
                    "appends to it and those rows would be lost.")
+@click.option("--audit", is_flag=True,
+              help="Do not transcribe anything: audit the rows already on disk. Every "
+                   "column present and non-null (except tail_cer, which is null on a "
+                   "clip with no tail), every value the right type, every `over_gate` "
+                   "following from that row's OWN five numbers, `defect` present iff "
+                   "flagged, duplicate stems counted and checked for agreement, and "
+                   "rows against the .flac files in each stage directory. Pure "
+                   "arithmetic, no re-scoring: exits non-zero if anything needs "
+                   "attention, so it works as a release gate.")
 @click.option("--defect-mix", is_flag=True,
               help="Do not transcribe anything: re-read the sidecar rows already on "
                    "disk and report what SHAPE their failures have (loop, overrun, "
@@ -1689,7 +1829,7 @@ def worker_loop(model, ctx: Context) -> None:
               help="Append the log here as well as to stderr; empty string disables. "
                    "A bare filename lands beside this script.")
 def main(stages: tuple[str, ...], model_dir: Path, quantization: str, rescore: bool,
-         apply_rescore: bool, rescore_all: bool,
+         apply_rescore: bool, rescore_all: bool, audit: bool,
          decoder_quantization: str | None, batch: int, batch_sec: float,
          providers_csv: str,
          sample_percent: float, do_retries: bool, threads: int, workers: int,
@@ -1781,6 +1921,34 @@ def main(stages: tuple[str, ...], model_dir: Path, quantization: str, rescore: b
                     total["changed_numbers"], total["skipped"])
         if not apply_rescore:
             logger.info("dry run: pass --apply-rescore to write it")
+        return
+
+    if audit:
+        got = audit_sidecars({w.name: w.audio / out_name for w in watches.values()},
+                             cfg, examples=examples)
+        logger.info("total: {} row(s), {} torn, {} verdict mismatch(es), {} defect "
+                    "mismatch(es), {} duplicate stem(s) ({} disagreeing)",
+                    got["rows"], got["torn"], got["verdict_mismatch"],
+                    got["defect_mismatch"], got["duplicate_stems"],
+                    got["duplicates_disagreeing"])
+        for label, counter in (("missing", got["missing"]), ("null", got["null"]),
+                               ("mistyped", got["mistyped"])):
+            if counter:
+                logger.warning("{}: {}", label,
+                               ", ".join(f"{k}={v}" for k, v in
+                                         sorted(counter.items(), key=lambda kv: -kv[1])))
+            else:
+                logger.info("no {} column anywhere", label)
+        # A missing column counts as a failure, even though the usual cause is benign
+        # (rows swept before a gate existed). The audit is a release gate, and the fix
+        # is one `--rescore --apply-rescore` away, so letting it pass would mean
+        # shipping rows with no answer to a question the corpus does ask of others.
+        bad = (got["torn"] or got["verdict_mismatch"] or got["defect_mismatch"]
+               or got["duplicates_disagreeing"] or got["missing"] or got["null"]
+               or got["mistyped"])
+        if bad:
+            raise click.ClickException("the audit found rows that need attention")
+        logger.success("every row declares every column and agrees with its own numbers")
         return
 
     if defect_mix:

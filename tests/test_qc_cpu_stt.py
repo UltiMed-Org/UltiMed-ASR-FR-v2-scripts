@@ -827,6 +827,72 @@ def test_rescore_leaves_rows_that_already_carry_every_gate_alone() -> None:
         assert fixed["stale"]["cer"] == 0.0 and fixed["stale"]["over_gate"] is False
 
 
+def test_the_audit_catches_a_row_that_disagrees_with_its_own_numbers() -> None:
+    """The column audit, which asks a different question from --rescore.
+
+    --rescore recomputes the numbers from the stored texts, so a disagreement there can
+    always be explained by a scoring-rule change. The audit only reads the numbers the
+    row already carries and asks whether its verdict follows from THEM, which is pure
+    arithmetic: a mismatch means the row is internally inconsistent, full stop. That is
+    also what makes it cheap enough to run over all 602,789 rows as a release gate.
+    """
+    label = "le patient recoit de l amoxicilline un gramme"
+    def row(stem, **over):
+        base = {"stem": stem, "stage": "01_dictionnary", "reason": "sample",
+                "voice": "fr_male", "duration": 20.0, "cer": 0.01, "wer": 0.02,
+                "tail_cer": None, "window_cer": 0.02, "bad_run_chars": 0,
+                "repeat_excess": 0, "over_gate": False, "stt_s": 0.9,
+                "ts": "2026-10-26T01:00:00Z", "transcript": label, "reference": label}
+        base.update(over)
+        return base
+
+    with tempfile.TemporaryDirectory() as td:
+        stage = Path(td)
+        path = stage / "qc.jsonl"
+        rows = [
+            row("clean"),
+            # Flagged, and its own cer says why, with the defect named: coherent.
+            row("flagged", cer=0.30, over_gate=True, defect="wrong_words"),
+            # Flagged with every gate clear: the verdict does not follow.
+            row("ghost", over_gate=True, defect="wrong_words"),
+            # Over the CER gate but called clean: the other direction.
+            row("missed", cer=0.30),
+            # Flagged with no defect named.
+            row("nameless", cer=0.30, over_gate=True),
+            # A column gone, and a column of the wrong type.
+            {k: v for k, v in row("stripped").items() if k != "repeat_excess"},
+            row("stringy", cer="0.01"),
+        ]
+        with path.open("w") as fh:
+            for r in rows:
+                fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+            fh.write('{"stem": "torn", "cer":\n')   # a killed sweep's last line
+
+        got = qc.audit_sidecars({"01_dictionnary": path}, make_cfg(), coverage=False)
+
+        assert got["rows"] == 7, got
+        assert got["torn"] == 1, got
+        assert got["verdict_mismatch"] == 2, got          # ghost + missed
+        # Only `nameless`: `defect` is checked against the row's STORED over_gate, not
+        # against the re-derived verdict, so `missed` (clean verdict, no defect) is
+        # internally consistent on this check and shows up only as a verdict mismatch.
+        assert got["defect_mismatch"] == 1, got
+        assert got["missing"]["01_dictionnary:repeat_excess"] == 1, got["missing"]
+        assert got["mistyped"]["01_dictionnary:cer"] == 1, got["mistyped"]
+        assert not got["null"], got["null"]
+        assert got["duplicate_stems"] == 0, got
+
+        # A stem queued twice is benign double work, but the two rows must agree, or the
+        # downstream dedup becomes order-dependent.
+        with path.open("a") as fh:
+            fh.write(json.dumps(row("clean", reason="retry")) + "\n")
+            fh.write(json.dumps(row("flagged", reason="retry", cer=0.30,
+                                    over_gate=False)) + "\n")
+        again = qc.audit_sidecars({"01_dictionnary": path}, make_cfg(), coverage=False)
+        assert again["duplicate_stems"] == 2, again
+        assert again["duplicates_disagreeing"] == 1, again
+
+
 def main() -> None:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
