@@ -80,6 +80,32 @@ whisper-turbo reading as the confirmation:
   long-form data this dataset is built for. Re-enable it with ``--reason skipped`` on a
   corpus with fewer enumerations, or after teaching `_merged_diffs` a merge budget.
 
+**Why ``--judge-key`` must stay on parakeet**, measured in the same run: the preamble
+rule was also applied with the whisper-turbo reading as the hypothesis, over the same
+19,729 clips. Turbo flags 9 clips, parakeet 7, and only 3 are the same clip. All 7
+parakeet flags are real; of the 6 turbo-only ones, none is. They are whisper's own LM
+pulling a filler to the front ("Il y a compte rendu de l'hospitalisation..." for a label
+starting "Compte rendu", "C'est un traitement de sortie..." for "Traitement de sortie",
+"Pour un patient de 41 ans" for "Patient de 41 ans") or re-spelling the first word
+("Un decubitus ventral en observe" for "En décubitus ventral on observe"). That is the
+same language prior that makes Whisper blind to real babble: it normalizes a disfluent
+opening into something plausible instead of transcribing it. Parakeet-v3-ultra has no
+such prior, which is exactly why it is the judge here. So a rebuild keyed on a Whisper
+reading would queue good clips and still miss the defect, and a gate on this metric does
+NOT belong in ``is_bad`` either: the alternating loop judges with Whisper, where the
+metric is ~0 precision.
+
+Consequence for the release, decided 2026-10-26: the flagged clips are DROPPED rather
+than redrawn, although this repo's standing preference is repair. A redraw cannot work
+here. ``01_recursive_improvement.py`` queues a clip from `is_bad` and promotes a draw
+only when it beats the stored score by ``--min-improvement``; a babbling clip scores
+CLEAN (CER 0.0095 to 0.057), so it is never queued, and a flawless new draw would not be
+promoted either, because the number the promotion compares cannot see the defect. Making
+repair possible would mean carrying this metric through scoring, queueing and promotion,
+and no post-redraw check could confirm the fix without a second parakeet sweep. At ~210
+clips of 602,789 (0.035%) the drop is the proportionate answer; the audio itself is left
+on disk, so a later pass can revisit it.
+
 Until then, do not add a third.
 
 Both texts are compared after lowercasing and dropping punctuation, like the NeMo
