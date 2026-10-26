@@ -703,6 +703,77 @@ def test_a_batched_clip_is_scored_exactly_like_a_lone_one() -> None:
     assert "window_cer" in batched and "repeat_excess" in batched
 
 
+def test_rescore_adds_the_loop_gate_without_transcribing_anything() -> None:
+    """A gate added mid-sweep must be recoverable from the rows already written.
+
+    49,339 clips were judged before the loop gate existed and carry no `repeat_excess`,
+    i.e. no answer to the one question this judge was added to ask. Re-transcribing them
+    is ~33 min of GPU; re-scoring them is seconds, and it is only possible because
+    `score_clip` stores the window numbers on clean rows too and keeps the transcript and
+    reference under --keep-transcripts. This checks the recovery, that a loop the old row
+    missed is now caught, and that a dry run writes nothing.
+    """
+    label = ("le patient de soixante douze ans est hospitalise pour une pneumopathie "
+             "aigue communautaire de la base droite il recoit de l amoxicilline un "
+             "gramme par voie intraveineuse toutes les huit heures pendant sept jours "
+             "puis un relais par voie orale la surveillance comporte la temperature la "
+             "saturation en oxygene et la numeration formule sanguine tous les deux "
+             "jours jusqu a la sortie du service de medecine interne")
+    looped = label.replace(" pendant sept jours",
+                           " toutes les huit heures pendant sept jours", 1)
+
+    # Two rows in the shape the old sweep wrote: no `repeat_excess` at all. The first is
+    # the blind spot, a loop that every distance gate passes.
+    old_rows = [
+        {"stem": "a", "stage": "01_dictionnary", "reason": "sample", "voice": "v",
+         "duration": 30.0, "cer": 0.052, "wer": 0.1, "tail_cer": None,
+         "window_cer": 0.094, "bad_run_chars": 0, "over_gate": False,
+         "stt_s": 1.0, "ts": "2026-10-25T20:00:00Z",
+         "transcript": looped, "reference": label},
+        {"stem": "b", "stage": "01_dictionnary", "reason": "sample", "voice": "v",
+         "duration": 30.0, "cer": 0.0, "wer": 0.0, "tail_cer": None,
+         "window_cer": 0.0, "bad_run_chars": 0, "over_gate": False,
+         "stt_s": 1.0, "ts": "2026-10-25T20:00:00Z",
+         "transcript": label, "reference": label},
+        # A row with no transcript cannot be rescored and must survive untouched.
+        {"stem": "c", "stage": "01_dictionnary", "reason": "sample", "voice": "v",
+         "duration": 30.0, "cer": 0.5, "over_gate": True, "stt_s": 1.0,
+         "ts": "2026-10-25T20:00:00Z"},
+    ]
+    with tempfile.TemporaryDirectory() as td:
+        path = Path(td) / "qc.jsonl"
+        with path.open("w") as fh:
+            for row in old_rows:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        original = path.read_text()
+        cfg = make_cfg()
+
+        dry = qc.rescore_sidecar(path, cfg, apply=False)
+        assert path.read_text() == original, "a dry run must not touch the file"
+        assert dry["rows"] == 3 and dry["rescored"] == 2 and dry["skipped"] == 1
+        assert dry["gained_gate"] == 2, dry
+        # The loop is the one that flips, and only it.
+        assert dry["flipped_on"] == 1 and dry["flipped_off"] == 0, dry
+
+        applied = qc.rescore_sidecar(path, cfg, apply=True)
+        assert applied == dry, (applied, dry)
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+
+    assert len(rows) == 3
+    by_stem = {r["stem"]: r for r in rows}
+    # The loop now carries the gate that can see it, and is flagged on that alone.
+    assert by_stem["a"]["repeat_excess"] > 0 and by_stem["a"]["over_gate"] is True
+    assert by_stem["a"]["cer"] < 0.08 and by_stem["a"]["window_cer"] < 0.15
+    assert by_stem["a"]["defect"] == "loop", by_stem["a"]
+    # The clean row gains the measurement and stays clean.
+    assert by_stem["b"]["repeat_excess"] == 0 and by_stem["b"]["over_gate"] is False
+    # The row that could not be rescored is byte-for-byte what it was.
+    assert "rescored_ts" not in by_stem["c"] and by_stem["c"]["cer"] == 0.5
+    assert "repeat_excess" not in by_stem["c"]
+    # And a rescored row says when, so a later pass can tell the two generations apart.
+    assert by_stem["a"]["rescored_ts"].endswith("Z")
+
+
 def main() -> None:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

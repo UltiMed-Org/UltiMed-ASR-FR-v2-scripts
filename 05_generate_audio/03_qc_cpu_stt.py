@@ -1302,6 +1302,103 @@ def report_defect_mix(paths: dict[str, Path], *, severe_cer: float = 0.25,
     return total
 
 
+def rescore_sidecar(path: Path, cfg, *, apply: bool = False) -> dict:
+    """Recompute every gate from each row's STORED transcript, no GPU and no audio.
+
+    A gate added after a sweep has started does not mean re-transcribing the corpus,
+    which is the whole reason `score_clip` stores `window_cer`, `bad_run_chars` and
+    `repeat_excess` on clean rows too, and the transcript and reference alongside them
+    under --keep-transcripts. The rows cost ~8 MB per 25,000 clips; the transcription
+    they stand in for costs hours of GPU.
+
+    This exists because 49,339 rows were swept before the loop gate existed and carry no
+    `repeat_excess` at all, i.e. no answer to the one question the Parakeet judge was
+    added to ask (Whisper deduplicates repeated speech, so a looping take comes back from
+    the primary judge reading clean). Re-scoring also refreshes the four distance gates,
+    so a row whose thresholds have since moved is brought up to date in the same pass.
+
+    Returns a summary. Without `apply` nothing is written, which is the safe default: the
+    file is rewritten through a temp file and one `os.replace`, so a crash leaves the
+    original intact, but a sweep appending to the same sidecar would lose the rows it
+    wrote in between. The caller refuses a file that was touched in the last 60 s.
+    """
+    out = {"rows": 0, "rescored": 0, "skipped": 0, "gained_gate": 0,
+           "flipped_on": 0, "flipped_off": 0, "changed_numbers": 0}
+    tmp = path.with_suffix(path.suffix + ".rescored")
+    with path.open() as src, tmp.open("w") as dst:
+        for line in src:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:       # a torn last line from a killed sweep is
+                out["skipped"] += 1            # kept verbatim rather than dropped
+                dst.write(line + "\n")
+                continue
+            out["rows"] += 1
+            reference, transcript = row.get("reference"), row.get("transcript")
+            if not reference or transcript is None:
+                out["skipped"] += 1
+                dst.write(json.dumps(row, ensure_ascii=False) + "\n")
+                continue
+
+            had_gate = "repeat_excess" in row
+            # Only fields the row ALREADY carried can be said to have moved: a row
+            # predating the loop gate gains `repeat_excess` from absent to 0, and
+            # counting that as a changed number would mark every old row as drifted and
+            # hide the real drift this counter exists to surface.
+            before = {k: row.get(k) for k in
+                      ("cer", "wer", "tail_cer", "window_cer", "bad_run_chars",
+                       "repeat_excess") if k in row}
+            was_over = row.get("over_gate")
+            wer, cer = _stt.compute_metrics(reference, transcript)
+            tail = _stt.tail_cer(reference, transcript, row.get("duration") or 0.0)
+            score = _stt.window_score(reference, transcript)
+            repeat = _stt.repeat_excess(reference, transcript)
+            over = ((cer is not None and cer >= cfg.cer_threshold)
+                    or (tail is not None and tail >= cfg.tail_cer_threshold)
+                    or (score.window_cer is not None
+                        and score.window_cer >= cfg.window_cer_threshold)
+                    or (score.bad_run_chars is not None
+                        and score.bad_run_chars >= cfg.bad_run_threshold)
+                    or (cfg.repeat_threshold > 0 and repeat >= cfg.repeat_threshold))
+            row.update({
+                "cer": None if cer is None else round(cer, 4),
+                "wer": None if wer is None else round(wer, 4),
+                "tail_cer": None if tail is None else round(tail, 4),
+                "window_cer": (None if score.window_cer is None
+                               else round(score.window_cer, 4)),
+                "bad_run_chars": score.bad_run_chars,
+                "repeat_excess": repeat,
+                "over_gate": over,
+                "rescored_ts": dt.datetime.now(dt.timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"),
+            })
+            # Same rule as `score_clip`: named only where it means something, and
+            # dropped again if a row that used to be flagged no longer is, so no row
+            # carries a defect its own numbers no longer support.
+            defect = (classify_defect(reference, transcript,
+                                      bad_run_chars=score.bad_run_chars)
+                      if over else None)
+            if defect:
+                row["defect"] = defect
+            else:
+                row.pop("defect", None)
+            out["rescored"] += 1
+            out["gained_gate"] += not had_gate
+            if was_over is not over:
+                out["flipped_on" if over else "flipped_off"] += 1
+            elif any(row.get(k) != v for k, v in before.items()):
+                out["changed_numbers"] += 1
+            dst.write(json.dumps(row, ensure_ascii=False) + "\n")
+    if apply:
+        os.replace(tmp, path)
+    else:
+        tmp.unlink()
+    return out
+
+
 def batch_groups(prepared: list[tuple[Job, ClipInput]], batch: int, max_sec: float):
     """Cut length-sorted clips into `recognize()` calls.
 
@@ -1551,6 +1648,15 @@ def worker_loop(model, ctx: Context) -> None:
                    "shape (worst window first), each with the label text of its worst "
                    "window and what the recognizer heard over the same stretch. 0 for "
                    "the counts alone.")
+@click.option("--rescore", is_flag=True,
+              help="Do not transcribe anything: recompute every gate from the "
+                   "transcripts already stored in the sidecars and report what would "
+                   "change. Use when a gate is added or a threshold moves; 49,339 rows "
+                   "predate the loop gate. Writes nothing without --apply-rescore.")
+@click.option("--apply-rescore", is_flag=True,
+              help="With --rescore, rewrite each sidecar in place (temp file + rename). "
+                   "Refuses a sidecar written to in the last 60s, since a running sweep "
+                   "appends to it and those rows would be lost.")
 @click.option("--defect-mix", is_flag=True,
               help="Do not transcribe anything: re-read the sidecar rows already on "
                    "disk and report what SHAPE their failures have (loop, overrun, "
@@ -1561,7 +1667,8 @@ def worker_loop(model, ctx: Context) -> None:
 @click.option("--log-file", default="qc_cpu_stt.log", show_default=True,
               help="Append the log here as well as to stderr; empty string disables. "
                    "A bare filename lands beside this script.")
-def main(stages: tuple[str, ...], model_dir: Path, quantization: str,
+def main(stages: tuple[str, ...], model_dir: Path, quantization: str, rescore: bool,
+         apply_rescore: bool,
          decoder_quantization: str | None, batch: int, batch_sec: float,
          providers_csv: str,
          sample_percent: float, do_retries: bool, threads: int, workers: int,
@@ -1623,6 +1730,34 @@ def main(stages: tuple[str, ...], model_dir: Path, quantization: str,
                                    audio=audio.resolve())
     if not watches:
         raise click.ClickException("no stage to follow")
+
+    if rescore:
+        total = Counter()
+        for watch in watches.values():
+            path = watch.audio / out_name
+            if not path.is_file():
+                logger.info("{}: no {} yet", watch.name, out_name)
+                continue
+            age = time.time() - path.stat().st_mtime
+            if apply_rescore and age < 60:
+                logger.error("{}: {} was written {:.0f}s ago, so a sweep is probably "
+                             "appending to it; not rewriting it", watch.name, out_name, age)
+                continue
+            got = rescore_sidecar(path, cfg, apply=apply_rescore)
+            total.update(got)
+            logger.info("{}: {} row(s), {} rescored, {} gained the loop gate, "
+                        "{} newly flagged, {} cleared, {} numbers moved{}",
+                        watch.name, got["rows"], got["rescored"], got["gained_gate"],
+                        got["flipped_on"], got["flipped_off"], got["changed_numbers"],
+                        "" if apply_rescore else " (DRY RUN, nothing written)")
+        logger.info("total: {} row(s), {} rescored, {} gained the loop gate, {} newly "
+                    "flagged, {} cleared, {} numbers moved, {} skipped",
+                    total["rows"], total["rescored"], total["gained_gate"],
+                    total["flipped_on"], total["flipped_off"],
+                    total["changed_numbers"], total["skipped"])
+        if not apply_rescore:
+            logger.info("dry run: pass --apply-rescore to write it")
+        return
 
     if defect_mix:
         n = report_defect_mix({w.name: w.audio / out_name for w in watches.values()},
