@@ -19,11 +19,11 @@ same durations (``probe_durations`` validates its per-name cache against each cl
 size and mtime, so an overwritten clip is re-probed rather than served stale), but it
 would not carry over the CER, the transcript or the ``qc_status`` below.
 
-So this reads stage 06's scored output (which already carries the re-probed duration and
-the transcript of the audio that actually shipped) and, joining on the resolved absolute
-audio path, writes into every manifest row:
+So this reads stage 06's scored output (which carries the transcript of the audio that
+actually shipped) and, joining on the resolved absolute audio path, writes into every
+manifest row:
 
-    duration          re-probed after the swap
+    duration          the state row's, which is only re-probed on a REDRAW (see below)
     cer               CER of the shipped audio against its label
     cer_tail          CER of the last ~30 s, null on clips shorter than that
     stt_transcript    what the STT model heard, so every CER above is auditable
@@ -68,6 +68,17 @@ pessimistic read for filtering, and the per-judge columns are what let a user se
 ``qc_status`` is ``improved`` when the clip was flagged and a better draw replaced it,
 ``exhausted`` when it was flagged and no draw was good enough (the ORIGINAL audio ships,
 so these are the known-weak clips), and ``original`` when it never tripped a gate.
+
+``duration`` is the one column copied from a field stage 06 does NOT keep current, which
+is why ``06_hotfixes/13_refresh_stale_durations.py --apply`` must run immediately before
+this script, and why ``driver.sh`` now runs the pair under one step header. Only a redraw
+writes a state row's duration (``01_recursive_improvement.py``); a clip the GENERATOR
+regenerated keeps whatever length it had when the sweep first scored it. Measured on
+2026-10-26: 208,235 of 604,337 state rows disagreed with the manifest, by up to 53 s. Run
+after a manifest rebuild without the refresh, the copy below therefore replaces re-probed
+truth with a v1-era number, and ``cer_tail``, which is null at or under 30 s, goes blind
+on every clip whose real length crosses that window (5,250 of them). With the refresh
+first, the copy is a no-op and this script keeps doing what it says.
 
 ``voice`` is the one column here that stage 06 can CHANGE rather than measure: a term clip
 no draw of its own voice could fix is redrawn by another voice of the roster
