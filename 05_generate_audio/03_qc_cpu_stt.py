@@ -1303,10 +1303,13 @@ def report_defect_mix(paths: dict[str, Path], *, severe_cer: float = 0.25,
 
 
 #: Every column a sidecar row must declare, and whether it may be null.
-#: `tail_cer` is the one legitimately-null score: a clip at or under the tail window has
-#: no tail to isolate, and 58,375 rows are in that case, so a 0.0 there would be a
-#: measurement nobody made. `defect` is absent by design on a clean row and so is not
-#: listed; `--audit` checks it against `over_gate` instead.
+#: `tail_cer` is the one legitimately-null score: a clip at or under the tail window
+#: (`TAIL_SECONDS`, 30 s) has no tail to isolate, so a 0.0 there would be a measurement
+#: nobody made. That is the common case, not the exception: 563,233 of the v2 release's
+#: 604,337 clips are at or under 30 s (93.2%), only 41,104 carry a tail. The figure that
+#: used to sit here, 58,375, was close to the COMPLEMENT and read as if nulls were rare.
+#: `defect` is absent by design on a clean row and so is not listed; `--audit` checks it
+#: against `over_gate` instead.
 SIDECAR_COLUMNS = {
     "stem": False, "stage": False, "reason": False, "voice": False,
     "duration": False, "cer": False, "wer": False, "tail_cer": True,
