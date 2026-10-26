@@ -311,9 +311,45 @@ Check the `driver.sh: judge ... at ...` line before walking away: it names the m
 the key the readings land under, and filing T2 under T1's key would overwrite 602k
 readings with no way back.
 
+## Measured: the flag rate is not uniform across voices
+
+The full Parakeet sweep prints a per-voice CER table every 10k clips, and at 124,495
+dictionary rows (2026-10-26 01:37, nine voices each holding ~10k of that slice) two
+hybrids own most of the flags:
+
+| voice | n | CER median | CER p90 | over gate | rate |
+| --- | --- | --- | --- | --- | --- |
+| `fr_female` | 10,274 | 0.0090 | 0.0253 | 16 | 0.16% |
+| `fr_male` | 10,058 | 0.0100 | 0.0274 | 16 | 0.16% |
+| `h_frm_ptf` | 9,790 | 0.0137 | 0.0346 | 39 | 0.40% |
+| `h_frf_esm` | 10,092 | 0.0108 | 0.0300 | 44 | 0.44% |
+| `h_frf_ptm` | 9,728 | 0.0131 | 0.0341 | 50 | 0.51% |
+| `h_frm_nlf` | 9,927 | 0.0114 | 0.0312 | 64 | 0.64% |
+| `h_itf_arm` | 10,114 | 0.0165 | 0.0415 | 103 | 1.02% |
+| `h_frf_itm` | 9,869 | 0.0147 | 0.0444 | 293 | 2.97% |
+| `h_itf_def` | 10,148 | 0.0170 | 0.0537 | 374 | 3.69% |
+
+So `h_itf_def` and `h_frf_itm` carry 667 of the 999 flags between them, at 19x and 23x
+the two shipped voices' rate, while their medians sit only 0.006-0.008 above. A median
+that close with a p90 twice as high is the shape of a voice that is usually fine and
+occasionally derails, not one that is uniformly mushy, which is what the redraw ladder is
+for. Both have the same `it` (Italian) ingredient in the hybrid, so the suspicion is that
+ingredient rather than either recipe.
+
+Two consequences for the repair round, neither applied yet:
+
+* The ladder now floors hybrids at 1.5 instead of 1.2 (`utils/voice_assignment.py`), so a
+  redraw of these clips cannot land below the band their audition passed at.
+* A clip still bad after the ladder gets a different voice, and these two are the ones the
+  swap should move AWAY from, not toward. Worth checking the swap's target choice before
+  the T3 round, since a naive round-robin would feed `h_itf_def` as often as `fr_female`.
+
 ## Open TODOs
 
 * Re-measure STT throughput on 500 clips against the local endpoint before trusting the
   31 h.
 * `99_hf_release/README.md` still carries four `TODO (v2)` cells, including the distinct
   voices per term numbers that work item 4 changes.
+* TODO: decide whether the voice swap should avoid `h_itf_def` and `h_frf_itm` as swap
+  TARGETS, given the table above. Needs the full sweep's final per-voice numbers, not the
+  dictionary-only slice.
