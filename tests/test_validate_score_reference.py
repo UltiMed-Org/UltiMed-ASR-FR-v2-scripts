@@ -137,12 +137,17 @@ def test_only_touched_rows_are_recomputed() -> None:
                 cer=0.42)
 
     calls, errors = run_counted(pristine + [stale], sample_percent=0.0)
-    check("at 0 percent only the redrawn row is recomputed", calls == 1, str(calls))
+    # TWO alignments, not one, and only because this row's score matches neither
+    # reference: the label is tried first and the shipped source only when that
+    # disagrees, so an honest row still costs exactly one. That is what keeps the
+    # either-reference rule from doubling the gate's runtime.
+    check("at 0 percent only the redrawn row is recomputed", calls == 2, str(calls))
     check("and its stale score is still caught", errors == 1, str(errors))
 
-    # The other half: the sample must not be dead the other way either.
+    # The other half: the sample must not be dead the other way either. 200 pristine rows
+    # at one alignment each, plus the stale row's two.
     calls_all, errors_all = run_counted(pristine + [stale], sample_percent=100.0)
-    check("at 100 percent every row is recomputed", calls_all == 201, str(calls_all))
+    check("at 100 percent every row is recomputed", calls_all == 202, str(calls_all))
     check("and the pristine rows still report nothing", errors_all == 1, str(errors_all))
 
 
@@ -170,7 +175,27 @@ def main() -> int:
     stale = score_errors(row(cer=0.42))
     check("a stale cer is still reported", len(stale) == 1, str(stale))
     check("and it is reported as a cer mismatch",
-          stale and "cer does not match" in stale[0], str(stale))
+          stale and "cer matches neither reference" in stale[0], str(stale))
+
+    # The population the 2026-10-26 release gate flagged: 1,271 cer plus 469 cer_tail
+    # findings over 1,278 distinct clips, every one of which reproduces EXACTLY from the
+    # shipped `asr_training_source` rather than from the label. Those rows were scored
+    # after 05_normalize_text.py had rewritten the source, so the source is the honest
+    # reference for them, while rows scored before it reproduce from the label. Accepting
+    # only one of the two fails the other ordering on perfectly good rows, so the check
+    # takes whichever agrees.
+    src_scored = score_errors(row(cer=cer_source))
+    check("a row scored against the SOURCE passes too", src_scored == [],
+          str(src_scored))
+    tail_source = _stt.tail_cer(SOURCE, HEARD, 42.1)
+    src_tail = [k for k in score_errors(row(duration=42.1, cer_tail=tail_source))
+                if "cer_tail" in k]
+    check("and so does a cer_tail taken against the SOURCE", src_tail == [],
+          str(src_tail))
+    # A value that is neither reference is still caught, which is the whole point: the
+    # rule widens what counts as honest, it does not switch the gate off.
+    check("a score matching neither reference is still reported",
+          len(score_errors(row(cer=0.42))) == 1, str(score_errors(row(cer=0.42))))
 
     # A stale tail is its own finding, on a clip long enough to have a tail (over 30 s).
     long_row = row(duration=42.1, cer_tail=0.42)

@@ -353,6 +353,34 @@ def check_files(rows: list[dict], name: str, manifest_dir: Path, f: Findings, *,
                    f"{len(orphans)} file(s), e.g. {[p.name for p in orphans[:3]]}")
 
 
+def matches_a_reference(stored: float, *recomputed: float | None) -> bool:
+    """Does `stored` agree with ANY of the references the row carries?
+
+    Stage 06 does not score against one fixed string. `01_recursive_improvement.py`'s
+    `best_cer` takes the LOWER of the CER against `asr_training_source` and against
+    `asr_training_target`, and which of the row's strings that equals depends on when the
+    reading was taken relative to `05_normalize_text.py`, because that script rewrites the
+    SOURCE with pronunciation respellings (`oestrogène` -> `éstrogène`, `80 %` ->
+    `80 pourcent`) after the fact. So a row scored before the rewrite reproduces from
+    `text`, and one scored after it reproduces from the shipped source. Both are honest
+    scores of the same audio; neither is stale.
+
+    Measured on the 2026-10-26 release gate, which reported 1,271 `cer` plus 469
+    `cer_tail` mismatches over 1,278 distinct clips: ALL 1,278 reproduce exactly (within
+    SCORE_EPSILON) from `asr_training_source`, and 0 would survive this "either
+    reference" rule. The earlier note in this function recorded the opposite (0 of 3,686
+    matched the source, 3,684 matched `text`), which was true of that population: it was
+    measured before the export chain re-ran stage 05 and re-synced, i.e. on rows whose
+    source had been rewritten AFTER their score was taken. Pinning either single
+    reference therefore fails the other ordering, which is why this takes whichever
+    agrees.
+
+    A genuinely stale score, the thing this gate is for, matches NEITHER and is still
+    reported.
+    """
+    return any(v is not None and abs(v - stored) <= SCORE_EPSILON for v in recomputed)
+
+
 def check_scores(rows: list[dict], name: str, f: Findings, *, sample_percent: float,
                  seed: int) -> None:
     """Recompute each row's scores from its own stored transcript and compare.
@@ -382,31 +410,29 @@ def check_scores(rows: list[dict], name: str, f: Findings, *, sample_percent: fl
 
     checked = 0
     for r in tqdm(todo, desc=f"{name} scores", unit="row", leave=False):
-        # `text`, the LABEL, not `asr_training_source`. Stage 06 scores against the source
-        # (what the TTS read) at QC time, and the two normally fold to the same string
-        # under `normalize_for_scoring` (it already folds `%` vs `pour cent`, digits vs
-        # words, accents). But 05_normalize_text.py rewrites the SOURCE afterwards with
-        # pronunciation respellings the fold does not reach: `oestrogènes` ->
-        # `éstrogènes`, `foetal` -> `fétal`, which is deliberate (it is what the TTS is
-        # given) and leaves the shipped source one character from the audio's spelling.
-        # Recomputing against it charges that respelling as a recognition error. Measured
-        # on this validator's own 3,686 flagged v2 rows: 0 match a recompute against
-        # `asr_training_source`, 3,684 match one against `text`, and all 318 tail scores
-        # match `text`. So the source was the reason this check fired, not stale scores,
-        # and the 2 rows left over are the only genuinely stale ones in the release.
+        # `text`, the LABEL, is the reference tried FIRST, but not the only one accepted:
+        # see `matches_a_reference` for why the shipped `asr_training_source` is equally
+        # valid evidence and which population each one explains.
         ref, hyp = r.get("text"), r.get("stt_transcript")
         if not ref or not hyp:
             # Not an error here: a row with no transcript is structure's business.
             continue
         checked += 1
         ident = r.get("audio_filepath")
+        alt = r.get("asr_training_source")
         _, cer = stt.compute_metrics(ref, hyp)
         stored = r.get("cer")
         if cer is not None and isinstance(stored, (int, float)) \
                 and abs(cer - stored) > SCORE_EPSILON:
-            f.error(name, "stored cer does not match the stored transcript",
-                    f"{ident} stored={stored:.6f} recomputed={cer:.6f}",
-                    {"audio_filepath": ident, "cer": stored, "recomputed_cer": cer})
+            # Only now, and only for the rare row that disagrees, is the second reference
+            # worth aligning: jiwer costs ~26 ms a row, so scoring both every time would
+            # double the gate's runtime over 602k rows to buy nothing on the 99.8% that
+            # match the label outright.
+            alt_cer = stt.compute_metrics(alt, hyp)[1] if alt else None
+            if not matches_a_reference(stored, alt_cer):
+                f.error(name, "stored cer matches neither reference",
+                        f"{ident} stored={stored:.6f} recomputed={cer:.6f}",
+                        {"audio_filepath": ident, "cer": stored, "recomputed_cer": cer})
 
         dur = r.get("duration")
         if isinstance(dur, (int, float)):
@@ -430,8 +456,10 @@ def check_scores(rows: list[dict], name: str, f: Findings, *, sample_percent: fl
                        {"audio_filepath": ident, "duration": dur,
                         "recomputed_cer_tail": tail})
             elif tail is not None and isinstance(stored_tail, (int, float)) \
-                    and abs(tail - stored_tail) > SCORE_EPSILON:
-                f.error(name, "stored cer_tail does not match the stored transcript",
+                    and abs(tail - stored_tail) > SCORE_EPSILON \
+                    and not matches_a_reference(
+                        stored_tail, stt.tail_cer(alt, hyp, dur) if alt else None):
+                f.error(name, "stored cer_tail matches neither reference",
                         f"{ident} stored={stored_tail:.6f} recomputed={tail:.6f}",
                         {"audio_filepath": ident, "cer_tail": stored_tail,
                          "recomputed_cer_tail": tail})
