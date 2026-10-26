@@ -44,6 +44,14 @@ not held hostage by the 20-minute acoustic one:
     which is the bug class that bit this corpus twice in 2026-10. Expensive (jiwer per
     row), so it runs on every row that is not pristine plus `--sample-percent` of the rest.
 
+    The same group also warns when a row's own transcript trips a QC gate while the row
+    calls itself fine, which is the pair that reaches training. Run BEFORE
+    ``04_drop_bad_rows.py --apply`` that warning is expected rather than interesting: on
+    the v2 state of 2026-10-26 all 18 rows it named were ``qc_status='exhausted'``, which
+    is exactly what 04 drops, so the gate warning empties itself at the documented point
+    in the pipeline. (It named 67 before the reference fix above; the other 49 were the
+    respelling artefact.)
+
 ``splits``
     train/val/test must partition `full.jsonl` exactly: no clip in two splits, no clip in
     none, nothing in a split that is not in full. Then the leakage checks that matter for
