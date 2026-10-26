@@ -34,6 +34,27 @@ audio path, writes into every manifest row:
     regenerated       true if stage 06 replaced this clip
     qc_status         improved / exhausted / original (see below)
 
+and, for each judge that read the corpus, one column group of its own, so a consumer
+can see WHICH model disagreed rather than a single blended number:
+
+    whisper_stt       what ggml-large-v3-turbo heard (the judge over all 602,789 clips)
+    whisper_cer       its CER, whisper_cer_window its worst-window CER
+    whisper_repeat_excess   its loop count (near-useless, see below, kept for symmetry)
+    whisper_v3_*      the same four from non-turbo ggml-large-v3, the second opinion
+                      run only over what turbo flagged, so null on most rows
+    parakeet_*        the same four from parakeet-tdt-0.6b-v3-ultra
+    cer_max           the worst CER any judge gave the clip
+    cer_window_max    the worst window CER any judge gave it
+
+Two judges rather than one because they fail differently, and a dataset that ships only
+the blend hides that. Whisper's decoder suppresses repeated n-grams, so a clip that says
+the same clause three times comes back transcribed ONCE and scores clean: on 269 clips
+the acoustic scan had flagged, whisper read CER 0.0167 where parakeet read 0.1796 on the
+same audio, a 10.7x gap. Parakeet has the opposite bias: it is a general French model
+with no exposure to this corpus's drug brand names, so it mishears clean audio at CER
+0.08-0.14. Neither is the truth on its own, which is why both ship: `cer_max` is the
+pessimistic read for filtering, and the per-judge columns are what let a user see why.
+
 ``qc_status`` is ``improved`` when the clip was flagged and a better draw replaced it,
 ``exhausted`` when it was flagged and no draw was good enough (the ORIGINAL audio ships,
 so these are the known-weak clips), and ``original`` when it never tripped a gate.
@@ -87,8 +108,63 @@ HOTFIX_SOURCES = (
     ("../06_hotfixes/improved_parrot/full.stt.jsonl", "data/NeMO_files/PARROT"),
 )
 
-QC_FIELDS = ("cer", "cer_tail", "stt_transcript", "n_stt_check", "stt_model",
-             "cfg_alpha", "regenerated", "qc_status")
+# Every judge whose reading reaches a released row, and the column prefix it gets.
+# Adding a judge is one line here plus its sweep; nothing else in this file knows a
+# model name. The keys are `transcriptions` keys, which `12_merge_judge_sidecars.py`
+# normalizes (stage 05's sidecars spell the same two fields `window_cer` / `tail_cer`),
+# so every judge's reading uses the stage-06 names by the time it arrives here.
+#
+# `whisper-1` is deliberately NOT here. It is the v1-era OpenAI alias the client used
+# before the real model name was recorded, and its readings describe v1 AUDIO: shipping
+# them as a judge column would put a stale number next to a v2 clip with nothing on the
+# row to say so. It still exists on old rows, hence `--stt-key`'s default.
+JUDGES = (
+    ("whisper.cpp/ggml-large-v3-turbo", "whisper"),
+    ("whisper.cpp/ggml-large-v3", "whisper_v3"),
+    ("onnx-asr/parakeet-tdt-0.6b-v3-ultra", "parakeet"),
+)
+# reading key -> column suffix. `text` is renamed because `whisper_text` would read like
+# a label; everything else keeps its name so a column and the reading it came from are
+# searchable by the same word.
+JUDGE_FIELDS = (("text", "stt"), ("cer", "cer"), ("cer_window", "cer_window"),
+                ("repeat_excess", "repeat_excess"))
+JUDGE_COLUMNS = tuple(f"{prefix}_{col}" for _, prefix in JUDGES for _, col in JUDGE_FIELDS)
+
+QC_FIELDS = (("cer", "cer_tail", "stt_transcript", "n_stt_check", "stt_model",
+              "cfg_alpha", "regenerated", "qc_status")
+             + JUDGE_COLUMNS + ("cer_max", "cer_window_max"))
+
+
+def judge_columns(all_readings: dict) -> dict:
+    """One flat column per judge per field, plus the across-judge maxima.
+
+    Flat rather than a nested `{"whisper": {...}}` struct because this lands in a
+    released parquet: a struct whose keys vary row to row makes the schema depend on
+    which rows the writer happened to see first, and the non-turbo second opinion ran
+    only over the flagged slice, so its keys are absent on most rows. Flat columns are
+    declared for every row (null where a judge did not read the clip), which is also
+    what makes `cer_max` safe to compute downstream.
+
+    The maxima ignore nulls and are None when no judge scored the clip, never 0.0: a
+    0.0 would read as "every judge agreed it is perfect" on a clip nobody judged.
+    """
+    out: dict = {}
+    cers: list[float] = []
+    windows: list[float] = []
+    for key, prefix in JUDGES:
+        reading = all_readings.get(key) or {}
+        for field, col in JUDGE_FIELDS:
+            value = reading.get(field)
+            if field == "text":
+                value = (value or "").strip() or None
+            out[f"{prefix}_{col}"] = value
+        if isinstance(reading.get("cer"), (int, float)):
+            cers.append(float(reading["cer"]))
+        if isinstance(reading.get("cer_window"), (int, float)):
+            windows.append(float(reading["cer_window"]))
+    out["cer_max"] = max(cers) if cers else None
+    out["cer_window_max"] = max(windows) if windows else None
+    return out
 
 
 PASS_SCRIPT = "01_recursive_improvement.py"
@@ -199,6 +275,9 @@ def load_hotfix(root: Path, stt_model: str, stt_key: str = STT_KEY) -> dict[str,
                 # pending_* means a run was interrupted mid-flight: the clip is whatever
                 # is on disk right now, which is the original, so it ships as one.
                 "qc_status": status if status in ("improved", "exhausted") else "original",
+                # Per-judge columns, from the SAME row: every judge that read this clip
+                # wrote into the one `transcriptions` dict, so no second join is needed.
+                **judge_columns(all_readings),
             }
             key = resolve_audio(base, row["audio_filepath"])
             prior = index.get(key)

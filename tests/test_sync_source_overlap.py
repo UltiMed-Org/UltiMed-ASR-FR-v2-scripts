@@ -161,11 +161,66 @@ def test_the_merge_rule_on_its_own(mod) -> None:
     check("the prior is not mutated", improved["cer"] == 0.01, json.dumps(improved))
 
 
+def test_each_judge_gets_its_own_columns(mod) -> None:
+    """Per-judge columns, so a consumer sees WHICH model disagreed.
+
+    The two judges fail in opposite directions: whisper's decoder collapses repeated
+    speech, so a looping clip comes back transcribed once and scores clean (CER 0.0167
+    where parakeet read 0.1796 on the same 269 flagged clips), while parakeet mishears
+    this corpus's drug brand names at CER 0.08-0.14 on clean audio. A single blended
+    number hides both, so each judge ships its own group and `cer_max` is the
+    pessimistic read across them.
+    """
+    print("\neach judge gets its own columns")
+    readings = {
+        "whisper.cpp/ggml-large-v3-turbo": {
+            "text": "  amoxicilline un gramme  ", "cer": 0.02, "cer_window": 0.05,
+            "repeat_excess": 0,
+        },
+        "onnx-asr/parakeet-tdt-0.6b-v3-ultra": {
+            "text": "amoxicilline un gramme un gramme un gramme", "cer": 0.18,
+            "cer_window": 0.31, "repeat_excess": 4,
+        },
+        # The v1-era alias: present on old rows, and it must NOT become a column.
+        "whisper-1": {"text": "v1 audio", "cer": 0.5, "cer_window": 0.6},
+    }
+    cols = mod.judge_columns(readings)
+
+    check("whisper text is stripped", cols["whisper_stt"] == "amoxicilline un gramme",
+          repr(cols["whisper_stt"]))
+    check("whisper keeps its own cer", cols["whisper_cer"] == 0.02)
+    check("parakeet keeps its own cer", cols["parakeet_cer"] == 0.18)
+    check("the loop count comes from parakeet", cols["parakeet_repeat_excess"] == 4)
+    check("whisper reads the loop as clean", cols["whisper_repeat_excess"] == 0)
+    check("cer_max is the pessimistic read", cols["cer_max"] == 0.18, repr(cols["cer_max"]))
+    check("cer_window_max is the pessimistic read", cols["cer_window_max"] == 0.31)
+    # The non-turbo second opinion ran only over the flagged slice, so its columns must
+    # be DECLARED and null rather than missing, or the parquet schema depends on which
+    # rows the writer saw first.
+    check("the second opinion is declared null",
+          cols["whisper_v3_stt"] is None and cols["whisper_v3_cer"] is None)
+    check("every judge column is present",
+          set(mod.JUDGE_COLUMNS) <= set(cols),
+          str(sorted(set(mod.JUDGE_COLUMNS) - set(cols))))
+    check("the v1 alias is not a column",
+          not any(k.startswith("whisper_1") or k.startswith("whisper-1") for k in cols))
+    check("the v1 alias does not reach cer_max", cols["cer_max"] != 0.5)
+
+    # A clip no judge read: nulls, and no 0.0 that would read as unanimous agreement.
+    empty = mod.judge_columns({})
+    check("an unjudged clip has no maxima",
+          empty["cer_max"] is None and empty["cer_window_max"] is None,
+          json.dumps(empty))
+    check("the sync writes every judge column",
+          set(mod.JUDGE_COLUMNS) <= set(mod.QC_FIELDS))
+
+
 def main() -> None:
     mod = load_sync_module()
     test_the_later_source_cannot_erase_the_improvement(mod)
     test_a_present_marker_is_the_fresher_judgement(mod)
     test_the_merge_rule_on_its_own(mod)
+    test_each_judge_gets_its_own_columns(mod)
     print(f"\n{len(failures)} failed: {failures}" if failures else "\nall checks passed")
     sys.exit(1 if failures else 0)
 

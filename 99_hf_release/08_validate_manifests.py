@@ -106,6 +106,32 @@ REQUIRED_KEYS = ("audio_filepath", "duration", "text", "asr_training_source")
 OPTIONAL_KEYS = {
     "cer_tail": "None on clips at or under 30 s: there is no tail to isolate",
     "n_stt_check": "None until a clip has been re-checked at least once",
+    # The per-judge groups `03_sync_hotfix_results.py` writes. Present on every row and
+    # null where that judge did not read the clip, which for the non-turbo second
+    # opinion is most of the corpus (it ran only over what turbo flagged).
+    "whisper_stt": "None if the turbo judge has no reading for the clip",
+    "whisper_cer": "same",
+    "whisper_cer_window": "same",
+    "whisper_repeat_excess": "same",
+    "whisper_v3_stt": "None unless turbo flagged the clip and the second opinion ran",
+    "whisper_v3_cer": "same",
+    "whisper_v3_cer_window": "same",
+    "whisper_v3_repeat_excess": "same",
+    "parakeet_stt": "None until the parakeet sweep's sidecar is merged in",
+    "parakeet_cer": "same",
+    "parakeet_cer_window": "same",
+    "parakeet_repeat_excess": "same",
+    "cer_max": "None only when no judge scored the clip at all",
+    "cer_window_max": "same",
+}
+
+#: `cer_max` / `cer_window_max` must be the max over the per-judge columns of the same
+#: name, so a consumer filtering on one of them cannot be shown a number that no judge
+#: produced. Keyed by the maximum, valued by the columns it summarizes.
+JUDGE_MAXIMA = {
+    "cer_max": ("whisper_cer", "whisper_v3_cer", "parakeet_cer"),
+    "cer_window_max": ("whisper_cer_window", "whisper_v3_cer_window",
+                       "parakeet_cer_window"),
 }
 
 #: Everything else a v2 row is expected to carry, with the type it must have when set.
@@ -223,6 +249,22 @@ def check_structure(rows: list[dict], name: str, f: Findings) -> None:
             elif typ is not float and not isinstance(v, typ):
                 f.error(name, f"column '{key}' is {type(v).__name__}, "
                               f"want {typ.__name__}", ident)
+
+        # A maximum that no judge produced is worse than a missing one: a consumer
+        # filtering `cer_max < 0.08` would be trusting a number with no source. Checked
+        # per row rather than in aggregate because that is the only way to name the clip.
+        for top, parts in JUDGE_MAXIMA.items():
+            if top not in r:
+                continue
+            seen = [r[p] for p in parts if isinstance(r.get(p), (int, float))]
+            want = max(seen) if seen else None
+            got = r[top]
+            if want is None:
+                if got is not None:
+                    f.error(name, f"'{top}' is {got} but no judge scored this clip", ident)
+            elif not isinstance(got, (int, float)) or abs(got - want) > 1e-9:
+                f.error(name, f"'{top}' is {got}, want {want} "
+                              f"(max of {', '.join(parts)})", ident)
 
         dur = r.get("duration")
         if isinstance(dur, (int, float)) and dur <= 0:
