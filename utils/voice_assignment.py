@@ -66,6 +66,45 @@ VOICES_FR_V2 = (
     "h_frf_ptm",    # pt_male
 )
 
+#: The lowest cfg_alpha each voice family was measured to stay usable at, from the
+#: 2026-10-13 audition (16 French voices x 10 values from 0.1 to 5.0 on one dense
+#: medical sentence, noise seed pinned; CrispASR `voxtral/cloning/cfg_sweep.sh`): the
+#: usable band is 1.2-2.0 for the two shipped `fr_*` voices and **1.5-2.0 for the
+#: hybrids**, which need more guidance to hold their articulation.
+#:
+#: This matters because the repair pass walks the guidance DOWN from 2.0 looking for a
+#: draw that scores better, and seven of the nine v2 voices are hybrids. A single global
+#: floor is wrong either way: 1.2 lets a hybrid clip be "repaired" by a draw two rungs
+#: below its own floor (a better CER from audio the audition rejected), while 1.5 throws
+#: away two usable rungs for the `fr_*` voices.
+FLOOR_HYBRID, FLOOR_BASE = 1.5, 1.2
+
+
+def is_hybrid(voice: str | None) -> bool:
+    """True for the seven hybrid voices, which are named for it (`h_<source><target>`).
+
+    >>> is_hybrid("h_frf_itm"), is_hybrid("fr_male"), is_hybrid(None)
+    (True, False, False)
+    """
+    return bool(voice) and voice.startswith("h_")
+
+
+def cfg_alpha_floor(voice: str | None, *, hybrid: float = FLOOR_HYBRID,
+                    base: float = FLOOR_BASE) -> float:
+    """The measured floor for one clip's voice. Unknown voices get the stricter one.
+
+    Stricter rather than looser on an unknown name because the cost is asymmetric: a
+    floor set too high loses a rung of a retry ladder, while one set too low ships audio
+    a human audition already judged unusable, and nothing downstream re-auditions it.
+
+    >>> cfg_alpha_floor("h_itf_arm"), cfg_alpha_floor("fr_female")
+    (1.5, 1.2)
+    >>> cfg_alpha_floor("some_new_voice")
+    1.5
+    """
+    return base if voice in VOICES_FR_V2 and not is_hybrid(voice) else hybrid
+
+
 #: Voices dropped from the roster after measurement. They stay listed in
 #: `VOICES_FR_V2` on purpose: see `voice_for_key` for why deleting an entry is NOT
 #: how a voice is retired, and what it would cost.

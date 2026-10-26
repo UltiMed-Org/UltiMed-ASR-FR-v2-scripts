@@ -80,15 +80,10 @@ from loguru import logger
 from tqdm import tqdm
 
 _HERE = Path(__file__).resolve().parent
-
-#: Hybrid voices are the ones whose floor is 1.5 rather than 1.2, and they are named for
-#: it: `h_<source><target>` against the two shipped `fr_*` voices.
-def is_hybrid(voice: str) -> bool:
-    return bool(voice) and voice.startswith("h_")
-
-
-#: The floor each voice family was measured to need, from the 2026-10-13 audition.
-FLOOR_HYBRID, FLOOR_BASE = 1.5, 1.2
+sys.path.insert(0, str(_HERE.parent / "utils"))
+# The roster module owns the floors, so this experiment and the repair pass that acts on
+# its answer cannot drift apart on what "below the floor" means.
+from voice_assignment import FLOOR_BASE, FLOOR_HYBRID, is_hybrid  # noqa: E402
 
 #: Duration buckets, in seconds. A defect's visibility to CER depends strongly on clip
 #: length (a dropped phrase is diluted in a long clip), so a cohort that is shorter on

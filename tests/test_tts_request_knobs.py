@@ -59,8 +59,14 @@ def eq(label: str, got, want) -> None:
         _failures.append(f"{label}: got {got!r} want {want!r}")
 
 
-def _capture_bodies(n_improv: int, **overrides) -> list[dict]:
-    """Run n_improv drafts with the network stubbed, returning the request bodies."""
+def _capture_bodies(n_improv: int, *, clip_voice: str | None = None, **overrides) -> list[dict]:
+    """Run n_improv drafts with the network stubbed, returning the request bodies.
+
+    `clip_voice` is the PER-CLIP voice, the one `_synthesize_draft` takes as an argument
+    and the one the driver passes from the voice assignment; `tts_voice` in the overrides
+    is only the fallback for a clip that carries none. The two differ on purpose, since
+    the cfg_alpha floor has to follow the voice that is actually synthesized.
+    """
     bodies: list[dict] = []
 
     def fake_post(url, body, timeout):  # signature of the real post_json
@@ -84,7 +90,8 @@ def _capture_bodies(n_improv: int, **overrides) -> list[dict]:
     _imp._tts.payload_duration = lambda payload: 12.0    # never near the frame cap
     try:
         for attempt in range(n_improv):
-            _imp._synthesize_draft(attempt, cfg, "clip", "bonjour", 999, "nohash", set())
+            _imp._synthesize_draft(attempt, cfg, "clip", "bonjour", 999, "nohash", set(),
+                                   voice=clip_voice)
     finally:
         _imp._tts.post_json, _imp._tts.payload_duration = orig_post, orig_dur
     return bodies
@@ -160,6 +167,47 @@ deep = _capture_bodies(10, cfg_alpha_start=2.0, cfg_alpha_step=-0.2, cfg_alpha_f
 eq("the ladder stops at the floor", [_alpha(b) for b in deep],
    [2.0, 1.8, 1.6, 1.4, 1.2, 1.2, 1.2, 1.2, 1.2, 1.2])
 eq("no draw is ever at or below CFG-off", [a for a in (_alpha(b) for b in deep) if a <= 1.0], [])
+
+# --- and the floor is PER VOICE ------------------------------------------------------
+# The 2026-10-13 audition measured the usable band as 1.2-2.0 on the two shipped `fr_*`
+# voices but 1.5-2.0 on the hybrids, and seven of the nine v2 voices are hybrids. With a
+# single global 1.2 a hybrid clip could be "repaired" by a draw two rungs below its own
+# floor, and nothing downstream would notice: the winner is picked on CER, and CER cannot
+# hear the articulation the audition rejected that band for. So the ladder asks
+# utils/voice_assignment.py, the one home of those numbers.
+import sys  # noqa: E402
+
+sys.path.insert(0, str(HERE.parent / "utils"))
+import voice_assignment as _va  # noqa: E402
+
+hyb = _capture_bodies(10, clip_voice="h_frf_itm",
+                      cfg_alpha_start=2.0, cfg_alpha_step=-0.2, cfg_alpha_floor=1.2)
+eq("a hybrid clip stops at its own 1.5, not the global 1.2", [_alpha(b) for b in hyb],
+   [2.0, 1.8, 1.6, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5])
+eq("the hybrid floor is the one from voice_assignment", _va.FLOOR_HYBRID, 1.5)
+# The per-clip voice wins over cfg.tts_voice, which is only the fallback. This is the
+# shape the driver actually runs: one --tts-voice on the command line, the real voice per
+# clip out of the assignment, so reading the fallback would floor every clip at 1.2.
+eq("the per-clip voice is what sets the floor",
+   _alpha(_capture_bodies(5, clip_voice="h_itf_arm", cfg_alpha_start=2.0,
+                          cfg_alpha_step=-0.2, cfg_alpha_floor=1.2,
+                          tts_voice="fr_female")[-1]), 1.5)
+# An unknown voice gets the STRICTER floor, because a floor set too high only loses a rung
+# of the retry ladder while one set too low ships audio an audition already called unusable.
+eq("an unknown voice is treated as a hybrid",
+   _alpha(_capture_bodies(5, clip_voice="h_future_voice", cfg_alpha_start=2.0,
+                          cfg_alpha_step=-0.2, cfg_alpha_floor=1.2)[-1]), 1.5)
+# `max` composes the two, so an explicitly stricter --cfg-alpha-floor still wins on a base
+# voice (otherwise the flag would be silently capped at 1.2 and sweeps could not raise it),
+eq("an explicit stricter floor still wins", [_alpha(b) for b in
+   _capture_bodies(5, cfg_alpha_start=2.0, cfg_alpha_step=-0.2, cfg_alpha_floor=1.8)],
+   [2.0, 1.8, 1.8, 1.8, 1.8])
+# and a negative floor (which reaches here as None, see --cfg-alpha-floor's help) still
+# removes the clamp entirely, hybrid or not: it is the documented escape hatch for a sweep.
+eq("a removed floor stays removed on a hybrid too", [_alpha(b) for b in
+   _capture_bodies(5, clip_voice="h_frf_itm", cfg_alpha_start=2.0, cfg_alpha_step=-0.2,
+                   cfg_alpha_floor=None)],
+   [2.0, 1.8, 1.6, 1.4, 1.2])
 
 # --- speed jitter, if someone turns it on -------------------------------------------
 # It cycles around the base, but note it is NOT a second source of variation on this

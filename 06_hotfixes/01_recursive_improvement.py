@@ -954,10 +954,23 @@ def _synthesize_draft(
     # carry only the knobs they care about; before the ladder moved to utils/, the
     # conditional expression here read those fields lazily and so tolerated their
     # absence by accident.
+    #
+    # The floor is PER VOICE, which is what that drift the comment above warns about
+    # would have been. The 2026-10-13 audition measured the usable band as 1.2-2.0 for
+    # the two shipped `fr_*` voices but **1.5-2.0 for the hybrids**, and seven of the
+    # nine v2 voices are hybrids, so a single global 1.2 lets a hybrid clip be
+    # "repaired" by a draw two rungs under its own floor. Nothing downstream would
+    # catch that: the winner is picked on CER, and CER cannot hear the articulation the
+    # audition rejected it for, so the draw ships. `max` composes the two, so an
+    # explicitly stricter `--cfg-alpha-floor` still wins and a negative one (the
+    # documented way to remove the clamp, which arrives here as None) still removes it.
+    floor = getattr(cfg, "cfg_alpha_floor", CFG_ALPHA_FLOOR)
+    if floor is not None:
+        floor = max(floor, _voices.cfg_alpha_floor(voice or getattr(cfg, "tts_voice", None)))
     cfg_alpha = ladder_cfg_alpha(
         start=getattr(cfg, "cfg_alpha_start", CFG_ALPHA_START), attempt=attempt,
         step=getattr(cfg, "cfg_alpha_step", CFG_ALPHA_STEP),
-        floor=getattr(cfg, "cfg_alpha_floor", CFG_ALPHA_FLOOR))
+        floor=floor)
     # The per-clip duration band this draw is held to, and the frame budget derived
     # from its slow end. budget_terms / budget_tokens are stage 05's, which read
     # utils/frame_budget.py: the per-voice bands have ONE home, because a copy here
