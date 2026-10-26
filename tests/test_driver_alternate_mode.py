@@ -478,7 +478,8 @@ def test_the_steps_are_on_by_default(tmp: Path) -> None:
     assert rc == 0, f"driver exited {rc}\n{out}"
     assert modes == ["stt"], f"passes ran: {modes}\n{out}"
     scripts = [line.split("|", 1)[0] for line in steps]
-    assert scripts == ["04_qc_acoustic_loops.py", "03_sync_hotfix_results.py"], \
+    assert scripts == ["04_qc_acoustic_loops.py",
+                       "13_refresh_stale_durations.py", "03_sync_hotfix_results.py"], \
         f"steps ran: {scripts}\n{out}"
     assert "Skipping the manifest refresh" in out, out
     # The scan's worker count is the driver's business, not the script's: its own default
@@ -540,7 +541,8 @@ def test_the_whole_phase_in_one_command(tmp: Path) -> None:
     assert modes == ["stt"], f"passes ran: {modes}\n{out}"
     scripts = [line.split("|", 1)[0] for line in steps]
     assert scripts == ["01_build_nemo_manifest.py", "02_combine_nemo_manifests.py",
-                       "04_qc_acoustic_loops.py", "03_sync_hotfix_results.py"], \
+                       "04_qc_acoustic_loops.py", "13_refresh_stale_durations.py",
+                       "03_sync_hotfix_results.py"], \
         f"steps ran: {scripts}\n{out}"
     assert f"--pin-splits-from {pinned}" in steps[0], steps[0]
     assert f"--pin-splits-from {pinned}" in steps[1], steps[1]
@@ -548,11 +550,42 @@ def test_the_whole_phase_in_one_command(tmp: Path) -> None:
     assert "--stage 01_dictionnary --stage 04_PARROT" in steps[2], steps[2]
     # The sync must read the key the passes WROTE under, not v1's `whisper-1` default,
     # or it matches nothing and writes every QC column empty.
-    assert "--apply" in steps[3] and "--stt-key whisper.cpp/ggml-large-v3" in steps[3], steps[3]
+    assert "--apply" in steps[4] and "--stt-key whisper.cpp/ggml-large-v3" in steps[4], steps[4]
     # And the model NAME it writes into the manifest must be that same judge, or the row
     # would credit turbo (the script's own default) with large-v3's reading.
-    assert "--stt-model whisper.cpp/ggml-large-v3" in steps[3], steps[3]
+    assert "--stt-model whisper.cpp/ggml-large-v3" in steps[4], steps[4]
     print("test_the_whole_phase_in_one_command: OK")
+
+
+def test_the_duration_refresh_runs_before_the_sync(tmp: Path) -> None:
+    """The refresh must sit IMMEDIATELY before the sync, and nowhere else.
+
+    What went wrong on 2026-10-26: `03_sync_hotfix_results.py` copies the state row's
+    `duration` into the manifest, documenting the premise that stage 06's output "already
+    carries the re-probed duration". Only a redraw rewrites that field, so a clip the
+    generator regenerated kept its v1 length (208,235 of 604,337 rows), and the sync, run
+    last, overwrote the manifest rebuild's true durations with those. The visible cost was
+    `tail_cer`: it returns null at or under 30 s, so the gate that asks "did this clip END
+    correctly" skipped 5,250 clips that really run past 30 s.
+
+    Order is the whole fix, hence an assertion on adjacency rather than on membership: a
+    refresh after the sync repairs the state file for a release that has already shipped
+    the wrong numbers.
+    """
+    steps: list[str] = []
+    rc, _modes, _switches, out = run_driver(
+        tmp, [10], {"MODE": "alternate", "ACOUSTIC_SCAN": "0", "SYNC_RESULTS": "1"},
+        steps=steps)
+    assert rc == 0, f"driver exited {rc}\n{out}"
+    scripts = [line.split("|", 1)[0] for line in steps]
+    assert scripts == ["13_refresh_stale_durations.py", "03_sync_hotfix_results.py"], \
+        f"steps ran: {scripts}\n{out}"
+    # --apply, or it reports what it would do and the sync still pushes stale durations.
+    assert "--apply" in steps[0], steps[0]
+    # Two scripts, ONE step, like the manifest rebuild: the pair is numbered as the single
+    # post-step it is (one dataset + the sync = 2), so the ledger resumes both or neither.
+    assert "[step 2/2]" in out and "[step 3/" not in out, out
+    print("test_the_duration_refresh_runs_before_the_sync: OK")
 
 
 def test_a_non_local_judge_is_refused(tmp: Path) -> None:
@@ -653,7 +686,8 @@ def test_a_stopped_run_picks_up_where_it_was(tmp: Path) -> None:
     assert rc == 0, f"run 1 exited {rc}\n{out}"
     scripts = [line.split("|", 1)[0] for line in steps]
     assert scripts == ["01_build_nemo_manifest.py", "02_combine_nemo_manifests.py",
-                       "04_qc_acoustic_loops.py", "03_sync_hotfix_results.py"], \
+                       "04_qc_acoustic_loops.py", "13_refresh_stale_durations.py",
+                       "03_sync_hotfix_results.py"], \
         f"run 1 steps: {scripts}\n{out}"
     assert modes == ["stt"], f"run 1 passes: {modes}\n{out}"
     # Four steps here: refresh + scan + one dataset + sync, numbered so the log says
@@ -732,6 +766,7 @@ def main() -> None:
         test_every_step_can_be_turned_off(tmp)
         test_an_explicit_refresh_refuses_unpinned_splits(tmp)
         test_the_whole_phase_in_one_command(tmp)
+        test_the_duration_refresh_runs_before_the_sync(tmp)
         test_it_waits_for_the_generator_then_stops_the_qc(tmp)
         test_a_qc_that_ignores_sigterm_gets_sigkilled(tmp)
         test_the_gate_waves_through_a_host_with_nothing_running(tmp)

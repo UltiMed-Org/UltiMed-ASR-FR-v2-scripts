@@ -1181,7 +1181,21 @@ elif (( SYNC_RESULTS )); then
     *) echo "driver: OUTPUT is '${OUTPUT}', while 03_sync_hotfix_results.py reads" >&2
        echo "  06_hotfixes/improved{,_parrot}/full.stt.jsonl. Expect it to find nothing." >&2 ;;
   esac
-  step_header "post-step: syncing stage 06 results into the manifests"
+  step_header "post-step: refreshing durations, then syncing stage 06 into the manifests"
+  # Two scripts, one step, like the manifest rebuild above, because the first exists only
+  # to make the second correct. The sync copies the STATE row's duration INTO the
+  # manifest on the premise that stage 06 re-probed it; only a redraw does, so a clip the
+  # generator rewrote keeps the length it had in v1 (208,235 of 604,337 rows on
+  # 2026-10-26). Without the refresh the sync overwrites the rebuild's true durations with
+  # stale ones, and `tail_cer`, which returns null at or under 30 s, stays blind on every
+  # clip whose real length crosses that window. Non-fatal: it reads 99_hf_release/data,
+  # which a run from a copied driver (the tests) or an unmounted release symlink does not
+  # have, and that must not take a finished QC pass down.
+  if ! as_user "${UV_BIN}" run "${HERE}/13_refresh_stale_durations.py" --apply; then
+    echo "driver: the duration refresh failed, so the sync below pushes stale durations" >&2
+    echo "  into the manifests. Re-run 06_hotfixes/13_refresh_stale_durations.py --apply," >&2
+    echo "  then 99_hf_release/03_sync_hotfix_results.py --apply, by hand." >&2
+  fi
   if as_user "${UV_BIN}" run "${ROOT}/99_hf_release/03_sync_hotfix_results.py" \
       --apply --stt-key "${STT_MODEL}" --stt-model "${STT_MODEL}"; then
     step_log "done sync"
