@@ -82,6 +82,19 @@ Seven kinds of rows are dropped:
    worth either the risk or softening ``08_validate_manifests.py``'s error on them,
    which is also the guard that will catch any future one.
 
+Three of those reasons (exhausted, ASR-flagged, CFG off) are not in the row itself:
+they come from stage 06's state files, through the sync or the flag list. And stage
+06's state follows the manifest it is pointed at, so a QC round run AFTER this script
+forgets every clip this script removed, and the next ``01_build_nemo_manifest.py``
+rebuild finds the audio on disk and brings the row back with no record left to drop
+it on. That happened on 2026-10-27: 71 rows (17 exhausted, 54 ASR-flagged) came back
+with six empty QC columns, and 63 earlier ones (54 CFG off, 9 exhausted) came back,
+got re-read by a Whisper judge, and passed. So every such drop is also written to
+``dropped_clips.jsonl`` (committed, next to this script), with the audio's mtime, and
+re-applied as ``previously-dropped`` for as long as the audio is the same bytes. A
+clip redrawn after its drop has newer audio, so its old verdict no longer applies and
+it is judged afresh.
+
 A dropped clip is dropped from EVERY manifest (matched on its resolved audio path),
 including the per-source ``<source>/*.jsonl`` partitions and the down-sampled
 ``*.down-N`` fixtures, since each is a copy of rows and the parquet / trainer read
@@ -94,16 +107,17 @@ The hand-made NeMo-repo sets (``perso/drug_sentence_dataset/*.json``, the privat
 ``uv run 04_drop_bad_rows.py --apply <manifest> ...`` (the eval-duplicate check still
 compares against the release train split only).
 
-Idempotent: a second run finds nothing left to drop.
+Idempotent: a second run finds nothing left to drop, and writes nothing new to the ledger.
 
 This file was written by Claude Code.
 """
 from __future__ import annotations
 
+import os
 import re
 import sys
 import unicodedata
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from pathlib import Path
 
 import click
@@ -137,6 +151,12 @@ CFG_OFF = "cfg-off"
 #: CFG_ALPHA_FLOOR, and CFG off is the documented failure mode where the flow-matching
 #: decoder stops following the text and emits plausible-sounding wrong words.
 CFG_OFF_VALUE = 1.0
+PREVIOUSLY_DROPPED = "previously-dropped"
+DROP_LEDGER = _HERE / "dropped_clips.jsonl"
+#: The reasons whose evidence lives outside the row (stage 06's state, the flag list),
+#: so a later QC round can erase it. The others are re-derived from the row's own
+#: text, duration and split on every run and need no memory.
+REMEMBERED_REASONS = frozenset({EXHAUSTED, ASR_FLAGGED, CFG_OFF})
 
 _PUNCT = re.compile(r"[^\w\s]")
 
@@ -231,8 +251,60 @@ def asr_flagged_stale(flagged: Collection[str], root_path: Path,
     return n_newer, n_missing
 
 
+def audio_mtime_ns(audio: str) -> int | None:
+    """The audio file's mtime, or None when it is not on disk."""
+    try:
+        return os.stat(audio).st_mtime_ns
+    except OSError:
+        return None
+
+
+def load_drop_ledger(path: Path = DROP_LEDGER) -> dict[str, dict]:
+    """``clip_key`` -> ledger entry (``reason``, ``audio_mtime_ns``); empty if no ledger."""
+    return {r["clip"]: r for r in read_jsonl(path)} if path.is_file() else {}
+
+
+def still_dropped(entry: dict, audio: str) -> bool:
+    """Whether a remembered drop still applies: the audio is the bytes it was made on.
+
+    A clip redrawn since has a newer mtime, so the verdict describes audio that is gone.
+    A clip missing from disk cannot be shipped either way, and is not dropped here.
+    """
+    mtime = audio_mtime_ns(audio)
+    return mtime is not None and mtime <= entry["audio_mtime_ns"]
+
+
+def record_drops(ledger: dict[str, dict], dropped: list[tuple[dict, str, str]]) -> int:
+    """Add the drops whose reason a later QC round could erase to ``ledger``, in place.
+
+    Parameters
+    ----------
+    ledger : dict[str, dict]
+        From ``load_drop_ledger``.
+    dropped : list[tuple[dict, str, str]]
+        ``(row, reason, resolved audio path)`` for every row dropped this run.
+
+    Returns
+    -------
+    int
+        How many entries were added or refreshed.
+    """
+    n = 0
+    for _, reason, audio in dropped:
+        if reason not in REMEMBERED_REASONS:
+            continue
+        mtime = audio_mtime_ns(audio)
+        key = clip_key(audio)
+        if mtime is None or ledger.get(key, {}).get("audio_mtime_ns") == mtime:
+            continue
+        ledger[key] = {"clip": key, "reason": reason, "audio_mtime_ns": mtime}
+        n += 1
+    return n
+
+
 def filter_rows(rows: list[dict], manifest_dir: Path, drop_audio: Collection[str] = (),
-                asr_flagged: Collection[str] = ()) -> tuple[list[dict], list[tuple[dict, str]], int]:
+                asr_flagged: Collection[str] = (), ledger: Mapping[str, dict] | None = None,
+                ) -> tuple[list[dict], list[tuple[dict, str]], int]:
     """Split manifest rows into kept and dropped ones.
 
     Parameters
@@ -245,6 +317,8 @@ def filter_rows(rows: list[dict], manifest_dir: Path, drop_audio: Collection[str
         Resolved audio paths to drop whatever their status (from ``eval_duplicates``).
     asr_flagged : Collection[str]
         ``clip_key`` values to drop (from ``load_asr_flagged``).
+    ledger : Mapping[str, dict] | None
+        Earlier drops (from ``load_drop_ledger``), re-applied while the audio is unchanged.
 
     Returns
     -------
@@ -252,7 +326,8 @@ def filter_rows(rows: list[dict], manifest_dir: Path, drop_audio: Collection[str
         Rows that stay (order preserved).
     dropped : list[tuple[dict, str]]
         Each dropped row with its reason: ``EXHAUSTED``, ``DUPLICATE``, ``ELLIPSIS``,
-        ``LLM_LEAK``, ``TOO_FAST``, ``ASR_FLAGGED`` or ``CFG_OFF``.
+        ``LLM_LEAK``, ``TOO_FAST``, ``ASR_FLAGGED``, ``CFG_OFF`` or
+        ``"previously-dropped (<reason>)"``.
     n_unsynced : int
         How many rows carry no ``qc_status`` key at all, i.e. were never touched by
         ``03_sync_hotfix_results.py``: their status is unknown, so they are kept, but
@@ -278,6 +353,9 @@ def filter_rows(rows: list[dict], manifest_dir: Path, drop_audio: Collection[str
             dropped.append((row, ASR_FLAGGED))
         elif row.get("cfg_alpha") == CFG_OFF_VALUE:
             dropped.append((row, CFG_OFF))
+        elif ledger and (entry := ledger.get(clip_key(resolve_audio(manifest_dir, row["audio_filepath"])))) \
+                and still_dropped(entry, resolve_audio(manifest_dir, row["audio_filepath"])):
+            dropped.append((row, f"{PREVIOUSLY_DROPPED} ({entry['reason']})"))
         else:
             kept.append(row)
     return kept, dropped, n_unsynced
@@ -292,11 +370,15 @@ def filter_rows(rows: list[dict], manifest_dir: Path, drop_audio: Collection[str
               show_default="99_hf_release/asr_flagged_clips.jsonl", type=click.Path(path_type=Path),
               help="List of ASR-flagged clip keys to drop (from 06_hotfixes/04_flag_asr_defects.py). "
                    "A list built on an earlier generation of the audio must be rebuilt or disabled.")
+@click.option("--drop-ledger", "drop_ledger", default=str(DROP_LEDGER),
+              show_default="99_hf_release/dropped_clips.jsonl", type=click.Path(path_type=Path),
+              help="Memory of earlier drops whose evidence a QC round can erase; read every run, "
+                   "written with --apply.")
 @click.option("--no-asr-flagged", is_flag=True,
               help="Ignore the ASR-flagged list entirely. What to pass on a freshly "
                    "regenerated corpus until 04_flag_asr_defects.py has re-run on it.")
 def main(manifests: tuple[Path, ...], root: str, apply: bool,
-         asr_flagged_list: Path, no_asr_flagged: bool) -> None:
+         asr_flagged_list: Path, drop_ledger: Path, no_asr_flagged: bool) -> None:
     """Remove exhausted clips, eval duplicates of training texts, ellipsis labels, leaked LLM
     reasoning, impossibly fast labels and ASR-flagged clips from the release manifests (or the
     given ones)."""
@@ -332,12 +414,19 @@ def main(manifests: tuple[Path, ...], root: str, apply: bool,
                 "were measured on audio that is gone. Rebuild the list with "
                 "06_hotfixes/04_flag_asr_defects.py, or pass --no-asr-flagged.")
 
+    ledger_path = Path(drop_ledger)
+    ledger = load_drop_ledger(ledger_path)
+    logger.info(f"{len(ledger)} earlier drops remembered in {ledger_path.name}")
+
     total_dropped = 0
+    this_run: list[tuple[dict, str, str]] = []
     for path in targets:
         if not path.is_file() or path.name.startswith("."):
             continue
         rows = read_jsonl(path)
-        kept, dropped, n_unsynced = filter_rows(rows, path.parent, duplicates, asr_flagged)
+        kept, dropped, n_unsynced = filter_rows(rows, path.parent, duplicates, asr_flagged, ledger)
+        this_run.extend((row, reason, resolve_audio(path.parent, row["audio_filepath"]))
+                        for row, reason in dropped)
         label = path.relative_to(root_path) if path.is_relative_to(root_path) else path
         if n_unsynced:
             logger.warning(f"{label}: {n_unsynced}/{len(rows)} rows WITHOUT qc_status, run "
@@ -352,6 +441,9 @@ def main(manifests: tuple[Path, ...], root: str, apply: bool,
             write_jsonl(path, kept)
 
     logger.info(f"total: {total_dropped} rows dropped across all manifests")
+    if apply and (n_new := record_drops(ledger, this_run)):
+        write_jsonl(ledger_path, sorted(ledger.values(), key=lambda r: r["clip"]))
+        logger.info(f"{ledger_path.name}: {n_new} drop(s) remembered, {len(ledger)} in total")
     if total_dropped and not apply:
         logger.warning("dry run, nothing written (pass --apply)")
     elif total_dropped:

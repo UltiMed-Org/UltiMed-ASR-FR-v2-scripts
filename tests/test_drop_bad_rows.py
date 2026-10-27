@@ -9,7 +9,9 @@ and that leaked LLM reasoning and a label too long for its clip are dropped.
 Also that the ASR-flagged list is recognized as stale once the audio it was measured
 on has been replaced (the list keys on file names, which a regenerated corpus reuses),
 and that a draw synthesized with CFG off (cfg_alpha 1.0) is dropped while the ladder's
-1.2 floor is kept.
+1.2 floor is kept. And that a drop survives the QC round after it: stage 06's state
+forgets a row the manifest no longer has, so the rebuilt row comes back with no
+qc_status, and only dropped_clips.jsonl still knows why it went (until it is redrawn).
 
 Run: python tests/test_drop_bad_rows.py
 """
@@ -177,6 +179,54 @@ def test_cfg_off() -> None:
     print("test_cfg_off: OK")
 
 
+def test_a_drop_survives_the_next_qc_round() -> None:
+    """2026-10-27: 71 dropped clips came back with empty QC columns. The QC round after a
+    drop runs on the trimmed manifest, so its state forgets them; the next manifest
+    rebuild finds their audio on disk and re-adds them with no qc_status, and nothing
+    was left to drop them on. The ledger is that memory, valid while the audio is the
+    same bytes."""
+    mod = load_sync_module(script=SCRIPT)
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        nemo, audio_dir = root / "data" / "NeMO_files", root / "data" / "dictionary"
+        nemo.mkdir(parents=True)
+        audio_dir.mkdir(parents=True)
+        for name in ("a", "b"):
+            (audio_dir / f"{name}.flac").write_bytes(b"x")
+        train, ledger = nemo / "train.jsonl", root / "dropped_clips.jsonl"
+
+        def write_train(status_a: str | None) -> None:
+            a = {"audio_filepath": "../dictionary/a.flac", "text": "une phrase", "duration": 3.0}
+            if status_a:
+                a["qc_status"] = status_a
+            b = {"audio_filepath": "../dictionary/b.flac", "text": "une autre", "duration": 3.0,
+                 "qc_status": "original"}
+            train.write_text("".join(json.dumps(r) + "\n" for r in (a, b)))
+
+        def run(apply: bool) -> list[str]:
+            mod.main(manifests=(), root=str(root), apply=apply, asr_flagged_list=root / "none.jsonl",
+                     drop_ledger=ledger, no_asr_flagged=False)
+            return [json.loads(line)["audio_filepath"] for line in train.read_text().splitlines()]
+
+        write_train("exhausted")
+        assert run(apply=False) == ["../dictionary/a.flac", "../dictionary/b.flac"]
+        assert not ledger.exists(), "a dry run wrote the ledger"
+        assert run(apply=True) == ["../dictionary/b.flac"]
+        assert mod.load_drop_ledger(ledger)["dictionary/a.flac"]["reason"] == mod.EXHAUSTED
+
+        # The QC round forgot it and the rebuild brought it back, unjudged.
+        write_train(None)
+        assert run(apply=True) == ["../dictionary/b.flac"], "a forgotten drop shipped again"
+        assert len(mod.load_drop_ledger(ledger)) == 1
+
+        # Redrawn since: new bytes, so the old verdict no longer applies.
+        stamp = (audio_dir / "a.flac").stat().st_mtime_ns + 10**9
+        os.utime(audio_dir / "a.flac", ns=(stamp, stamp))
+        write_train("improved")
+        assert run(apply=True) == ["../dictionary/a.flac", "../dictionary/b.flac"]
+    print("test_a_drop_survives_the_next_qc_round: OK")
+
+
 if __name__ == "__main__":
     test_filter_exhausted()
     test_eval_duplicates()
@@ -185,3 +235,4 @@ if __name__ == "__main__":
     test_asr_flagged()
     test_asr_flagged_stale()
     test_cfg_off()
+    test_a_drop_survives_the_next_qc_round()
