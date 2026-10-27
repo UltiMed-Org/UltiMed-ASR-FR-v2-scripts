@@ -434,6 +434,53 @@ An earlier measurement said the opposite (0 of 3,686 matched the source, 3,684 m
 
 Separately, `04_drop_bad_rows.py` gained rule 7, `cfg-off` (`c871c4a`): the 55 draws synthesized at `cfg_alpha` exactly 1.0, the rung the improver's ladder could reach before `utils/cfg_sidecar.py` grew `CFG_ALPHA_FLOOR = 1.2`. CFG off is the documented failure mode where the flow-matching decoder stops following the text. Their second-judge disagreement rate (4 of 55, 7.3 pct) is BELOW what `improved` rows show as a class (12.3 pct), so the audio is not measurably damaged; they are dropped anyway because 55 clips is 0.009 pct of the corpus and the alternative is softening the validator that catches the next ones.
 
+## T4: the looping takes, which the whisper judge cannot see at all
+
+T3 closed with 1,624 clips promoted and the arbiter satisfied, and a three-judge poll then said 22 pct of them were still defective: of those 1,624, **141 are rejected by both turbo and parakeet and 230 more by parakeet only** (362 in total), against the non-turbo arbiter that had just cleared every one of them. 142 of the 362 are visible to the release, because the release's `cer` / `stt_transcript` columns are synced from the turbo key.
+
+The cause is a property of the judge, not of a threshold. **Whisper's decoder collapses repeated speech**: handed a take that says the same clause four times, it emits the clause once, and the transcript then matches the label almost perfectly. So a looping take, the Voxtral failure mode that burns tokens until the ceiling, reads CER-clean to every whisper-shaped gate we had, and CER, tail CER, window CER and the bad-run counter all agree with it. Parakeet does not collapse: it writes the repetition out, which is why `repeat_excess` (the count of 4-gram repeats the hypothesis has beyond the reference, `01_compute_stt.py:830`) was already computed for it and for no one else.
+
+So `is_bad` gained a **fifth gate**, `repeat >= cfg.repeat_threshold`, opt-in and **0 by default** because a judge that cannot count repeats must not be asked to (commit `0099eb2`, pinned by `tests/test_loop_gate.py`). `10_compare_judges.py` gained the same knob, which is how the slice was measured instead of a second copy of the script:
+
+```
+uv run 06_hotfixes/10_compare_judges.py --key-b onnx-asr/parakeet-tdt-0.6b-v3-ultra \
+    --repeat-threshold 4 --out-stems loop_flags.txt
+```
+
+**The repair list is a conjunction, and a judge-free measurement is what proved it.** `repeat_excess >= 4` alone flags 1,391 clips and parakeet's CER gates alone flag 8,096 (mostly its known medical-vocabulary and language-id misreads), and neither set is the defect. Characters per second of label (label length over clip duration, which needs no judge at all) against length-matched `repeat_excess == 0` controls:
+
+| bucket | `rx>=4` AND parakeet CER-flagged | n | `rx>=4`, parakeet CER clean | n |
+| --- | --- | --- | --- | --- |
+| 0-20 s | -20.4 pct | 5 | +2.9 pct | |
+| 20-30 s | -14.7 pct | 62 | -1.2 pct | |
+| 30-40 s | -17.9 pct | 207 | -1.0 pct | |
+| 40-50 s | -18.3 pct | 394 | -3.3 pct | |
+| 50-65 s | -17.5 pct | 418 | -4.4 pct | |
+| 65-200 s | -13.2 pct | 158 | -7.4 pct | 160 total |
+
+A clip that takes 18 pct longer than its text needs is a clip saying something twice. The CER-clean half tracks its controls, i.e. it is the metric's deliberate tolerance for a label that legitimately repeats a phrase, not a defect, and `rx` 1 to 3 is noise (-3.5 to +4.7 pct). The rule is therefore "parakeet rejects this clip AND what is wrong with it is a repeat", and `06_hotfixes/14_reopen_loop_clips.py` implements exactly that conjunction (commit `4170381`, pinned by `tests/test_reopen_loop_clips.py`).
+
+Applied over 604,257 rows: **1,169 clips reopened** (562 from `improved`, 607 that carried no marker at all), 119 already queued, so 1,288 looping clips. The distribution is the finding, not a detail:
+
+| voice | clips | | category | clips |
+| --- | --- | --- | --- | --- |
+| `h_frf_ptm` | 621 | | PARHAF | 775 |
+| `h_frm_ptf` | 222 | | dictionary | 374 |
+| `h_frf_esm` | 126 | | PARROT | 17 |
+| `h_frf_itm` | 105 | | drugs | 3 |
+| `h_frm_nlf` | 82 | | | |
+| `h_itf_def` | 9 | | | |
+| `h_itf_arm` | 3 | | | |
+| `fr_male` | 1 | | | |
+
+1,287 of 1,288 are hybrid voices. An earlier hypothesis, that the cfg ladder descending below 1.5 was the cause, was tested and rejected (the relation is not even monotone, and the apparent correlation is selection bias: a clip only reaches a low rung after several rejected draws). What survives is that **at equal cfg, the hybrids loop 10 to 20 times more often than the two shipped voices**, which is also why the T4 round runs with `CFG_ALPHA_FLOOR=1.6` rather than the default 1.2: the hybrids' measured usable band is 1.5 to 2.0.
+
+**Why a turbo-judged repair works here, when a whisper-judged repair of whisper-clean clips is impossible.** Promotion requires `best.cer <= orig.cer - min_improvement` (0.02), so a clip whose stored `orig_cer` is turbo's 0.019 can never be repaired by turbo. The marker `14_reopen_loop_clips.py` writes carries the **flagging** judge's scores instead (parakeet, median `cer` 0.276), so any clean draw clears the bar. Turbo is then the right judge for the round anyway: it is 3x faster than the non-turbo model, it is the key the release syncs from (so a promoted row needs no refill), and `needs_work` skips a `pending_tts` row in an stt pass unless `--rescore` is given, so the markers survive the round's own scoring passes.
+
+The same round also repairs the gate's one remaining error class. Step 9 had reported `456 error row(s)`, which is 6 columns (`cer`, `stt_transcript`, `stt_model`, `cfg_alpha`, `regenerated`, `qc_status`) x **76 clips that are in the manifest and on disk but have no state row at all**, so the sync had nothing to copy; they are also step 5's unexplained 316 unmatched. They were added to the queue and the round's first stt pass transcribed exactly those 76.
+
+Round shape, for the next one: 1,382 queued stems, one tts pass of 09:51 to 12:24 producing 5 drafts per clip (5,236 draft files, 0.69 draws/s against the Voxtral server at 84 pct GPU), then the scoring stt pass over those drafts on 6 turbo replicas.
+
 ## Open TODOs
 
 * Re-measure STT throughput on 500 clips against the local endpoint before trusting the
