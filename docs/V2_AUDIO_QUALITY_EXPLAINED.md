@@ -164,7 +164,7 @@ It is a preference, never a veto. On 1,703 real same-sentence take pairs, length
 | T2 | non-turbo Whisper re-judged the ~12.7k flagged clips | a second opinion, no audio touched |
 | T3 | repair round on the clips the second opinion disputed | 1,624 clips promoted |
 | T4 | loop round: 1,288 looping clips found with parakeet (1,287 of them hybrid voices) | most repaired; a duration audit then showed ~22 pct of promotions still carried a loop, because the round's judge (Whisper) cannot see loops |
-| T5 | residue round: the 341 clips still looping after T4, plus 63 new sentences no judge had read yet | 391 promotions, 1 clip exhausted, and the final looping PARROT clip went from CER 0.090 to 0.002 |
+| T5 | residue round: the 341 clips still looping after T4, plus 63 resurrected clips no judge had read (see section 8) | 391 promotions, 1 clip exhausted, and the final looping PARROT clip went from CER 0.090 to 0.002 |
 
 After T5: **602,715 clips scored, 14,077 of them regenerated at least once, 1 exhausted.**
 
@@ -177,7 +177,7 @@ Most of the effort went into these. Each passed every test that existed when it 
 * **v2 inherited v1's verdicts.** A drop list of 63 "defective" clips was keyed by file name and measured on v1 audio. v2 reused the names, so the release would have dropped 60 good clips for defects that no longer existed. Rebuilt from v2 readings.
 * **The judge setting was documented but never read.** `STT_MODEL` was in the docs, and the script used another variable, so "judge with model X" silently judged with whatever a config file held.
 * **The judge that flags must be the judge that promotes.** A clip flagged by the strict judge but rescored by the lenient one can never be promoted (its lenient score is already low), so a round judged by the wrong model would burn hours and fix nothing. Each round now names its judge explicitly.
-* **63 sentences were never judged at all.** They were generated late and picked up by the manifest rebuild, but no scoring pass had read them. The release gate caught it (6 empty columns x 63 rows), and they were judged in T5.
+* **Dropped clips came back.** Some drop reasons (exhausted, flagged by the second recognizer, generated with guidance off) live in the scoring state, not in the row. The state follows the manifest it is pointed at, so the QC round after a drop forgot the dropped clips, and the next manifest rebuild found their audio on disk and re-added them with no record. The release gate caught 71 of them by their empty columns; 63 earlier ones had slipped back in and been re-read by Whisper, which passed 61 of them. Drops are now kept in a committed ledger (`99_hf_release/dropped_clips.jsonl`) and re-applied for as long as the audio is the same bytes, which put 134 clips back out (one had since been redrawn).
 * **A "finished" run skipped a new queue.** The driver remembered completed runs by a fingerprint that ignored the list of clips to process, so T5's first launch saw "same run as T4, already done" and did nothing. The fingerprint now includes the list's contents.
 
 ## 9. What is dropped rather than repaired
