@@ -57,6 +57,7 @@ DEFAULT_TAIL_CER_GATE   = 0.12   # last ~30 s, looser because that window cuts m
 DEFAULT_WINDOW_CER_GATE = 0.15   # worst 15 s window (213 normalized chars)
 DEFAULT_BAD_RUN_GATE    = 30     # longest contiguous dropped reference span, in chars
 MIN_IMPROVEMENT=0.02             # a 0.09 clip is not fixed by a 0.088 draw (driver.sh)
+--length-tol 0.15                # draw-vs-draw length preference, LENGTH_TOL in driver.sh (unset = this)
 ```
 
 The two window numbers are measured rather than chosen, on the 19,958 v1 clips of

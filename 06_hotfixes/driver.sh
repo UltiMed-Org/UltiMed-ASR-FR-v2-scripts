@@ -68,7 +68,12 @@
 #                       recognizer never said, in characters. A count and not a rate,
 #                       because a skipped phrase has a size and dividing it by the clip's
 #                       length is exactly what hides it
-#   None of those four carries a default HERE: unset means "whatever the scripts ship"
+#   LENGTH_TOL          among one clip's candidate draws, how much longer than the low
+#                       median of the passing draws a draw may be before a shorter one is
+#                       preferred ahead of CER (a repeat only ever ADDS time, and whisper
+#                       cannot hear one). Negative disables it. Not a gate: it never
+#                       rejects a draw, only orders acceptable ones
+#   None of those five carries a default HERE: unset means "whatever the scripts ship"
 #                       (01_compute_stt.py's DEFAULT_*_GATE, which
 #                       01_recursive_improvement.py reads for its own click defaults), so
 #                       this file never becomes a second copy of a number that then drifts
@@ -433,7 +438,8 @@ GATE_ARGS=()
 for _gate in "CER_THRESHOLD:--cer-threshold" \
              "TAIL_CER_THRESHOLD:--tail-cer-threshold" \
              "WINDOW_CER_THRESHOLD:--window-cer-threshold" \
-             "BAD_RUN_THRESHOLD:--bad-run-threshold"; do
+             "BAD_RUN_THRESHOLD:--bad-run-threshold" \
+             "LENGTH_TOL:--length-tol"; do
   _gate_var="${_gate%%:*}"
   _gate_val="${!_gate_var:-}"
   if [[ -n "${_gate_val}" ]]; then
