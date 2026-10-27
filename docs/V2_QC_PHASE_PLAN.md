@@ -481,6 +481,47 @@ The same round also repairs the gate's one remaining error class. Step 9 had rep
 
 Round shape, for the next one: 1,382 queued stems, one tts pass of 09:51 to 12:24 producing 5 drafts per clip (5,236 draft files, 0.69 draws/s against the Voxtral server at 84 pct GPU), then the scoring stt pass over those drafts on 6 turbo replicas.
 
+## What T4 actually repaired, measured without a judge
+
+The round's own judge is turbo, and turbo cannot see a loop, so "turbo now reads this clip clean" is not evidence the loop is gone. There is a judge-free test, and it is a strong one: the release manifest had not been rebuilt yet, so it still held every clip's pre-T4 duration while the state row held the length of the take just promoted, **on identical text**. A duration change on identical text can only mean the sentence is spoken a different number of times.
+
+Of 810 promotions with a usable before/after: median duration change **-7.8 pct**, 55.8 pct came back more than 5 pct shorter, and **24.7 pct (199) came back LONGER**.
+
+Turning that into a verdict needs a control, and the first control was wrong in a way worth recording. Comparing chars per second against **corpus-wide** length-matched controls made every lengthened take look like a definite loop (-15 to -22 pct). The voices do not speak at the same rate: `fr_female` 16.49 chars/s at 0-20 s, `h_itf_def` 15.9, down to `h_frf_ptm` at 13.73 falling to 9.73 past 65 s. And `h_frf_ptm` carries 621 of the 1,288 loops, so a corpus-wide control charges the slowest voice roughly 18 pct, which is the size of the signature it is supposed to detect. Matching on **(voice, duration bucket)** instead:
+
+| T4 promotions | n | chars/s vs own voice+length control | loop-sized deficit (< -12 pct) |
+| --- | --- | --- | --- |
+| redraw came back shorter | 608 | median **+1.3 pct** | 88 (14.5 pct) |
+| redraw came back longer | 199 | median **-11.2 pct** | 94 (47.2 pct) |
+
+So the shorter group is genuinely repaired, and roughly **182 of 807 promotions (22.6 pct) still carry a loop-sized deficit**. That is the structural consequence of a turbo-judged round, not a bug: turbo will happily promote a looping take over a looping take. The authoritative count comes from the phase-4 parakeet refill plus `10_compare_judges.py --key-b onnx-asr/parakeet-tdt-0.6b-v3-ultra --repeat-threshold 4`, and the residue goes back through `14_reopen_loop_clips.py`.
+
+## The candidate length preference, and why it is not a veto
+
+Duration is the one loop signal that needs no second judge, because every candidate draw speaks the **same** sentence: only speaking-rate jitter (small, symmetric) or a repeat (large, one-sided, since saying a clause twice can only add time) can move its length. So `01_recursive_improvement.py`'s `badness` gained an optional middle term and `score_and_pick` fills it: among draws, one no more than `--length-tol` (default 0.15) longer than the shortest draw that **passes every gate** beats one that is, ahead of CER.
+
+A hard veto was the obvious design and the measurement killed it. The 2,145 draft files round 2 left on disk give 1,703 same-text draw pairs across 439 clips, and the ratios to each clip's shortest draw are one smooth mode with no gap anywhere to hang a threshold on:
+
+| ratio to the clip's shortest draw | share | | percentile | ratio |
+| --- | --- | --- | --- | --- |
+| 1.00-1.02 | 7.0 pct | | p50 | 1.122 |
+| 1.02-1.05 | 12.5 pct | | p75 | 1.223 |
+| 1.05-1.10 | 21.1 pct | | p90 | 1.324 |
+| 1.10-1.15 | 17.6 pct | | p95 | 1.394 |
+| 1.15-1.20 | 12.4 pct | | p99 | 1.571 |
+| 1.20-1.30 | 17.1 pct | | | |
+| 1.30-1.50 | 10.0 pct | | per-clip max/min median | 1.247 |
+| 1.50-2.00 | 2.2 pct | | per-clip max/min p90 | 1.461 |
+
+An earlier read of the same statistic on 49 clips (all that survived the round-1 scoring pass, which deletes drafts as it consumes them) gave p50 1.112 / p75 1.213 / p90 1.300, so the shape is stable across a 9x larger sample and is not an artifact of the small one. Any hard cut at 1.15 or 1.25 would therefore run through the middle of ordinary jitter and discard good takes.
+
+A rank cannot discard anything: it only decides which of two already-acceptable takes to keep. Two further details are what make it safe, and both are pinned by `tests/test_candidate_length_preference.py`:
+
+* `is_bad` still sorts **ahead** of the length rank, so a draw that stops before the end of the sentence can never win by being short. A missing ending is exactly what `cer_tail` and `cer_window` catch.
+* The yardstick is the shortest draw that **passes** every gate, not the shortest draw. Otherwise one truncated wreck becomes the length every honest take is measured against, and the preference silently does nothing (all the good takes rank 1 together).
+
+`badness`'s new term defaults to 0, meaning both "not long" and "unknown", so the two call sites that compare several judges' **readings** of one clip (same bytes, no length to compare) keep their old two-term ordering exactly. A negative `--length-tol` disables the preference, which is how the change is auditable: same draws, other winner.
+
 ## Open TODOs
 
 * Re-measure STT throughput on 500 clips against the local endpoint before trusting the
