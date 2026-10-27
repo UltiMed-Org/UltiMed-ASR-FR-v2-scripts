@@ -769,12 +769,57 @@ def _fmt_scores(scores: Scores) -> str:
             + (f" repeat={scores.repeat}" if scores.repeat else ""))
 
 
-def badness(scores: Scores, cfg: SimpleNamespace) -> tuple[bool, float]:
+def _dur_s(dur: float | None) -> str:
+    """`12.3s`, or `dur n/a` for a draw whose length could not be probed."""
+    return f"{dur:.1f}s" if dur else "dur n/a"
+
+
+def badness(scores: Scores, cfg: SimpleNamespace,
+            length_rank: int = 0) -> tuple[bool, int, float]:
     """Sort key picking the most favorable of several readings / candidate draws: one that
-    passes every gate beats one that does not, and CER breaks the tie within each class.
-    A reading whose only defect is a derailed tail therefore loses to a clean one, which is
-    the whole point of re-reading a clip before condemning it."""
-    return (is_bad(scores, cfg), scores.cer if scores.cer is not None else float("inf"))
+    passes every gate beats one that does not, then a draw that is not materially longer
+    than its shortest clean sibling beats one that is, and CER breaks the tie within each
+    class. A reading whose only defect is a derailed tail therefore loses to a clean one,
+    which is the whole point of re-reading a clip before condemning it.
+
+    ``length_rank`` defaults to 0, which means both "not long" and "unknown", so every
+    caller that compares READINGS of one clip keeps exactly the old two-term ordering:
+    there is no length to compare there, the audio being the same bytes. Only
+    `score_and_pick` passes it, because only there do several files speak the same
+    sentence. `length_rank_of` says why it is a rank and not a veto."""
+    return (is_bad(scores, cfg), length_rank,
+            scores.cer if scores.cer is not None else float("inf"))
+
+
+def length_rank_of(dur: float | None, reference: float | None,
+                   cfg: SimpleNamespace) -> int:
+    """0 when this draw is not materially longer than ``reference``, 1 when it is.
+
+    Why prefer the shorter draw at all. Candidate draws speak the SAME sentence, so only
+    two things can move their length: speaking-rate jitter (small, and symmetric) or a
+    repeat (large, and one-sided, since saying a clause twice can only ADD time). That
+    makes the shorter of two gate-passing draws the safer one, and it is worth preferring
+    because no CER gate can see a repeat: the text is all there, just twice. Measured on
+    the T4 repair round of 2026-10-27, against voice- AND length-matched controls, the
+    promotions that came back shorter read +1.3 pct chars per second (n=608, repaired)
+    while the ones that came back longer read -11.2 pct (n=199), 47 pct of them carrying
+    a loop-sized deficit.
+
+    Why a rank and not a threshold. The same round's 1,703 same-text draw pairs put no
+    gap anywhere to hang a threshold on: the ratios to each clip's shortest draw form one
+    smooth mode (p50 1.122, p75 1.223, p90 1.324, p99 1.571), so a hard veto would cut
+    through the middle of ordinary jitter and throw away good takes. A rank cannot throw
+    anything away. It only decides which of two acceptable takes to keep, and `is_bad`
+    still sorts ahead of it, so a draw that stops before the end of the sentence can never
+    win by being short: a missing ending is exactly what ``cer_tail`` / ``cer_window``
+    catch.
+
+    ``cfg.length_tol`` None or negative disables the preference, and an unknown duration
+    ranks 0: not penalised, not rewarded, decided on CER as before."""
+    tol = getattr(cfg, "length_tol", None)
+    if tol is None or tol < 0 or not dur or not reference:
+        return 0
+    return 1 if dur > reference * (1.0 + tol) else 0
 
 
 def flac_duration(path: Path) -> float | None:
@@ -1400,6 +1445,7 @@ def score_and_pick(
     carries ``payload`` (read back from its draft file) + metadata, else ``payload`` is
     None. The draft files are removed by ``apply_result`` once the pick is applied."""
     best = None
+    cands: list[dict] = []
     n = len(drafts)
     logger.info(
         f"SCORE {ident}: {n} candidate(s) from the tts pass, "
@@ -1424,18 +1470,37 @@ def score_and_pick(
         if cand.cer is None:
             logger.info(f"  {ident} candidate {i + 1}/{n} seed={seed}{alpha_s} -> cer=n/a{rtf_s}")
             continue
-        is_best = best is None or badness(cand, cfg) < badness(best["scores"], cfg)
-        if is_best:
-            best = {"path": str(draft_path), "new_transcript": transcript,
-                    "scores": cand, "seed": seed, "speed": d.get("speed"),
-                    "cfg_alpha": cfg_alpha}
-        below = not is_bad(cand, cfg)
-        note = (" (under every threshold)" if below
-                else (" (new best, still over threshold)" if is_best else " (not better)"))
+        cands.append({"path": str(draft_path), "new_transcript": transcript,
+                      "scores": cand, "seed": seed, "speed": d.get("speed"),
+                      "cfg_alpha": cfg_alpha, "dur": dur})
+        note = (" (under every threshold)" if not is_bad(cand, cfg)
+                else " (still over threshold)")
         logger.info(
             f"  {ident} candidate {i + 1}/{n} seed={seed}{alpha_s} -> "
             f"{_fmt_scores(cand)}{rtf_s}{note}"
         )
+
+    # The yardstick is the shortest draw that passes every gate, NOT the shortest draw:
+    # a take that stops mid-sentence is short precisely because it is broken, and letting
+    # it set the reference would rank every honest take as "too long". With no draw
+    # passing, the shortest of them all is the only reference available.
+    clean_durs = [c["dur"] for c in cands if c["dur"] and not is_bad(c["scores"], cfg)]
+    all_durs = [c["dur"] for c in cands if c["dur"]]
+    reference = min(clean_durs) if clean_durs else (min(all_durs) if all_durs else None)
+    if cands:
+        best = min(cands, key=lambda c: badness(
+            c["scores"], cfg, length_rank_of(c["dur"], reference, cfg)))
+        # Say so when the length preference, and not CER, is what chose the winner: it is
+        # the only way to tell from a log whether the knob is doing anything.
+        on_cer = min(cands, key=lambda c: badness(c["scores"], cfg))
+        if on_cer is not best:
+            logger.info(
+                f"  {ident} length preference: seed={best['seed']} "
+                f"({_dur_s(best['dur'])}, {_fmt_scores(best['scores'])}) over "
+                f"seed={on_cer['seed']} ({_dur_s(on_cer['dur'])}, "
+                f"{_fmt_scores(on_cer['scores'])}), shortest passing draw "
+                f"{_dur_s(reference)}"
+            )
 
     # Pick the best candidate: promote it when it clears every gate, or when it still
     # beats the original by --min-improvement; otherwise keep the original.
@@ -1448,7 +1513,8 @@ def score_and_pick(
             + (f"(best of {n}, under every threshold)" if reached
                else f"(best of {n}, still over threshold)")
         )
-        return {**best, "payload": Path(best["path"]).read_bytes(), "attempts": n,
+        return {**{k: v for k, v in best.items() if k != "dur"},
+                "payload": Path(best["path"]).read_bytes(), "attempts": n,
                 "all_duplicates": False}
 
     logger.info(
@@ -2673,6 +2739,7 @@ def _print_report(ctx, _param, value):
                    "measured separation on the v2 corpus (rx=0 on 99.5% of clips, >=4 on "
                    "1,391 of 602,710, i.e. 0.23%), 1 is the live QC's gate.")
 @click.option("--min-improvement", default=0.02, type=float, help="When no draw reaches --cer-threshold, keep the lowest-CER draw only if it beats the original CER by at least this. A draw below the threshold is always kept. Non-zero matters once the gate is low: a clip flagged at 0.09 whose best draw lands at 0.088 was not repaired, it was fitted to the judge, and a clean clip's CER moves that much on Whisper's own spelling choices. Pass 0 to accept any gain.")
+@click.option("--length-tol", default=0.15, type=float, help="Among candidate draws, prefer one no more than this fraction longer than the shortest draw that passes every gate, ahead of CER (see length_rank_of). All the draws speak the same sentence, so only speaking-rate jitter (small, symmetric) or a repeat (large, one-sided) can move their length, and no CER gate can see a repeat. Measured on the T4 round of 2026-10-27 against voice- and length-matched controls: redraws that came back shorter read +1.3 pct chars/second, ones that came back longer -11.2 pct with 47 pct carrying a loop-sized deficit. It is a preference, never a veto: is_bad still sorts first, so a draw that stops early cannot win by being short, and the same-text duration ratios form one smooth mode (p50 1.12, p90 1.32) with no gap to put a hard threshold in. Negative disables it.")
 @click.option("--start-seed", default=43, type=int, help="First seed; each attempt uses start-seed + attempt. Always sent (Voxtral respects the request seed).")
 @click.option("--speed-jitter", default=0.0, type=float, help="Optional: also vary speed by +/- this each attempt (e.g. 0.03). Not needed when the seed works.")
 @click.option("--cfg-alpha-start", default=CFG_ALPHA_START, type=float, help="TTS cfg_alpha sent on the first re-attempt. Default 2.0, the value the dataset itself is generated at and the TOP of the measured usable band (1.2-2.0); --cfg-alpha-step then walks the later draws DOWN from it. Pass a negative value to omit cfg_alpha entirely.")
@@ -2746,7 +2813,7 @@ def main(
     stt_timeout, stt_max_retries, tts_url, tts_voice, tts_speed, tts_model, tts_format, tts_timeout,
     tts_max_retries, max_audio_seconds, mode, n_improv, cer_threshold, tail_cer_threshold,
     window_cer_threshold, bad_run_threshold, repeat_threshold, min_improvement,
-    start_seed, speed_jitter,
+    length_tol, start_seed, speed_jitter,
     cfg_alpha_start, cfg_alpha_step, cfg_alpha_floor, original_cfg_alpha,
     auto_token_budget, code_dump_dir, store_semantic_codes, voice_swap, refresh_duration,
     force, retry_exhausted, retry_improved,
@@ -2786,6 +2853,8 @@ def main(
         window_cer_threshold=(float("inf") if window_cer_threshold < 0 else window_cer_threshold),
         bad_run_threshold=(float("inf") if bad_run_threshold < 0 else bad_run_threshold),
         min_improvement=min_improvement,
+        # Negative disables the candidate length preference, like the gates above.
+        length_tol=(None if length_tol < 0 else length_tol),
         start_seed=start_seed, speed_jitter=speed_jitter,
         # cfg_alpha walks down on each re-attempt; a negative start disables the knob
         # and a negative floor removes the clamp (both are "no value" sentinels, since
