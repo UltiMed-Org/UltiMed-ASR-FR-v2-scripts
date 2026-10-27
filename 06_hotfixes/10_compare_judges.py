@@ -27,6 +27,19 @@ agreement table. The cell that matters is **only the second judge says bad**: th
 the clips T1 waved through and a better judge would not, i.e. the false negatives the
 whole T2 pass exists to find.
 
+The second judge does not have to be the non-turbo whisper. `--key-b
+onnx-asr/parakeet-tdt-0.6b-v3-ultra` reads out the parakeet sweep instead, and that is
+the pairing that finds a defect class no whisper can see: a take that says a clause
+twice. Whisper's decoder collapses repeated speech, so a looping clip reads CER-clean to
+both whisper judges, while parakeet writes the repetition out and its `repeat_excess`
+counts it. That count is the fifth gate (`--repeat-threshold`, default
+`DEFAULT_REPEAT_GATE`), and it is why this script's default `--key-b` is not the whole
+story:
+
+    # the loop sweep: 1,391 clips of the v2 corpus at rx>=4, 1,272 of them invisible to turbo
+    uv run 10_compare_judges.py --key-b onnx-asr/parakeet-tdt-0.6b-v3-ultra \
+        --repeat-threshold 4 --out-stems loop_flags.txt
+
 It changes no state. The two artefacts it writes are a detailed `.jsonl` (one entry per
 disagreement, both transcripts next to the source text, so the call can be made by
 reading rather than by trusting a number) and a plain stem list that the repair round
@@ -90,10 +103,12 @@ def reading_is_usable(reading: dict) -> bool:
     return not reading.get("error") and bool(text and text.strip())
 
 
-def gates_from(cer: float, tail: float, window: float, bad_run: int) -> SimpleNamespace:
+def gates_from(cer: float, tail: float, window: float, bad_run: int,
+               repeat: int = 0) -> SimpleNamespace:
     """`is_bad` reads its thresholds off a cfg object; this is the smallest one."""
     return SimpleNamespace(cer_threshold=cer, tail_cer_threshold=tail,
-                           window_cer_threshold=window, bad_run_threshold=bad_run)
+                           window_cer_threshold=window, bad_run_threshold=bad_run,
+                           repeat_threshold=repeat)
 
 
 def which_gates(scores, gates) -> list[str]:
@@ -109,6 +124,9 @@ def which_gates(scores, gates) -> list[str]:
         fired.append("window")
     if scores.bad_run is not None and scores.bad_run >= gates.bad_run_threshold:
         fired.append("bad_run")
+    if (gates.repeat_threshold > 0 and scores.repeat is not None
+            and scores.repeat >= gates.repeat_threshold):
+        fired.append("repeat")
     return fired
 
 
@@ -207,7 +225,8 @@ def render(result: dict, key_a: str, key_b: str, samples: int) -> None:
         logger.warning(
             f"SECOND OPINION {entry['stem']} cell={entry['cell']} "
             f"gates={'+'.join(entry['gates_b']) or 'none'} "
-            f"cer={sb.get('cer')} window={sb.get('window')} bad_run={sb.get('bad_run')}")
+            f"cer={sb.get('cer')} window={sb.get('window')} "
+            f"bad_run={sb.get('bad_run')} repeat={sb.get('repeat')}")
         print(f"  source     : {entry['source']}")
         print(f"  {key_a:<34}: {entry['text_a']}")
         print(f"  {key_b:<34}: {entry['text_b']}")
@@ -225,6 +244,10 @@ def render(result: dict, key_a: str, key_b: str, samples: int) -> None:
 @click.option("--tail-cer-threshold", default=None, type=float)
 @click.option("--window-cer-threshold", default=None, type=float)
 @click.option("--bad-run-threshold", default=None, type=int)
+@click.option("--repeat-threshold", default=None, type=int,
+              help="Loop gate: `repeat_excess` >= this many word windows heard twice. "
+                   "Only parakeet readings carry the count, so it is inert on a "
+                   "whisper-vs-whisper comparison (default: the stage's own gate).")
 @click.option("--samples", default=10, show_default=True,
               help="How many of the worst disagreements to print in full (0 = none).")
 @click.option("--out-jsonl", default="judge_disagreements.jsonl", show_default=True,
@@ -235,8 +258,8 @@ def render(result: dict, key_a: str, key_b: str, samples: int) -> None:
               help="Stem list of the clips the second judge rejects, for STEMS_FROM.")
 @click.option("--dry-run", is_flag=True, help="Report only, write nothing.")
 def main(states, key_a, key_b, cer_threshold, tail_cer_threshold,
-         window_cer_threshold, bad_run_threshold, samples, out_jsonl, out_stems,
-         dry_run) -> None:
+         window_cer_threshold, bad_run_threshold, repeat_threshold, samples, out_jsonl,
+         out_stems, dry_run) -> None:
     """Read out the T2 second opinion: where do the two judges disagree?"""
     stt = _load_pass()._stt
     gates = gates_from(
@@ -244,10 +267,12 @@ def main(states, key_a, key_b, cer_threshold, tail_cer_threshold,
         stt.DEFAULT_TAIL_CER_GATE if tail_cer_threshold is None else tail_cer_threshold,
         stt.DEFAULT_WINDOW_CER_GATE if window_cer_threshold is None
         else window_cer_threshold,
-        stt.DEFAULT_BAD_RUN_GATE if bad_run_threshold is None else bad_run_threshold)
+        stt.DEFAULT_BAD_RUN_GATE if bad_run_threshold is None else bad_run_threshold,
+        stt.DEFAULT_REPEAT_GATE if repeat_threshold is None else repeat_threshold)
     logger.info(f"gates: cer>={gates.cer_threshold} tail>={gates.tail_cer_threshold} "
                 f"window>={gates.window_cer_threshold} "
-                f"bad_run>={gates.bad_run_threshold}")
+                f"bad_run>={gates.bad_run_threshold} "
+                f"repeat>={gates.repeat_threshold}")
     paths = [Path(s) for s in states] or [_HERE / s for s in DEFAULT_STATES]
     result = compare(paths, key_a, key_b, gates)
     render(result, key_a, key_b, samples)
