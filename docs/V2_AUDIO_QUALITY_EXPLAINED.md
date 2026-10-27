@@ -208,7 +208,7 @@ The warnings, none of which blocks training:
 
 - 43 rows were generated at a guidance scale above the 1.2 to 2.0 band (22 at 3.0, 21 at 2.5). These came from the cfg sweep of section 4: the lower values failed on those sentences, these passed both judges, so they ship.
 - 1 row trips a gate on its own stored transcript (`037990_0000_pneumologie_00139_t0_c2`, CER 0.081 against the 0.08 line). It is a rounding-edge case, kept and listed.
-- 1 document appears in more than one split (train, val, test).
-- Housekeeping, one summary row per category (5 categories, so 10 rows): stray files next to the audio (`.bak` copies of redrawn takes) and audio files on disk that no manifest row mentions (takes that were dropped). They are invisible to training, which reads only the manifests.
+- 59,687 source documents have clips in more than one split (for example `acronyms:1` has clips in train, val and test). The gate counts this as one summary row. It follows from the `distribute` grouping, which spreads a document's sentences across splits on purpose; only `atomic` documents (44,880 rows, PARHAF-style long texts) are kept whole. Whether val/test should be document-disjoint is an open decision, not a defect of the audio.
+- Housekeeping, one summary row per category (5 categories, so 10 rows): stray files next to the audio (`.bak` copies of redrawn takes, for example 8,203 in PARHAF and 293 in drugs) and audio files on disk that no manifest row mentions (dropped takes, for example 34 in PARHAF and 87 in dictionary). They are invisible to training, which reads only the manifests.
 
 The val/test slices of the training repo were rebuilt from these manifests in the same run.
