@@ -202,4 +202,13 @@ Honest limits, so nobody mistakes "passed QC" for "perfect":
 
 ## 12. Release gate result
 
-TODO: fill in the gate's error and warning counts once the export chain of 2026-10-27 finishes.
+The export chain finished on 2026-10-27 at 23:37. The gate (`08_validate_manifests.py`) checked 602,651 rows in `full.jsonl` and reported **0 error rows** and 55 warning rows. That count is after the drop step removed 133 rows from `full.jsonl` that the drop ledger remembered (section 8); none of the 135 ledger clips is left in it.
+
+The warnings, none of which blocks training:
+
+- 43 rows were generated at a guidance scale above the 1.2 to 2.0 band (22 at 3.0, 21 at 2.5). These came from the cfg sweep of section 4: the lower values failed on those sentences, these passed both judges, so they ship.
+- 1 row trips a gate on its own stored transcript (`037990_0000_pneumologie_00139_t0_c2`, CER 0.081 against the 0.08 line). It is a rounding-edge case, kept and listed.
+- 1 document appears in more than one split (train, val, test).
+- Housekeeping, one summary row per category (5 categories, so 10 rows): stray files next to the audio (`.bak` copies of redrawn takes) and audio files on disk that no manifest row mentions (takes that were dropped). They are invisible to training, which reads only the manifests.
+
+The val/test slices of the training repo were rebuilt from these manifests in the same run.
