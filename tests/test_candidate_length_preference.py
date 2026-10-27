@@ -28,7 +28,7 @@ draw pairs that round left on disk gave no gap to hang a threshold on: the ratio
 clip's shortest draw form one smooth mode (p50 1.122, p75 1.223, p90 1.324, p99 1.571).
 So the rule may only choose between takes that are already acceptable, and it must never
 be able to prefer a BROKEN short take: `is_bad` sorts ahead of it, the yardstick is the
-shortest draw that PASSES every gate rather than the shortest draw, and in a class where
+low median of the draws that PASS every gate rather than of all draws, and in a class where
 nothing passes it stays out altogether, because there the promotion test is pure CER and
 a shorter-but-worse draw could only block a real gain.
 
@@ -130,7 +130,7 @@ def test_a_truncated_draw_cannot_win_by_being_short(mod, tmp: Path) -> None:
         f"a gate-failing draw must lose however short it is, got seed {got['seed']}"
 
 
-def test_the_yardstick_is_the_shortest_passing_draw(mod, tmp: Path) -> None:
+def test_the_yardstick_ignores_failing_draws(mod, tmp: Path) -> None:
     """With a 6.0 s truncated draw present, the two clean draws (12.0 and 13.0) are 1.08
     apart and must both rank 0, so CER decides between them. Measured against the 6.0 s
     wreck instead, both would rank 1 and the preference would silently do nothing."""
@@ -139,7 +139,37 @@ def test_the_yardstick_is_the_shortest_passing_draw(mod, tmp: Path) -> None:
                            {"seed": 2, "dur": 12.0, "scores": clean(0.05)},
                            {"seed": 3, "dur": 13.0, "scores": clean(0.01)}])
     assert got["seed"] == 3, \
-        f"the reference must be 12.0 (shortest passing), not 6.0; got seed {got['seed']}"
+        f"the reference must be 12.0 (passing draws only), not 6.0; got seed {got['seed']}"
+
+
+def test_a_fast_outlier_does_not_set_the_standard(mod, tmp: Path) -> None:
+    """Why the anchor is a median. Anchored on the shortest passing draw, the 8.0 s take
+    would make 10.5 s look 31 pct long and win on speed alone, which is what round 3
+    showed (kept draws +17.5 pct faster than their voice, rejected ones at the norm).
+    Against the median, 10.0 s, all three are ordinary jitter and CER decides."""
+    got = pick(mod, tmp, [{"seed": 1, "dur": 8.0, "scores": clean(0.05)},
+                           {"seed": 2, "dur": 10.0, "scores": clean(0.03)},
+                           {"seed": 3, "dur": 10.5, "scores": clean(0.01)}])
+    assert got["seed"] == 3, \
+        f"a fast take must not make typical ones look long, got seed {got['seed']}"
+
+
+def test_a_long_take_is_still_demoted_against_the_median(mod, tmp: Path) -> None:
+    """The case the rule exists for survives the change: 15.0 s against a 10.0 s median
+    is a repeat-sized 1.5, so its better CER does not save it."""
+    got = pick(mod, tmp, [{"seed": 1, "dur": 9.0, "scores": clean(0.05)},
+                           {"seed": 2, "dur": 10.0, "scores": clean(0.03)},
+                           {"seed": 3, "dur": 15.0, "scores": clean(0.01)}])
+    assert got["seed"] == 2, f"the long take must lose, got seed {got['seed']}"
+
+
+def test_two_passing_draws_anchor_on_the_shorter(mod, tmp: Path) -> None:
+    """Why median_low and not median. With two draws the plain median is their midpoint,
+    41.7 s, and a 46.5 s loop of a 36.9 s sentence would slip under 41.7 * 1.15 = 48.0."""
+    got = pick(mod, tmp, [{"seed": 1, "dur": 36.9, "scores": clean(0.04)},
+                           {"seed": 2, "dur": 46.5, "scores": clean(0.01)}])
+    assert got["seed"] == 1, \
+        f"a 1.26 loop between two draws must still lose, got seed {got['seed']}"
 
 
 def test_when_every_draw_fails_a_gate_cer_alone_decides(mod, tmp: Path) -> None:
@@ -220,7 +250,10 @@ if __name__ == "__main__":
         test_the_shorter_clean_draw_beats_the_lower_cer_one(pass_mod, tmp)
         test_within_the_tolerance_cer_still_decides(pass_mod, tmp)
         test_a_truncated_draw_cannot_win_by_being_short(pass_mod, tmp)
-        test_the_yardstick_is_the_shortest_passing_draw(pass_mod, tmp)
+        test_the_yardstick_ignores_failing_draws(pass_mod, tmp)
+        test_a_fast_outlier_does_not_set_the_standard(pass_mod, tmp)
+        test_a_long_take_is_still_demoted_against_the_median(pass_mod, tmp)
+        test_two_passing_draws_anchor_on_the_shorter(pass_mod, tmp)
         test_when_every_draw_fails_a_gate_cer_alone_decides(pass_mod, tmp)
         test_a_passing_draw_still_beats_a_shorter_failing_one(pass_mod, tmp)
         test_the_knob_turns_the_preference_off(pass_mod, tmp)

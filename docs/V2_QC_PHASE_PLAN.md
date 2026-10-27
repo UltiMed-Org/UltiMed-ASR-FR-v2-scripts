@@ -498,7 +498,7 @@ So the shorter group is genuinely repaired, and roughly **182 of 807 promotions 
 
 ## The candidate length preference, and why it is not a veto
 
-Duration is the one loop signal that needs no second judge, because every candidate draw speaks the **same** sentence: only speaking-rate jitter (small, symmetric) or a repeat (large, one-sided, since saying a clause twice can only add time) can move its length. So `01_recursive_improvement.py`'s `badness` gained an optional middle term and `score_and_pick` fills it: among draws, one no more than `--length-tol` (default 0.15) longer than the shortest draw that **passes every gate** beats one that is, ahead of CER.
+Duration is the one loop signal that needs no second judge, because every candidate draw speaks the **same** sentence: only speaking-rate jitter (small, symmetric) or a repeat (large, one-sided, since saying a clause twice can only add time) can move its length. So `01_recursive_improvement.py`'s `badness` gained an optional middle term and `score_and_pick` fills it: among draws, one no more than `--length-tol` (default 0.15) longer than the low median (`statistics.median_low`) of the draws that **pass every gate** beats one that is, ahead of CER. The first version anchored on the shortest passing draw; the section below says why that was wrong.
 
 A hard veto was the obvious design and the measurement killed it. The 2,145 draft files round 2 left on disk give 1,703 same-text draw pairs across 439 clips, and the ratios to each clip's shortest draw are one smooth mode with no gap anywhere to hang a threshold on:
 
@@ -518,10 +518,24 @@ An earlier read of the same statistic on 49 clips (all that survived the round-1
 A rank cannot discard anything: it only decides which of two already-acceptable takes to keep. Two further details are what make it safe, and both are pinned by `tests/test_candidate_length_preference.py`:
 
 * `is_bad` still sorts **ahead** of the length rank, so a draw that stops before the end of the sentence can never win by being short. A missing ending is exactly what `cer_tail` and `cer_window` catch.
-* The yardstick is the shortest draw that **passes** every gate, not the shortest draw. Otherwise one truncated wreck becomes the length every honest take is measured against, and the preference silently does nothing (all the good takes rank 1 together).
+* The yardstick is taken over the draws that **pass** every gate, not over all of them. Otherwise one truncated wreck becomes the length every honest take is measured against, and the preference silently does nothing (all the good takes rank 1 together).
 * It stays out of the class where **nothing** passes. There the only decision left is whether the best draw beats the original by `--min-improvement`, which is a pure CER test, so preferring a shorter draw can only block a real gain: measured against the pre-restriction code, an original at cer 0.11 with draws at 10.0 s / 0.100 and 13.0 s / 0.085 produced NOBEST, no promotion at all, where CER alone promotes the 0.085 draw and repairs the clip.
 
 `badness`'s new term defaults to 0, meaning both "not long" and "unknown", so the two call sites that compare several judges' **readings** of one clip (same bytes, no length to compare) keep their old two-term ordering exactly. A negative `--length-tol` disables the preference, which is how the change is auditable: same draws, other winner.
+
+### The anchor moved from the shortest passing draw to their low median
+
+Round 3 ran the min-anchored version and it fired 31 times; the 25 firings with a passing winner all promoted, at a median 15.4 pct less audio (213.5 s in total). Checked against per-voice, length-bucketed controls, that saving was mostly not loop avoidance: the kept draw read a median **+17.5 pct** chars per second above its voice's norm and the rejected draw **-3.2 pct**, i.e. at the norm, and only 6 of the 25 rejections were loop-sized (85.1 s of the 213.5 s). The rule was buying speed.
+
+The cause is structural: the shortest passing draw is the fastest take, so it sets the band on the edge of the distribution. Replaying round 2's 2,144 real draw durations, the shortest draw is faster than the clip's median draw by p25 5.4 / p50 8.9 / p75 13.4 / p90 19.1 pct, and at tol 0.15 the anchors demote:
+
+| anchor | draws demoted of 2,144 |
+| --- | --- |
+| min (first version) | 712 (33.2 pct) |
+| median | 184 (8.6 pct) |
+| median_low (shipped) | 194 (9.0 pct) |
+
+`median_low` over the plain median for one case: with only two passing draws the median is their midpoint, so a 36.9 s / 46.5 s pair (a 1.26 loop) slips under 41.7 * 1.15 = 48.0, while `median_low` anchors on the shorter one and catches it. Two draws cannot tell a fast outlier from a loop, and those extra 0.4 pct of demotions are that case. What no duration rule catches is a clip where most draws loop, since the median is then itself a loop; that residue is left to the parakeet refill and a reopen round. Pinned by three new tests in `tests/test_candidate_length_preference.py` (a fast outlier no longer sets the standard, a 1.5x take is still demoted, two draws anchor on the shorter).
 
 ## 164,487 hybrid clips sit below the hybrids' cfg band, and that is being left alone
 

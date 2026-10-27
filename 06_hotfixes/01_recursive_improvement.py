@@ -250,6 +250,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import statistics
 import sys
 import tempfile
 import threading
@@ -778,7 +779,7 @@ def badness(scores: Scores, cfg: SimpleNamespace,
             length_rank: int = 0) -> tuple[bool, int, float]:
     """Sort key picking the most favorable of several readings / candidate draws: one that
     passes every gate beats one that does not, then a draw that is not materially longer
-    than its shortest clean sibling beats one that is, and CER breaks the tie within each
+    than a typical clean sibling beats one that is, and CER breaks the tie within each
     class. A reading whose only defect is a derailed tail therefore loses to a clean one,
     which is the whole point of re-reading a clip before condemning it.
 
@@ -1486,9 +1487,21 @@ def score_and_pick(
             f"{_fmt_scores(cand)}{rtf_s}{note}"
         )
 
-    # The yardstick is the shortest draw that passes every gate, NOT the shortest draw:
+    # The yardstick is taken over the draws that pass every gate, NOT over all of them:
     # a take that stops mid-sentence is short precisely because it is broken, and letting
     # it set the reference would rank every honest take as "too long".
+    #
+    # Why the low MEDIAN of the passing draws and not the shortest one. The shortest
+    # passing draw is the FASTEST take, so anchoring on it rewards speed rather than
+    # punishing repeats: on round 3's 25 firings the kept draw read +17.5 pct chars per
+    # second above its voice's controls while the rejected one sat at -3.2 pct, i.e. at
+    # the norm, and only 6 of the 25 rejections were loop-sized. Replayed on round 2's
+    # 2,144 real draws at tol 0.15, the min anchor demotes 33.2 pct of them, the median
+    # 8.6 pct and median_low 9.0 pct. median_low rather than median for the two-draw
+    # case: with draws at 36.9 s and 46.5 s (a 1.26 loop) the plain median is their
+    # midpoint, 41.7 s, and 46.5 s passes under 41.7 * 1.15 = 48.0; median_low is the
+    # shorter one, so the loop is caught. Two draws cannot tell a fast outlier from a
+    # loop anyway, and the extra 0.4 pct of demotions is that case.
     #
     # With NO draw passing there is no yardstick and no preference, deliberately. Among
     # draws that all fail a gate, none is acceptable and the only thing left to decide is
@@ -1498,7 +1511,7 @@ def score_and_pick(
     # second promotes (0.085 <= 0.11 - 0.02) and on length the first does not, so the clip
     # would keep its worse audio and go round again for nothing.
     clean_durs = [c["dur"] for c in cands if c["dur"] and not is_bad(c["scores"], cfg)]
-    reference = min(clean_durs) if clean_durs else None
+    reference = statistics.median_low(clean_durs) if clean_durs else None
     if cands:
         best = min(cands, key=lambda c: badness(
             c["scores"], cfg,
@@ -1512,7 +1525,7 @@ def score_and_pick(
                 f"  {ident} length preference: seed={best['seed']} "
                 f"({_dur_s(best['dur'])}, {_fmt_scores(best['scores'])}) over "
                 f"seed={on_cer['seed']} ({_dur_s(on_cer['dur'])}, "
-                f"{_fmt_scores(on_cer['scores'])}), shortest passing draw "
+                f"{_fmt_scores(on_cer['scores'])}), median passing draw "
                 f"{_dur_s(reference)}"
             )
 
@@ -2753,7 +2766,7 @@ def _print_report(ctx, _param, value):
                    "measured separation on the v2 corpus (rx=0 on 99.5% of clips, >=4 on "
                    "1,391 of 602,710, i.e. 0.23%), 1 is the live QC's gate.")
 @click.option("--min-improvement", default=0.02, type=float, help="When no draw reaches --cer-threshold, keep the lowest-CER draw only if it beats the original CER by at least this. A draw below the threshold is always kept. Non-zero matters once the gate is low: a clip flagged at 0.09 whose best draw lands at 0.088 was not repaired, it was fitted to the judge, and a clean clip's CER moves that much on Whisper's own spelling choices. Pass 0 to accept any gain.")
-@click.option("--length-tol", default=0.15, type=float, help="Among candidate draws, prefer one no more than this fraction longer than the shortest draw that passes every gate, ahead of CER (see length_rank_of). All the draws speak the same sentence, so only speaking-rate jitter (small, symmetric) or a repeat (large, one-sided) can move their length, and no CER gate can see a repeat. Measured on the T4 round of 2026-10-27 against voice- and length-matched controls: redraws that came back shorter read +1.3 pct chars/second, ones that came back longer -11.2 pct with 47 pct carrying a loop-sized deficit. It is a preference, never a veto: is_bad still sorts first, so a draw that stops early cannot win by being short, and the same-text duration ratios form one smooth mode (p50 1.12, p90 1.32) with no gap to put a hard threshold in. Negative disables it.")
+@click.option("--length-tol", default=0.15, type=float, help="Among candidate draws, prefer one no more than this fraction longer than the low median of the draws that pass every gate, ahead of CER (see length_rank_of). All the draws speak the same sentence, so only speaking-rate jitter (small, symmetric) or a repeat (large, one-sided) can move their length, and no CER gate can see a repeat. Measured on the T4 round of 2026-10-27 against voice- and length-matched controls: redraws that came back shorter read +1.3 pct chars/second, ones that came back longer -11.2 pct with 47 pct carrying a loop-sized deficit. It is a preference, never a veto: is_bad still sorts first, so a draw that stops early cannot win by being short, and the same-text duration ratios form one smooth mode (p50 1.12, p90 1.32) with no gap to put a hard threshold in. Negative disables it.")
 @click.option("--start-seed", default=43, type=int, help="First seed; each attempt uses start-seed + attempt. Always sent (Voxtral respects the request seed).")
 @click.option("--speed-jitter", default=0.0, type=float, help="Optional: also vary speed by +/- this each attempt (e.g. 0.03). Not needed when the seed works.")
 @click.option("--cfg-alpha-start", default=CFG_ALPHA_START, type=float, help="TTS cfg_alpha sent on the first re-attempt. Default 2.0, the value the dataset itself is generated at and the TOP of the measured usable band (1.2-2.0); --cfg-alpha-step then walks the later draws DOWN from it. Pass a negative value to omit cfg_alpha entirely.")
