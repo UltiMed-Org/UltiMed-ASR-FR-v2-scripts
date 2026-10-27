@@ -236,8 +236,8 @@
 #   STEPS_LOG   where that record lives (default <OUTPUT>/driver_steps.log, which the
 #               repo's `**/*.log` rule already ignores). It also doubles as the phase's
 #               history: `cat improved/driver_steps.log`. A log whose first line
-#               describes a different run (other corpus, OUTPUT, MODE or judge) is
-#               moved aside rather than trusted.
+#               describes a different run (other corpus, OUTPUT, MODE, judge or
+#               STEMS_FROM queue) is moved aside rather than trusted.
 #   RESET_STATE=1  move it aside anyway, i.e. re-run every step from scratch.
 #
 # This file was written with Claude Code.
@@ -705,12 +705,22 @@ ROOT="$(cd "${HERE}/.." && pwd)"
 # because the repo already ignores `**/*.log`.
 STEPS_LOG="${STEPS_LOG:-${OUTPUT}/driver_steps.log}"
 flag RESET_STATE 0 RESET_STATE_ON
-# What the record describes. A log written for another corpus, output directory, mode or
-# judge says nothing about this run, so it is moved aside rather than trusted. Note
+# What the record describes. A log written for another corpus, output directory, mode,
+# judge or clip queue says nothing about this run, so it is moved aside rather than
+# trusted. The queue enters by CONTENT, not by path: a repair round that rewrites its
+# queue file, or a new one launched with the same knobs as the last (T5 after T4, both
+# on turbo), is new work, and with the queue left out it found every dataset already
+# "finished" and ran nothing. Same content is still the same run, so an interrupted
+# round relaunched with its own queue resumes as before. Note
 # RESCORE_ONLY is deliberately NOT in here: it gets its own step keys below, so a
 # migration run does not throw away the pre-step markers the next full run can reuse.
-STATE_FP="$(printf '%s|%s|%s|%s' "${INPUT}" "${OUTPUT}" "${MODE}" "${STT_MODEL}" \
-            | md5sum | cut -d" " -f1)"
+_stems_fp=""
+if [[ -n "${STEMS_FROM}" ]]; then
+  # shellcheck disable=SC2086  # word-split on purpose, the same list as STEMS_ARGS
+  _stems_fp="$(cat -- ${STEMS_FROM} | md5sum | cut -d" " -f1)"
+fi
+STATE_FP="$(printf '%s|%s|%s|%s|%s' "${INPUT}" "${OUTPUT}" "${MODE}" "${STT_MODEL}" \
+            "${_stems_fp}" | md5sum | cut -d" " -f1)"
 # Created as ${TARGET_USER} (root appends to it afterwards) so the phase leaves no
 # root-owned file in a directory the user owns.
 as_user mkdir -p "${OUTPUT}"

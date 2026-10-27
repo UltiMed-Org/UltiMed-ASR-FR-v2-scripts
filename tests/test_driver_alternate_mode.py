@@ -715,6 +715,32 @@ def test_a_stopped_run_picks_up_where_it_was(tmp: Path) -> None:
     print("test_a_stopped_run_picks_up_where_it_was: OK")
 
 
+def test_a_new_clip_queue_is_a_new_run(tmp: Path) -> None:
+    """The T5 trap of 2026-10-27. A repair round launched with the same corpus, mode
+    and judge as the last one, but a NEW STEMS_FROM queue, found the step log saying
+    every dataset had converged and ran nothing at all. The queue is part of what a
+    run is, by content: the same file rewritten with other stems is new work, while
+    the same stems again (an interrupted round relaunched) still resume."""
+    work = Path(tempfile.mkdtemp(dir=tmp))
+    queue = work / "queue.txt"
+    queue.write_text("clip_a\n", encoding="utf-8")
+    env = {"MODE": "alternate", "REFRESH_MANIFESTS": "0", "ACOUSTIC_SCAN": "0",
+           "SYNC_RESULTS": "0", "STEMS_FROM": str(queue)}
+    rc, modes, _switches, out = run_driver(tmp, [10], env, work_dir=work)
+    assert rc == 0 and modes == ["stt"], f"exited {rc}, passes {modes}\n{out}"
+
+    rc, modes, _switches, out2 = run_driver(tmp, [10], env, work_dir=work)
+    assert rc == 0 and modes == [], f"the same queue must resume: {modes}\n{out2}"
+    assert "skipping dataset 1/1" in out2, out2
+
+    queue.write_text("clip_b\nclip_c\n", encoding="utf-8")
+    rc, modes, _switches, out3 = run_driver(tmp, [10], env, work_dir=work)
+    assert rc == 0, f"run 3 exited {rc}\n{out3}"
+    assert modes == ["stt"], f"a new queue was skipped as finished: {modes}\n{out3}"
+    assert "describes a different run" in out3, out3
+    print("test_a_new_clip_queue_is_a_new_run: OK")
+
+
 def test_a_dataset_that_did_not_converge_is_retried(tmp: Path) -> None:
     """The narrow half of the same feature: only CONVERGENCE (the stt pass's exit 10)
     counts as a finished dataset. A run that stopped on stuck leftovers must be
@@ -778,6 +804,7 @@ def main() -> None:
         test_the_env_file_still_wins_for_the_borrowed_names(tmp)
         test_a_stopped_run_picks_up_where_it_was(tmp)
         test_a_dataset_that_did_not_converge_is_retried(tmp)
+        test_a_new_clip_queue_is_a_new_run(tmp)
     print("test_driver_alternate_mode: OK")
 
 
