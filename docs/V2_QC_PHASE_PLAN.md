@@ -522,6 +522,29 @@ A rank cannot discard anything: it only decides which of two already-acceptable 
 
 `badness`'s new term defaults to 0, meaning both "not long" and "unknown", so the two call sites that compare several judges' **readings** of one clip (same bytes, no length to compare) keep their old two-term ordering exactly. A negative `--length-tol` disables the preference, which is how the change is auditable: same draws, other winner.
 
+## 164,487 hybrid clips sit below the hybrids' cfg band, and that is being left alone
+
+`08_validate_manifests.py` checks `cfg_alpha` against a flat `CFG_FLOOR = 1.2`, but the sweep of 2026-10-13 measured the usable band as 1.2-2.0 for the 20 shipped voices and **1.5-2.0 for the hybrids**, which need more guidance to hold their articulation. So the gate cannot see a hybrid clip below its own band, and 164,487 of the 468,371 hybrid rows (35 pct) are: 1,093 at 1.2, **161,960 at 1.3**, 1,434 at 1.4. The 1.3 block is a generation cohort, not scattered accidents, and it is spread evenly over all seven hybrids (22,988 to 23,978 each): 1.3 is the value compose carried from 2026-07-06 until the sweep replaced it with 2.0.
+
+Measured on the shipping audio, split by category so the corpus mix cannot do the talking, the low-cfg cohort reads **equal or slightly better** on every metric available:
+
+| category | cfg | rows | parakeet loop rate (repeat_excess >= 4) | cer_max p50 | cer_max p90 | cer_window_max p90 |
+| --- | --- | --- | --- | --- | --- | --- |
+| dictionary | <= 1.4 | 146,301 | 0.06 pct | 0.0168 | 0.0426 | 0.0516 |
+| dictionary | >= 1.6 | 268,909 | 0.11 pct | 0.0179 | 0.0442 | 0.0563 |
+| PARHAF | <= 1.4 | 11,096 | 2.51 pct | 0.0148 | 0.0468 | 0.0751 |
+| PARHAF | >= 1.6 | 22,168 | 2.71 pct | 0.0159 | 0.0440 | 0.0798 |
+| drugs | <= 1.4 | 5,695 | 0.02 pct | 0.0199 | 0.0519 | 0.0531 |
+| drugs | >= 1.6 | 11,253 | 0.03 pct | 0.0222 | 0.0560 | 0.0571 |
+| PARROT | <= 1.4 | 486 | 0.62 pct | 0.0175 | 0.0513 | 0.0637 |
+| PARROT | >= 1.6 | 676 | 1.48 pct | 0.0194 | 0.0530 | 0.0745 |
+| acronyms | <= 1.4 | 909 | 0.00 pct | 0.0157 | 0.0490 | 0.0492 |
+| acronyms | >= 1.6 | 346 | 0.00 pct | 0.0183 | 0.0574 | 0.0575 |
+
+**That table does not reject the hypothesis, and must not be quoted as if it did.** It carries a survivorship confound strong enough to produce exactly this shape even if 1.3 were bad: a clip generated at 1.3 that came out badly was redrawn by a repair round, redraws walk the ladder 2.0 / 1.8 / 1.6, and the redraw overwrites the row's `cfg_alpha`. So the low bucket is by construction "clips that passed QC on the first try at 1.3" and the high bucket is contaminated with every clip that ever needed repair. The original cfg of a redrawn clip is not recoverable from the current data, so the unbiased comparison cannot be run after the fact.
+
+The decision does not need it. cfg is a generation-time **risk factor**, and the risk has been measured directly on the bytes that ship: a full turbo sweep over all 602,789 clips, a full parakeet-v3-ultra sweep, and five gates, with the loop gate specifically covering the failure mode low guidance is suspected of causing. Redrawing 162,000 rows on a suspicion costs days of GPU for no measured gain, so this is being left as a documented property rather than repaired. What is worth doing cheaply, and is in Open TODOs: give `08_validate_manifests.py` a per-voice floor so the gate stops reporting a hybrid at 1.3 as in-band, and keep `CFG_ALPHA_FLOOR >= 1.6` on every future hybrid round (T4 already runs 1.6).
+
 ## Open TODOs
 
 * Re-measure STT throughput on 500 clips against the local endpoint before trusting the
