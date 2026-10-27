@@ -27,8 +27,10 @@ Why a preference and not a veto, which is the part worth pinning. The 1,703 same
 draw pairs that round left on disk gave no gap to hang a threshold on: the ratios to each
 clip's shortest draw form one smooth mode (p50 1.122, p75 1.223, p90 1.324, p99 1.571).
 So the rule may only choose between takes that are already acceptable, and it must never
-be able to prefer a BROKEN short take: `is_bad` sorts ahead of it, and the yardstick is
-the shortest draw that PASSES every gate, not the shortest draw.
+be able to prefer a BROKEN short take: `is_bad` sorts ahead of it, the yardstick is the
+shortest draw that PASSES every gate rather than the shortest draw, and in a class where
+nothing passes it stays out altogether, because there the promotion test is pure CER and
+a shorter-but-worse draw could only block a real gain.
 
     uv run tests/test_candidate_length_preference.py
 
@@ -140,6 +142,34 @@ def test_the_yardstick_is_the_shortest_passing_draw(mod, tmp: Path) -> None:
         f"the reference must be 12.0 (shortest passing), not 6.0; got seed {got['seed']}"
 
 
+def test_when_every_draw_fails_a_gate_cer_alone_decides(mod, tmp: Path) -> None:
+    """The interaction that would otherwise stall convergence. When no draw passes, the
+    only question left is whether the best of them beats the original by
+    `--min-improvement`, and that test is pure CER. Original at 0.11, draws at 10.0 s /
+    0.10 and 13.0 s / 0.085: on CER the second promotes (0.085 <= 0.11 - 0.02), on length
+    the first wins and promotes nothing, so the clip would keep its worse audio and go
+    round again for no reason. The length rank must stay out of a class where nothing is
+    acceptable."""
+    over_short = SimpleNamespace(cer=0.100, tail=0.02, window=0.04, bad_run=0, repeat=None)
+    over_long = SimpleNamespace(cer=0.085, tail=0.02, window=0.04, bad_run=0, repeat=None)
+    got = pick(mod, tmp, [{"seed": 1, "dur": 10.0, "scores": over_short},
+                           {"seed": 2, "dur": 13.0, "scores": over_long}],
+               orig_cer=0.11)
+    assert got["seed"] == 2, \
+        f"among failing draws the lowest CER must win, got seed {got['seed']}"
+    assert got["payload"] is not None, \
+        "and it must still be promoted on --min-improvement, which is the point"
+
+
+def test_a_passing_draw_still_beats_a_shorter_failing_one(mod, tmp: Path) -> None:
+    """The restriction must not reopen the hazard: ordering by `is_bad` first is what
+    keeps a short wreck from winning, and that is unchanged."""
+    broken = SimpleNamespace(cer=0.02, tail=0.95, window=0.99, bad_run=0, repeat=None)
+    got = pick(mod, tmp, [{"seed": 1, "dur": 7.0, "scores": broken},
+                           {"seed": 2, "dur": 14.0, "scores": clean(0.03)}])
+    assert got["seed"] == 2, f"a passing draw must win outright, got seed {got['seed']}"
+
+
 def test_the_knob_turns_the_preference_off(mod, tmp: Path) -> None:
     """A negative tolerance restores the CER-only ordering, which is what makes the change
     auditable: the same draws, the other winner."""
@@ -191,6 +221,8 @@ if __name__ == "__main__":
         test_within_the_tolerance_cer_still_decides(pass_mod, tmp)
         test_a_truncated_draw_cannot_win_by_being_short(pass_mod, tmp)
         test_the_yardstick_is_the_shortest_passing_draw(pass_mod, tmp)
+        test_when_every_draw_fails_a_gate_cer_alone_decides(pass_mod, tmp)
+        test_a_passing_draw_still_beats_a_shorter_failing_one(pass_mod, tmp)
         test_the_knob_turns_the_preference_off(pass_mod, tmp)
         test_the_winner_does_not_carry_the_duration_key(pass_mod, tmp)
     test_length_rank_of_is_inert_without_numbers(pass_mod)

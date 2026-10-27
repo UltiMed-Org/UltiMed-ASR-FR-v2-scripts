@@ -782,6 +782,10 @@ def badness(scores: Scores, cfg: SimpleNamespace,
     class. A reading whose only defect is a derailed tail therefore loses to a clean one,
     which is the whole point of re-reading a clip before condemning it.
 
+    The middle term only ever separates draws that PASS every gate, because `is_bad`
+    sorts ahead of it: `score_and_pick` passes 0 for a failing draw, so a class in which
+    nothing is acceptable is still ordered by CER alone (see the comment there).
+
     ``length_rank`` defaults to 0, which means both "not long" and "unknown", so every
     caller that compares READINGS of one clip keeps exactly the old two-term ordering:
     there is no length to compare there, the audio being the same bytes. Only
@@ -814,8 +818,10 @@ def length_rank_of(dur: float | None, reference: float | None,
     win by being short: a missing ending is exactly what ``cer_tail`` / ``cer_window``
     catch.
 
-    ``cfg.length_tol`` None or negative disables the preference, and an unknown duration
-    ranks 0: not penalised, not rewarded, decided on CER as before."""
+    ``cfg.length_tol`` None or negative disables the preference, an unknown duration
+    ranks 0, and so does a missing ``reference``, which is how the caller expresses "no
+    draw passed every gate, so there is nothing to measure against": not penalised, not
+    rewarded, decided on CER as before."""
     tol = getattr(cfg, "length_tol", None)
     if tol is None or tol < 0 or not dur or not reference:
         return 0
@@ -1482,14 +1488,22 @@ def score_and_pick(
 
     # The yardstick is the shortest draw that passes every gate, NOT the shortest draw:
     # a take that stops mid-sentence is short precisely because it is broken, and letting
-    # it set the reference would rank every honest take as "too long". With no draw
-    # passing, the shortest of them all is the only reference available.
+    # it set the reference would rank every honest take as "too long".
+    #
+    # With NO draw passing there is no yardstick and no preference, deliberately. Among
+    # draws that all fail a gate, none is acceptable and the only thing left to decide is
+    # whether the best of them still beats the original by --min-improvement, which is a
+    # pure CER test: preferring a shorter draw there can only block a real gain. Say the
+    # original reads 0.11 and the draws are 10.0 s at 0.10 and 13.0 s at 0.085; on CER the
+    # second promotes (0.085 <= 0.11 - 0.02) and on length the first does not, so the clip
+    # would keep its worse audio and go round again for nothing.
     clean_durs = [c["dur"] for c in cands if c["dur"] and not is_bad(c["scores"], cfg)]
-    all_durs = [c["dur"] for c in cands if c["dur"]]
-    reference = min(clean_durs) if clean_durs else (min(all_durs) if all_durs else None)
+    reference = min(clean_durs) if clean_durs else None
     if cands:
         best = min(cands, key=lambda c: badness(
-            c["scores"], cfg, length_rank_of(c["dur"], reference, cfg)))
+            c["scores"], cfg,
+            0 if is_bad(c["scores"], cfg)
+            else length_rank_of(c["dur"], reference, cfg)))
         # Say so when the length preference, and not CER, is what chose the winner: it is
         # the only way to tell from a log whether the knob is doing anything.
         on_cer = min(cands, key=lambda c: badness(c["scores"], cfg))
