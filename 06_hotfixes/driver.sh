@@ -732,7 +732,7 @@ elif [[ -f "${STEPS_LOG}" ]]; then
   if [[ -n "${_prev_fp}" && "${_prev_fp}" != "${STATE_FP}" ]]; then
     mv -- "${STEPS_LOG}" "${STEPS_LOG}.$(date '+%Y%m%d-%H%M%S')"
     echo "driver: the step log describes a different run (corpus, output, mode or" \
-         "judge changed), moved aside; every step runs again"
+         "judge or clip queue changed), moved aside; every step runs again"
   fi
 fi
 as_user touch "${STEPS_LOG}"
