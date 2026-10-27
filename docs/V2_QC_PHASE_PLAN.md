@@ -519,6 +519,7 @@ A rank cannot discard anything: it only decides which of two already-acceptable 
 
 * `is_bad` still sorts **ahead** of the length rank, so a draw that stops before the end of the sentence can never win by being short. A missing ending is exactly what `cer_tail` and `cer_window` catch.
 * The yardstick is the shortest draw that **passes** every gate, not the shortest draw. Otherwise one truncated wreck becomes the length every honest take is measured against, and the preference silently does nothing (all the good takes rank 1 together).
+* It stays out of the class where **nothing** passes. There the only decision left is whether the best draw beats the original by `--min-improvement`, which is a pure CER test, so preferring a shorter draw can only block a real gain: measured against the pre-restriction code, an original at cer 0.11 with draws at 10.0 s / 0.100 and 13.0 s / 0.085 produced NOBEST, no promotion at all, where CER alone promotes the 0.085 draw and repairs the clip.
 
 `badness`'s new term defaults to 0, meaning both "not long" and "unknown", so the two call sites that compare several judges' **readings** of one clip (same bytes, no length to compare) keep their old two-term ordering exactly. A negative `--length-tol` disables the preference, which is how the change is auditable: same draws, other winner.
 
