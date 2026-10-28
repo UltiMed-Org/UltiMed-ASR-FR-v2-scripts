@@ -80,6 +80,8 @@ def main(categories: tuple[str, ...], dry_run: bool) -> None:
                                reopen.DEFAULT_REPEAT_GATE)
     judge_fn = partial(L.judge_block, scores_from_reading=recimp.scores_from_reading,
                        which_gates=compare.which_gates, gates=gates)
+    flagger = _load(_HERE / "04_flag_asr_defects.py", "flagger_for_ledger")
+    text_fn = partial(L.text_block, defects=flagger.defects)
     sync = _load(RELEASE / "03_sync_hotfix_results.py", "sync_for_ledger")
     drop = _load(RELEASE / "04_drop_bad_rows.py", "drop_for_ledger")
 
@@ -93,7 +95,7 @@ def main(categories: tuple[str, ...], dry_run: bool) -> None:
 
     for cat in cats:
         rows = L.build_category(data / cat, state, repairs, release, judge_fn,
-                                normalize=stt.normalize_for_scoring)
+                                normalize=stt.normalize_for_scoring, text_fn=text_fn)
         census = Counter(f for r in rows for f in r["flags"])
         shipped = sum(bool(r["release"]["splits"]) for r in rows)
         logger.info(f"{cat}: {len(rows)} clips, {shipped} shipped")

@@ -30,8 +30,9 @@ and anything that has to decide about a clip reads this one file instead. It is
      "qc": {"acoustic": {"similarity": 0.8585, "looped": true, ..., "stale_takes": 0},
             "live_stt": {"cer": 0.115, "over_gate": true, "defect": "loop", ...},
             "parakeet_ultra": {...}},
+     "text_defects": {"number": "75 -> 65"},         # 04_flag_asr_defects.defects
      "flags": ["acoustic:loop", "live_stt:over_gate", "parakeet:window",
-               "parakeet_ultra:over_gate"]}
+               "parakeet_ultra:over_gate", "text:number"]}
 
 `flags` is the point: every detector that fired on the CURRENT take, as flat strings, so
 a consumer is a set test (`"acoustic:loop" in row["flags"]`) and a census is a Counter.
@@ -55,6 +56,11 @@ Rules, all in one place:
   `01_recursive_improvement.scores_from_reading`, at stage 06's default thresholds
   (`01_compute_stt.DEFAULT_*_GATE`) plus the parakeet loop gate
   `14_reopen_loop_clips.DEFAULT_REPEAT_GATE`. Nothing here re-spells a threshold.
+* **Text rules.** `text_defects` holds every `06_hotfixes/04_flag_asr_defects.py` rule
+  (preamble, repeated, number, inserted, skipped) that fires on the stage-06 parakeet
+  reading confirmed by the turbo one, as `text:<reason>` flags. Those are the defects
+  the CER gates are blind to by construction (a wrong number is two characters, a repeat
+  adds no missing ones), so a redraw queue must see them next to the gates.
 * **Unknown sidecars refuse.** A `*.jsonl` in a category directory that this module does
   not know is an error, not a skip: a new QC stage whose verdicts the ledger silently
   ignored is the exact failure this file exists to stop. Teach `SOURCES` about it.
@@ -287,6 +293,7 @@ def flags_of(rec: dict) -> list[str]:
         flags.add("unreleased")
     for name, j in rec["judges"].items():
         flags.update(f"{name}:{g}" for g in j.get("gates") or ())
+    flags.update(f"text:{reason}" for reason in rec.get("text_defects") or ())
     for src, q in rec["qc"].items():
         if q.get("looped"):
             flags.add(f"{src}:loop")
@@ -300,8 +307,24 @@ def flags_of(rec: dict) -> list[str]:
     return sorted(flags)
 
 
+def text_block(label: str | None, judges: dict, defects) -> dict[str, str]:
+    """``{reason: offending words}`` for every text rule `defects` fires, on parakeet's
+    reading confirmed by turbo's (the pairing `04_flag_asr_defects.py` was measured on).
+
+    >>> fake = lambda label, hyp, stt: iter([("number", "75 -> 65")] if stt else [])
+    >>> text_block("75 ans", {"parakeet": {"text": "65 ans"}, "turbo": {"text": "65 ans"}}, fake)
+    {'number': '75 -> 65'}
+    >>> text_block("75 ans", {"turbo": {"text": "65 ans"}}, fake)
+    {}
+    """
+    hyp = (judges.get("parakeet") or {}).get("text")
+    if not (label and hyp):
+        return {}
+    return dict(defects(label, hyp, (judges.get("turbo") or {}).get("text")))
+
+
 def build_category(cat_dir: Path, state: dict, repairs: dict, release: dict,
-                   judge_fn, normalize=str.strip) -> list[dict]:
+                   judge_fn, normalize=str.strip, text_fn=None) -> list[dict]:
     """Every clip of one category directory, as ledger records sorted by stem.
 
     The clip set is the union of what is on disk, in stage 06's state, in the release and
@@ -358,6 +381,7 @@ def build_category(cat_dir: Path, state: dict, repairs: dict, release: dict,
             "qc": qc_rec,
             "_conflict": st.get("conflict", False),
         }
+        rec["text_defects"] = text_fn(text, rec["judges"]) if text_fn else {}
         rec["flags"] = flags_of(rec)
         del rec["_conflict"]
         rows.append(rec)

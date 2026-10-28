@@ -137,6 +137,25 @@ def test_release_fate_and_drop_staleness() -> None:
         assert rel["PARHAF/b.flac"]["asr_flag"]["reason"] == "repeated"
 
 
+def test_text_rules_become_flags() -> None:
+    """A wrong number the CER gates pass must still reach `flags` (2026-10-28: 5,291
+    released clips said another number, none of them over a gate)."""
+    def defects(label, hyp, stt):
+        if stt and "65" in hyp and "65" in stt:
+            yield "number", "75 -> 65"
+    text_fn = lambda label, judges: L.text_block(label, judges, defects)
+    with tempfile.TemporaryDirectory() as d:
+        cat = _fixture(Path(d))
+        state = {"PARHAF/looped_now.flac": {"text": "75 ans", "readings": {
+            "turbo": {"text": "65 ans", "cer": 0.01}, "parakeet": {"text": "65 ans", "cer": 0.01}}}}
+        rows = {r["stem"]: r for r in L.build_category(cat, state, {}, {}, _judge_fn,
+                                                         text_fn=text_fn)}
+        assert rows["looped_now"]["text_defects"] == {"number": "75 -> 65"}
+        assert "text:number" in rows["looped_now"]["flags"]
+        assert "parakeet:cer" not in rows["looped_now"]["flags"], "the gates are blind to it"
+        assert rows["orphan"]["text_defects"] == {}, "no label, no text rule"
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
