@@ -168,6 +168,35 @@ It is a preference, never a veto. On 1,703 real same-sentence take pairs, length
 
 After T5: **602,715 clips scored, 14,077 of them regenerated at least once, 1 exhausted.**
 
+### The clip ledger, and the round it produced (T6)
+
+Up to T5 each QC tool wrote its own sidecar file next to the audio, and the keep/redraw decision read only Whisper's verdict. Listening to six clips on 2026-10-28 showed what that cost: two of them were already flagged `looped` by the acoustic scan, and shipped anyway, because nothing put that verdict next to Whisper's. So every verdict now lands in one file per category, `clip_ledger.jsonl` (one line per clip, built from scratch by `06_hotfixes/15_build_clip_ledger.py`, format in `utils/clip_ledger.py`). A verdict only counts if it was made on the current take (a redrawn clip's old scan is kept as a count, not as a flag). Each record ends with a flat `flags` list, so a decision is a set test:
+
+```python
+rec["flags"] == ["acoustic:loop", "parakeet:window", "parakeet_ultra:over_gate", "text:number"]
+rec["text_defects"] == {"number": "75 -> 65"}   # what the label says -> what both judges heard
+```
+
+Two text rules were added at the same time, both requiring turbo AND parakeet to agree, since one recognizer alone mishears numbers and splits compounds all the time:
+
+* **Wrong numbers** (`utils/number_swaps.py`). A wrong number costs about one character of CER, so no gate could see it. The rule aligns the label and each transcript as word tokens, with every number reduced to its digits (so "1,5" vs "1.5", "100 000" vs "100000" and "1 et demi" vs "1,5" are not errors), and keeps only same-length substitutions, which stops a misalignment from pairing unrelated numbers. It found **5,291 clips** where both judges heard the same wrong number. 4,047 of them were read by the two Italian-accent hybrid voices (`h_itf_def` 2,643, `h_itf_arm` 1,404), and the commonest pairs are the French seventies: 75 -> 65 (752 clips), 74 -> 64 (448), 72 -> 62 (246), 78 -> 68 (219). Others are real too: "50 giga" read as "5", "1 semaine" as "1000 semaines".
+* **Inserted clauses** (`inserted` in `06_hotfixes/04_flag_asr_defects.py`). A stretch of 3 or more words, carrying at least 12 more letters than the label at that point, that both judges hear at the same place. The letter bar is what keeps compound splitting ("hépato-gastro" as "hépato gastro") out. This is the shape of `034548`, which says "la calcémie est normale, la falcémie est normale" for a label that names the calcémie once: a mutated repeat, so the older `repeated` rule (exact repeat of the label's own words) misses it.
+
+The repair loop also gained a **number gate** (`--number-threshold`, `NUMBER_THRESHOLD` for `driver.sh`, off by default): a redraw that still says the wrong number is not promoted, however clean its CER.
+
+**T6** (2026-10-28) queued from the ledger with `06_hotfixes/16_reopen_from_ledger.py`. 6,810 clips (52 h of audio), a clip counted once per rule it trips:
+
+| rule | clips | what it means |
+| --- | --- | --- |
+| number | 5,297 | both judges heard the same wrong number |
+| loop | 1,407 | the acoustic scan heard a repeat AND a parakeet verdict confirms it |
+| dropped | 275 | dropped for an audio reason (exhausted, flagged, guidance off), so a redraw can bring it back |
+| asr | 208 | preamble babble or repeated clause, the section 9 drops |
+| window | 206 | both judges' worst 15 s window at CER 0.12 or more |
+| inserted | 122 | both judges heard an extra clause |
+
+Number clips skip the Italian-accent voices: one read by `h_itf_*` is redrawn by `fr_male` or `fr_female` right away (4,050 clips), and one read by another voice keeps it but escalates straight to the French pair if it fails again (1,247). The round runs with the number gate on.
+
 ## 8. Bugs that would have shipped bad data silently
 
 Most of the effort went into these. Each passed every test that existed when it was found, and each is now fixed and covered by a test.
@@ -198,7 +227,7 @@ Honest limits, so nobody mistakes "passed QC" for "perfect":
 * **Both judges are recognizers.** A mispronunciation that both happen to "correct" back to the label passes. The fine-tuned UltiMed model was deliberately kept *out* of judging for this reason: trained on the labels, it would snap a mispronounced word back to them.
 * **No clipping/saturation detector** and no detector for a voice changing mid-clip.
 * **Clips no parakeet reading covers**: 608 shipped clips (447 PARHAF, 154 dictionary) were judged by Whisper alone, which is blind to loops.
-* **Number misreadings**: a wrong digit costs about one character of CER, so a take saying "145 sur 85" for "145 sur 95" passes. `037990_0000_pneumologie_00139_t0_c2` is a likely case (several numbers misread, all judges agree), kept because the second Whisper judge scored it 0.047.
+* **Number misreadings only one judge hears.** The number rule of section 7 needs both judges to hear the same wrong number. About 3,900 clips have a number only turbo hears as wrong (mostly dictionary entries), which is mostly turbo's own error and is left alone.
 * **A clip where most of the 5 draws loop** defeats the length preference (the median itself is a loop). The parakeet sweep after each round is what catches that residue.
 * **35 pct of hybrid-voice clips were generated at `cfg_alpha` 1.3**, below the hybrids' measured band. On every metric they read as well as the rest, but that comparison is biased (bad 1.3 clips were redrawn at higher values and left the group), so this is a documented property, not a proven non-issue.
 * **Trailing silence is left alone on purpose.** It also teaches the recognizer not to hallucinate on silence.
