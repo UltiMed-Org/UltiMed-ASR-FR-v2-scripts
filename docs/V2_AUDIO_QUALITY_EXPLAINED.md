@@ -184,6 +184,7 @@ Most of the effort went into these. Each passed every test that existed when it 
 
 * **Exhausted clips**: failed every draw on every rung of the voice ladder.
 * **Preamble babble**: ~210 clips where parakeet hears an insertion before the sentence. They score clean under Whisper, so the repair loop would never pick them up, and no repaired take could be confirmed without another full sweep. The audio stays on disk.
+* **Repeats both judges hear**: 206 clips found by the final audit on 2026-10-28, where turbo AND parakeet transcribe a clause the label says once as said twice. 172 of them are a date range (`009599_0000_chir_ortho_et_traumato_00263_t0_c0`: "hospitalisé du 14 août 2024 au 16 août 2024 au 16 août 2024"). On a 40 to 90 s clip one repeated clause costs only ~0.05 of CER, under the 0.08 gate, which is how they got through every round. The rule (`repeated` in `06_hotfixes/04_flag_asr_defects.py`, on by default) flags a stretch of 4 or more extra words built from the label's own word pairs, in both transcripts. Dropped for the same reason as the preamble babble: the repair loop's promotion compares CER, which barely sees the defect. The audio stays on disk.
 * **55 takes made at `cfg_alpha` 1.0** (guidance off, the documented failure mode), from before the ladder had a floor. Measurably fine, dropped anyway because 0.009 pct of the corpus is cheaper than loosening the validator.
 
 ## 10. The release gate
@@ -196,6 +197,8 @@ Honest limits, so nobody mistakes "passed QC" for "perfect":
 
 * **Both judges are recognizers.** A mispronunciation that both happen to "correct" back to the label passes. The fine-tuned UltiMed model was deliberately kept *out* of judging for this reason: trained on the labels, it would snap a mispronounced word back to them.
 * **No clipping/saturation detector** and no detector for a voice changing mid-clip.
+* **Clips no parakeet reading covers**: 608 shipped clips (447 PARHAF, 154 dictionary) were judged by Whisper alone, which is blind to loops.
+* **Number misreadings**: a wrong digit costs about one character of CER, so a take saying "145 sur 85" for "145 sur 95" passes. `037990_0000_pneumologie_00139_t0_c2` is a likely case (several numbers misread, all judges agree), kept because the second Whisper judge scored it 0.047.
 * **A clip where most of the 5 draws loop** defeats the length preference (the median itself is a loop). The parakeet sweep after each round is what catches that residue.
 * **35 pct of hybrid-voice clips were generated at `cfg_alpha` 1.3**, below the hybrids' measured band. On every metric they read as well as the rest, but that comparison is biased (bad 1.3 clips were redrawn at higher values and left the group), so this is a documented property, not a proven non-issue.
 * **Trailing silence is left alone on purpose.** It also teaches the recognizer not to hallucinate on silence.
