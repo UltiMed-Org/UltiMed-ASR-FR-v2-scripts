@@ -336,9 +336,12 @@ def build_category(cat_dir: Path, state: dict, repairs: dict, release: dict,
             ref = q.pop("_reference", None)
             if ref is not None and text is not None:
                 # QC stages score against `text` or `asr_training_source` (the PARROT
-                # sweep used the latter); either is current.
-                q["reference_differs"] = normalize(ref) not in {
-                    normalize(t) for t in (text, st.get("source")) if t}
+                # sweep used the latter); either is current. Almost every sidecar
+                # reference IS the current label byte for byte, and normalizing costs a
+                # few hundred regexes, so only the ~3% that differ pay for it.
+                current = [t.strip() for t in (text, st.get("source")) if t]
+                q["reference_differs"] = ref.strip() not in current and \
+                    normalize(ref) not in {normalize(t) for t in current}
             qc_rec[src] = q
         imp = st.get("improvement") or {}
         g = gen.get(stem) or {"cfg_attempts": []}
