@@ -99,7 +99,8 @@ def run(tmp: Path, mod, pass_mod, repeat_gate: int = 4):
                      encoding="utf-8")
     counts, by_voice, by_cat = Counter(), Counter(), Counter()
     gates = mod.gates_of(pass_mod._stt, repeat_gate)
-    stems = mod.process(state, pass_mod, JUDGE, gates, True, counts, by_voice, by_cat)
+    stems = mod.process(state, pass_mod, lambda row: mod.loops(pass_mod, row, JUDGE, gates),
+                        True, counts, by_voice, by_cat)
     rows = {Path(json.loads(line)["audio_filepath"]).stem: json.loads(line)
             for line in state.read_text(encoding="utf-8").splitlines() if line.strip()}
     return stems, counts, rows, by_voice, by_cat

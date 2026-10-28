@@ -168,14 +168,23 @@ def category_of(audio: str) -> str:
     return parts[-2] if len(parts) >= 2 else "?"
 
 
-def process(state: Path, mod, judge_key: str, gates: SimpleNamespace, apply: bool,
-            counts: Counter, by_voice: Counter, by_cat: Counter) -> list[str]:
-    """One state file: mark every looping clip, stream-rewritten like its siblings.
+def process(state: Path, mod, select, apply: bool, counts: Counter, by_voice: Counter,
+            by_cat: Counter, mark=None) -> list[str]:
+    """One state file: mark every clip `select` picks, stream-rewritten like its siblings.
+
+    `select(row)` returns the scores to record as the clip's "when flagged" view (see the
+    module docstring on why they must be the flagging judge's), or None to leave the row
+    alone; here that is `loops`, and `16_reopen_from_ledger.py` passes its own. `mark(row,
+    scores)` writes the marker, `pending_tts` with those scores by default; a caller that
+    also has to pick the redraw's voice passes its own.
 
     Streamed rather than read_jsonl'd for the same reason `13_refresh_stale_durations.py`
     streams: `improved/full.stt.jsonl` is ~800 MB, and holding it as parsed JSON costs
     several GB of RAM.
     """
+    if mark is None:
+        def mark(row, scores):
+            mod.set_improvement(row, "pending_tts", scores)
     stems: list[str] = []
     tmp = state.with_suffix(state.suffix + ".reopen.tmp")
     out = tmp.open("w", encoding="utf-8") if apply else None
@@ -186,13 +195,13 @@ def process(state: Path, mod, judge_key: str, gates: SimpleNamespace, apply: boo
                     continue
                 row = json.loads(line)
                 counts["rows"] += 1
-                scores = loops(mod, row, judge_key, gates)
+                scores = select(row)
                 if scores is not None:
                     status = (row.get("improvement") or {}).get("status")
                     if status in REOPENABLE:
                         counts["reopened"] += 1
                         counts[f"from::{status or 'no marker'}"] += 1
-                        mod.set_improvement(row, "pending_tts", scores)
+                        mark(row, scores)
                         audio = row.get("audio_filepath") or ""
                         stems.append(Path(audio).stem)
                         by_voice[row.get("voice") or "?"] += 1
@@ -238,7 +247,8 @@ def main(states, judge_key, repeat_threshold, out_stems, apply) -> None:
         if not state.exists():
             logger.warning(f"{state} does not exist, skipping it")
             continue
-        found = process(state, mod, judge_key, gates, apply, counts, by_voice, by_cat)
+        found = process(state, mod, lambda row: loops(mod, row, judge_key, gates), apply,
+                        counts, by_voice, by_cat)
         logger.info(f"{state.name}: {len(found)} clip(s) marked pending_tts")
         stems.extend(found)
     logger.info(f"{counts['rows']} row(s) read, {counts['reopened']} reopened, "
