@@ -71,6 +71,14 @@ def test_flags_describe_the_current_take_only() -> None:
                    "PARHAF/redrawn.flac": {"splits": ["val"], "dropped": None, "asr_flag": None}}
         rows = {r["stem"]: r for r in L.build_category(cat, state, {}, release, _judge_fn)}
         assert set(rows) == {"looped_now", "redrawn", "orphan"}, "one line per clip, orphans included"
+        respelled = L.build_category(cat, {"PARHAF/looped_now.flac": {"text": "LA SOURCE ÉPELÉE"}},
+                                     {}, release, _judge_fn, normalize=str.lower)
+        assert "parakeet_ultra:reference_differs" not in respelled[0]["flags"], \
+            "a label only respelled since QC does not invalidate the verdict"
+        rewritten = L.build_category(cat, {"PARHAF/looped_now.flac": {"text": "autre chose"}},
+                                     {}, release, _judge_fn, normalize=str.lower)
+        assert rewritten[0]["stem"] == "looped_now"
+        assert "parakeet_ultra:reference_differs" in rewritten[0]["flags"]
         now = rows["looped_now"]
         for flag in ("acoustic:loop", "parakeet_ultra:over_gate", "parakeet:cer"):
             assert flag in now["flags"], f"{flag} missing from {now['flags']}"

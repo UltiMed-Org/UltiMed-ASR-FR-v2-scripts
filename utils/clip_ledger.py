@@ -301,12 +301,17 @@ def flags_of(rec: dict) -> list[str]:
 
 
 def build_category(cat_dir: Path, state: dict, repairs: dict, release: dict,
-                   judge_fn) -> list[dict]:
+                   judge_fn, normalize=str.strip) -> list[dict]:
     """Every clip of one category directory, as ledger records sorted by stem.
 
     The clip set is the union of what is on disk, in stage 06's state, in the release and
     in any sidecar, so an orphan flac, a manifest row whose audio vanished and a sidecar
     row about a deleted clip all surface instead of falling between two files.
+
+    `normalize` is what two references are compared through before `reference_differs`
+    fires: stage 06's `normalize_for_scoring` in production, because the label was
+    respelled after several QC passes (`œ` -> `oe`, `pourcent` -> `%`, accent fixes: 97%
+    of the raw mismatches on 2026-10-28) and a respelling does not move a verdict.
     """
     cat = cat_dir.name
     qc = {SOURCES[p.name]: read_verdicts(p, cat_dir)
@@ -331,9 +336,9 @@ def build_category(cat_dir: Path, state: dict, repairs: dict, release: dict,
             ref = q.pop("_reference", None)
             if ref is not None and text is not None:
                 # QC stages score against `text` or `asr_training_source` (the PARROT
-                # sweep used the latter, which spells "œ" out); either is current.
-                q["reference_differs"] = ref.strip() not in {
-                    t.strip() for t in (text, st.get("source")) if t}
+                # sweep used the latter); either is current.
+                q["reference_differs"] = normalize(ref) not in {
+                    normalize(t) for t in (text, st.get("source")) if t}
             qc_rec[src] = q
         imp = st.get("improvement") or {}
         g = gen.get(stem) or {"cfg_attempts": []}

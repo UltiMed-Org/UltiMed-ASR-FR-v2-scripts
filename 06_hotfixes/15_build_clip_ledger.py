@@ -92,7 +92,8 @@ def main(categories: tuple[str, ...], dry_run: bool) -> None:
     logger.info(f"{len(state)} clips in state, {len(release)} in the release files")
 
     for cat in cats:
-        rows = L.build_category(data / cat, state, repairs, release, judge_fn)
+        rows = L.build_category(data / cat, state, repairs, release, judge_fn,
+                                normalize=stt.normalize_for_scoring)
         census = Counter(f for r in rows for f in r["flags"])
         shipped = sum(bool(r["release"]["splits"]) for r in rows)
         logger.info(f"{cat}: {len(rows)} clips, {shipped} shipped")
