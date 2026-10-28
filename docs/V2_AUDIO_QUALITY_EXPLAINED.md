@@ -205,12 +205,11 @@ Honest limits, so nobody mistakes "passed QC" for "perfect":
 
 ## 12. Release gate result
 
-The export chain finished on 2026-10-27 at 23:37. The gate (`08_validate_manifests.py`) checked 602,651 rows in `full.jsonl` and reported **0 error rows** and 55 warning rows. That count is after the drop step removed 133 rows from `full.jsonl` that the drop ledger remembered (section 8); none of the 135 ledger clips is left in it.
+The last export chain finished on 2026-10-28 at 08:48. The gate (`08_validate_manifests.py`) checked 602,445 rows in `full.jsonl` and reported **0 error rows** and 54 warning rows. That is after the drop step removed the 206 repeated clips of section 9 and re-applied the drop ledger (section 8), which now remembers 341 clips; none of them is in any manifest. A separate run of the score check over 100 pct of the rows (instead of the gate's 2 pct sample) on the 2026-10-27 export found 2 acronym rows (`000400_000{1,2}_sa`) whose stored CER does not reproduce (0.0146 stored, 0.0098 recomputed, a bookkeeping mismatch on a clean clip) and 4 rows with a turbo CER of 0.08 or more, all cleared by the second Whisper judge.
 
 The warnings, none of which blocks training:
 
 - 43 rows were generated at a guidance scale above the 1.2 to 2.0 band (22 at 3.0, 21 at 2.5). These came from the cfg sweep of section 4: the lower values failed on those sentences, these passed both judges, so they ship.
-- 1 row trips a gate on its own stored transcript (`037990_0000_pneumologie_00139_t0_c2`, CER 0.081 against the 0.08 line). It is a rounding-edge case, kept and listed.
 - 59,687 source documents have clips in more than one split (for example `acronyms:1` has clips in train, val and test). The gate counts this as one summary row. It follows from the `distribute` grouping, which spreads a document's sentences across splits on purpose; only `atomic` documents (44,880 rows, PARHAF-style long texts) are kept whole. Whether val/test should be document-disjoint is an open decision, not a defect of the audio.
 - Housekeeping, one summary row per category (5 categories, so 10 rows): stray files next to the audio (`.bak` copies of redrawn takes, for example 8,203 in PARHAF and 293 in drugs) and audio files on disk that no manifest row mentions (dropped takes, for example 34 in PARHAF and 87 in dictionary). They are invisible to training, which reads only the manifests.
 
