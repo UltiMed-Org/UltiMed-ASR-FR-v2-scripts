@@ -106,7 +106,22 @@ and no post-redraw check could confirm the fix without a second parakeet sweep. 
 clips of 602,789 (0.035%) the drop is the proportionate answer; the audio itself is left
 on disk, so a later pass can revisit it.
 
-Until then, do not add a third.
+Until then, do not add a third skipped-phrase detector.
+
+**The ``repeated`` rule (2026-10-28), the loop both recognizers hear.** A clause said
+twice ("hospitalisé du 14 août 2024 au 16 août 2024 au 16 août 2024", clip
+``009599_0000_chir_ortho_et_traumato_00263_t0_c0``, voice h_frf_esm) costs a 40 to 90 s
+PARHAF clip only ~0.05 of CER, under the 0.08 gate, and ``14_reopen_loop_clips.py``
+asks for a parakeet CER trip on top of ``repeat_excess``, so the release audit of
+2026-10-28 found such clips shipping after T5. The rule: a stretch of at least
+``MIN_REPEATED_WORDS`` words the hypothesis says BEYOND the label, at least
+``REPEATED_PAIR_SHARE`` of whose word pairs are the label's own (so it is the label
+again, not a rewording or a babble, which the preamble rule owns), and Whisper's
+transcript must hold such a stretch too. Two recognizers agreeing is the same bar as
+``preamble``; this one is ON by default. Measured on the shipped ``full.jsonl``: 206
+clips, and of 40 read side by side nearly all were real (the date range said twice is
+the dominant family, then a dose or a finding said twice). Dropped, not redrawn, for the
+reason given above for ``preamble``; the audio stays on disk.
 
 Both texts are compared after lowercasing and dropping punctuation, like the NeMo
 normalizer, which is enough since only whole missing or extra words matter here.
@@ -141,12 +156,15 @@ DEFAULT_OUT = _HERE.parent / "99_hf_release" / "asr_flagged_clips.jsonl"
 DEFAULT_JUDGE_KEY = "onnx-asr/parakeet-tdt-0.6b-v3-ultra"
 PREAMBLE = "preamble"
 SKIPPED = "skipped"
+REPEATED = "repeated"
 #: Which rules `--reason` may ask for, and which it asks for by default. `skipped` is OFF
 #: by default: see "The 2026-10-26 measurement" in the module docstring.
-REASONS = (PREAMBLE, SKIPPED)
-DEFAULT_REASONS = (PREAMBLE,)
+REASONS = (PREAMBLE, SKIPPED, REPEATED)
+DEFAULT_REASONS = (PREAMBLE, REPEATED)
 MIN_PREAMBLE_WORDS = 2
 MIN_SKIPPED_WORDS = 3
+MIN_REPEATED_WORDS = 4
+REPEATED_PAIR_SHARE = 0.75
 _PUNCT = re.compile(r"[^\w\s']")
 
 
@@ -183,12 +201,34 @@ def _merged_diffs(ops: list[tuple]) -> list[tuple[int, int, int, int]]:
     return [tuple(sp) for sp in spans]
 
 
+def _said_again(ref: list[str], hyp: list[str]) -> str | None:
+    """The first stretch of at least `MIN_REPEATED_WORDS` words `hyp` says beyond `ref`
+    that is built from `ref`'s own word pairs (the label said again), else ``None``.
+
+    >>> _said_again("du 1 au 4 avril le motif".split(), "du 1 au 4 avril au 4 avril le motif".split()) is None
+    True
+    >>> _said_again("du 1 avril 2025 au 4 avril 2025 le motif".split(),
+    ...             "du 1 avril 2025 au 4 avril 2025 au 4 avril 2025 le motif".split())
+    'au 4 avril 2025'
+    """
+    pairs = set(zip(ref, ref[1:]))
+    ops = difflib.SequenceMatcher(a=ref, b=hyp, autojunk=False).get_opcodes()
+    for i1, i2, j1, j2 in _merged_diffs(ops):
+        if (j2 - j1) - (i2 - i1) < MIN_REPEATED_WORDS:
+            continue
+        extra = hyp[j1:j2]
+        known = sum(p in pairs for p in zip(extra, extra[1:]))
+        if known >= REPEATED_PAIR_SHARE * (len(extra) - 1):
+            return " ".join(extra)
+    return None
+
+
 def find_defect(label: str, hyp: str, stt: str | None,
                 reasons: Collection[str] = REASONS) -> tuple[str, str] | None:
     """Return ``(reason, offending words)`` for a defective clip, else ``None``.
 
-    `reasons` selects which rules run; the doctests below exercise both, while the CLI
-    defaults to `DEFAULT_REASONS`.
+    `reasons` selects which rules run; the doctests below exercise all three, while the
+    CLI defaults to `DEFAULT_REASONS`.
 
     >>> find_defect("Courrier de suivi.", "Jackie Orbad dit. Courrier de suivi.", None)
     ('preamble', 'jackie orbad dit')
@@ -204,6 +244,10 @@ def find_defect(label: str, hyp: str, stt: str | None,
     True
     >>> find_defect("anticorps et typage hpa maternel et paternel ok", "anticorps étypage hpa maternelle et paternelle ok", "anticorps ok") is None
     True
+    >>> find_defect("du 14 août 2024 au 16 août 2024. Le motif", "du 14 août 2024 au 16 août 2024 au 16 août 2024 le motif", "du 14 août 2024 au 16 août 2024, au 16 août 2024. Le motif")
+    ('repeated', 'au 16 août 2024')
+    >>> find_defect("du 14 août 2024 au 16 août 2024. Le motif", "du 14 août 2024 au 16 août 2024 au 16 août 2024 le motif", "du 14 août 2024 au 16 août 2024. Le motif") is None
+    True
     """
     ref, h = words(label), words(hyp)
     ops = difflib.SequenceMatcher(a=ref, b=h, autojunk=False).get_opcodes()
@@ -212,7 +256,12 @@ def find_defect(label: str, hyp: str, stt: str | None,
     # label's first word ("Suvreza" -> "Essus UV réza"), not extra audio.
     if PREAMBLE in reasons and tag == "insert" and j2 - j1 >= MIN_PREAMBLE_WORDS:
         return PREAMBLE, " ".join(h[j1:j2])
-    if not stt or SKIPPED not in reasons:
+    if not stt:
+        return None
+    # Whisper must hear the repeat too: one recognizer alone can be a recognition error.
+    if REPEATED in reasons and (again := _said_again(ref, h)) and _said_again(ref, words(stt)):
+        return REPEATED, again
+    if SKIPPED not in reasons:
         return None
     # Label word indices Whisper's transcript does match.
     s_ops = difflib.SequenceMatcher(a=ref, b=words(stt), autojunk=False).get_opcodes()
@@ -291,7 +340,7 @@ def load_hyps(path: Path, judge_key: str = DEFAULT_JUDGE_KEY) -> dict[str, str]:
                    "one is how the separately licensed PARROT clips get checked too.")
 def main(hyps: Path, manifests: tuple[Path, ...], out: Path, judge_key: str,
          reasons: tuple[str, ...], extra: tuple[Path, ...]) -> None:
-    """Flag TTS preambles and confirmed skips from a non-Whisper recognizer's output."""
+    """Flag TTS preambles, repeats and confirmed skips from a non-Whisper recognizer's output."""
     hyp_by_key: dict[str, str] = {}
     for source in (hyps, *extra):
         hyp_by_key.update(load_hyps(source, judge_key))
@@ -312,7 +361,8 @@ def main(hyps: Path, manifests: tuple[Path, ...], out: Path, judge_key: str,
     logger.info(f"rules: {', '.join(reasons)}")
     logger.info(f"checked {n_checked} clips ({len(hyp_by_key)} hypotheses), flagged {len(flagged)}: "
                 f"{sum(f['reason'] == PREAMBLE for f in flagged.values())} {PREAMBLE}, "
-                f"{sum(f['reason'] == SKIPPED for f in flagged.values())} {SKIPPED}")
+                f"{sum(f['reason'] == SKIPPED for f in flagged.values())} {SKIPPED}, "
+                f"{sum(f['reason'] == REPEATED for f in flagged.values())} {REPEATED}")
     with out.open("w") as f:
         for key in sorted(flagged):
             f.write(json.dumps(flagged[key], ensure_ascii=False) + "\n")

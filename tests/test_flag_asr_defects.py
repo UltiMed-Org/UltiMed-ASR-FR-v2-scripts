@@ -70,7 +70,7 @@ def test_load_hyps_accepts_both_shapes() -> None:
 
 
 def test_default_reasons_exclude_skipped() -> None:
-    """The default rule set must be `preamble` alone, and `skipped` must still work.
+    """The default rule set must leave `skipped` out, and `skipped` must still work.
 
     Pinned because the default is a release decision, not a style choice: the module
     docstring's 2026-10-26 measurement found `skipped` firing on dosage enumerations
@@ -79,7 +79,7 @@ def test_default_reasons_exclude_skipped() -> None:
     back on by accident has to fail here.
     """
     mod = _load()
-    assert mod.DEFAULT_REASONS == (mod.PREAMBLE,), mod.DEFAULT_REASONS
+    assert mod.SKIPPED not in mod.DEFAULT_REASONS, mod.DEFAULT_REASONS
 
     label, hyp = "le patient est sorti hier soir", "le patient"
     # The rule itself is unchanged: asked for, it still fires.
@@ -93,7 +93,29 @@ def test_default_reasons_exclude_skipped() -> None:
     print("test_default_reasons_exclude_skipped: OK")
 
 
+def test_a_repeat_both_recognizers_hear_is_flagged() -> None:
+    """A clause said twice is flagged by default, but only when Whisper hears it too.
+
+    The shape the 2026-10-28 release audit found shipping:
+    ``009599_0000_chir_ortho_et_traumato_00263_t0_c0`` says its date range twice and scores
+    CER ~0.05, under every gate. A repeat in one recognizer only, or extra words that are
+    not the label's own (a rewording), must not drop a clip.
+    """
+    mod = _load()
+    assert mod.REPEATED in mod.DEFAULT_REASONS, mod.DEFAULT_REASONS
+    label = "Il est hospitalisé du 14 août 2024 au 16 août 2024. Le motif est une fracture."
+    looped = "Il est hospitalisé du 14 août 2024 au 16 août 2024 au 16 août 2024. Le motif est une fracture."
+    assert mod.find_defect(label, looped, looped, mod.DEFAULT_REASONS) == \
+        (mod.REPEATED, "au 16 août 2024")
+    assert mod.find_defect(label, looped, label, mod.DEFAULT_REASONS) is None
+    assert mod.find_defect(label, looped, None, mod.DEFAULT_REASONS) is None
+    reworded = label.replace("Le motif", "Le motif principal de cette hospitalisation programmée")
+    assert mod.find_defect(label, reworded, reworded, mod.DEFAULT_REASONS) is None
+    print("test_a_repeat_both_recognizers_hear_is_flagged: OK")
+
+
 if __name__ == "__main__":
     test_find_defect()
     test_load_hyps_accepts_both_shapes()
     test_default_reasons_exclude_skipped()
+    test_a_repeat_both_recognizers_hear_is_flagged()
