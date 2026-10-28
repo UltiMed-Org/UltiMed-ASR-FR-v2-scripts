@@ -73,7 +73,13 @@
 #                       preferred ahead of CER (a repeat only ever ADDS time, and whisper
 #                       cannot hear one). Negative disables it. Not a gate: it never
 #                       rejects a draw, only orders acceptable ones
-#   None of those five carries a default HERE: unset means "whatever the scripts ship"
+#   NUMBER_THRESHOLD    gate on how many label numbers the judge heard as ANOTHER number
+#                       ("75 ans" read "65 ans", utils/number_swaps.py). OFF unless set
+#                       (the script's default is 0): set 1 for a round that redraws the
+#                       wrong-number clips, so a draw that repeats the error is not
+#                       promoted. One judge alone mishears a number on ~1.5% of clean
+#                       clips, cheap inside such a round, too many for a whole-corpus one
+#   None of those six carries a default HERE: unset means "whatever the scripts ship"
 #                       (01_compute_stt.py's DEFAULT_*_GATE, which
 #                       01_recursive_improvement.py reads for its own click defaults), so
 #                       this file never becomes a second copy of a number that then drifts
@@ -439,7 +445,8 @@ for _gate in "CER_THRESHOLD:--cer-threshold" \
              "TAIL_CER_THRESHOLD:--tail-cer-threshold" \
              "WINDOW_CER_THRESHOLD:--window-cer-threshold" \
              "BAD_RUN_THRESHOLD:--bad-run-threshold" \
-             "LENGTH_TOL:--length-tol"; do
+             "LENGTH_TOL:--length-tol" \
+             "NUMBER_THRESHOLD:--number-threshold"; do
   _gate_var="${_gate%%:*}"
   _gate_val="${!_gate_var:-}"
   if [[ -n "${_gate_val}" ]]; then
