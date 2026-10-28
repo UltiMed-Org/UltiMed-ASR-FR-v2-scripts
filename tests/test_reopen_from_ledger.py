@@ -17,10 +17,10 @@ one-line slip would queue the wrong clips or redraw them with the wrong voice:
 
   * the ledger's `clip` key matches the state row through the state's own base
     directory, so `../PARHAF/x.flac` in the state is `PARHAF/x.flac` in the ledger;
-  * a NUMBER clip read by an `h_itf_*` voice is swapped to the fr rung at once, and one
-    read by another voice keeps it but has the itf rung marked spent, so its next
-    escalation lands on fr; the rule also sees an itf voice the LADDER handed it
-    (`swap_voice`), not just the row's original one;
+  * a NUMBER clip read by an `h_itf_*` voice is swapped at once to a hybrid that is
+    not an itf one (`NUMBER_LADDER_FR_V2`), and one read by another voice keeps it; both
+    have the itf rung marked spent, so their next escalation lands on fr; the rule also
+    sees an itf voice the LADDER handed it (`swap_voice`), not just the row's original;
   * a clip queued for any other reason keeps the ladder exactly as it was;
   * the marker carries parakeet's numbers and `seeds_spent` (same reasons as 14);
   * a clip already queued, or absent from the queue, is left byte for byte.
@@ -40,6 +40,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(ROOT / "utils"))
 from script_module import load_script  # noqa: E402
+from voice_assignment import NUMBER_LADDER_FR_V2  # noqa: E402
 
 JUDGE = "onnx-asr/parakeet-tdt-0.6b-v3-ultra"
 TURBO = "whisper.cpp/ggml-large-v3-turbo"
@@ -106,18 +107,19 @@ def main() -> int:
               [p["clip"] for p in picked])
         check("every marked clip is pending_tts",
               all(imp[Path(p["clip"]).stem]["status"] == "pending_tts" for p in picked))
-        check("itf number clip swapped to the fr rung now",
-              imp["number_itf"].get("swap_voice") in ("fr_male", "fr_female")
-              and imp["number_itf"].get("voice_tier") == 2, imp["number_itf"])
+        safe = set(NUMBER_LADDER_FR_V2[0])
+        check("itf number clip swapped to a non-itf hybrid now, fr rung next",
+              imp["number_itf"].get("swap_voice") in safe
+              and imp["number_itf"].get("voice_tier") == 1, imp["number_itf"])
         check("its marker carries parakeet's cer and its seeds",
               imp["number_itf"].get("orig_cer") == 0.08 and imp["number_itf"].get("seeds_spent") == 5,
               imp["number_itf"])
         check("fr number clip keeps its voice, itf rung marked spent",
               "swap_voice" not in imp["number_fr"] and imp["number_fr"].get("voice_tier") == 1,
               imp["number_fr"])
-        check("an itf voice the ladder handed out is swapped too, never back to a tried one",
-              imp["number_laddered_itf"].get("swap_voice") == "fr_female"
-              and imp["number_laddered_itf"].get("voice_tier") == 2, imp["number_laddered_itf"])
+        check("an itf voice the ladder handed out is swapped too",
+              imp["number_laddered_itf"].get("swap_voice") in safe
+              and imp["number_laddered_itf"].get("voice_tier") == 1, imp["number_laddered_itf"])
         check("a loop-only clip keeps the ladder untouched",
               "swap_voice" not in imp["loop_itf"] and not imp["loop_itf"].get("voice_tier"),
               imp["loop_itf"])

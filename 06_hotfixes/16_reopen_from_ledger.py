@@ -26,8 +26,13 @@ nothing new.
 * `loop`: `acoustic:loop` AND a parakeet-side verdict (a stage-06 parakeet gate, or an
   `over_gate` from the parakeet sweep, its refill, or live QC). The acoustic scan alone
   over-fires on legitimately repeated phrases; parakeet hears the repeat verbatim.
-* `number`: `text:number`, a number both judges heard as the SAME wrong number
-  (`utils/number_swaps.py`). One judge alone is not enough.
+* `number`: ANY judge (turbo or parakeet) heard a number the label does not hold
+  (`utils/number_swaps.swaps`). Deliberately looser than the ledger's own `text:number`
+  flag (both judges, same wrong number): on clips holding a 70-79 / 90-99 number read by
+  an `h_itf_*` voice, 20.4 pct are flagged by both and a further 11.7 pct by one judge
+  only, against 0.7 pct one-judge-only for the fr voices, which is the judges' own
+  noise level. The excess is mumbled numbers, and the user's call (2026-10-28) was that
+  a redraw costs less than shipping one.
 * `inserted`: `text:inserted`, a clause of 3+ words both judges heard at the same place
   that the label lacks (`04_flag_asr_defects.py::_inserted_by_both`).
 * `window`: the worst ~15 s window over `WINDOW_BOTH` on turbo AND parakeet. One judge
@@ -39,15 +44,20 @@ nothing new.
   bring those back; a text-side drop (ellipsis, llm-leak, too-fast) it cannot, so those
   are never queued.
 
-**Voice rule for `number`.** The first escalation rung of
-`voice_assignment.VOICE_LADDER_FR_V2` is the two `h_itf_*` voices, and they are the worst
-at French numbers by far (measured 2026-10-28: 4,047 of the 5,291 agreed swaps, mostly
-75 -> 65 and 74 -> 64, the Italian-accent "soixante-quinze"). So a number clip skips that
-rung: read by an `h_itf_*` voice, it is swapped to the fr rung right away (through
-`01_recursive_improvement.swap_voice_for`, so the choice follows the stage's ladder
-hash); read by any other voice, it keeps its voice and its next escalation lands on the
-fr rung. That is wider than "texts holding 11-16 / 70-79 / 90-99" because the other
-accents trip elsewhere too (63 -> 73, 6 -> 16, 100 -> 5).
+**Voice rule for `number`.** The two `h_itf_*` voices are the worst at French numbers by
+far (rates in `voice_assignment.NUMBER_LADDER_FR_V2`: 25.7 and 12.9 pct on 70s/90s
+labels, against 0.34-0.69 for the other hybrids), and they are also the first rung of
+the stage's escalation ladder. So a number clip:
+
+* read by an `h_itf_*` voice goes to one of the five other hybrids right away
+  (`NUMBER_LADDER_FR_V2`, keeping the accent spread), and to the fr pair if that fails;
+* read by any other voice keeps it with a fresh seed (its errors are seed noise, not an
+  accent), and escalates straight to the fr pair, skipping the itf rung.
+
+Both go through `01_recursive_improvement.swap_voice_for`, so a document's chunks still
+share one new reader. Applies to every number, not only 70s/90s: the itf voices trip
+elsewhere too (63 -> 73, 6 -> 16, 100 -> 5). T6 (2026-10-28) ran an earlier version that
+sent itf number clips to the fr pair directly; its 4,050 such clips keep that.
 
 **Marker scores** are the parakeet reading's, as in 14 and for the same reason: a draw
 is promoted on beating `orig_cer`, and whisper's view of a looping clip is already near
@@ -82,6 +92,8 @@ RELEASE = ROOT / "99_hf_release"
 sys.path.insert(0, str(ROOT / "utils"))
 from clip_ledger import LEDGER_NAME  # noqa: E402
 from nemo_manifest import clip_key, resolve_audio  # noqa: E402
+from number_swaps import swaps  # noqa: E402
+from voice_assignment import NUMBER_LADDER_FR_V2  # noqa: E402
 from script_module import load_script  # noqa: E402
 
 CATEGORIES = ("PARHAF", "PARROT", "acronyms", "dictionary", "drugs")
@@ -102,6 +114,9 @@ def reasons_of(rec: dict, audio_drops) -> list[str]:
     []
     >>> reasons_of({**base, "flags": ["acoustic:loop", "parakeet:cer", "text:number"]}, ())
     ['loop', 'number']
+    >>> heard = lambda t, p: {**base, "text": "75 ans", "judges": {"turbo": {"text": t}, "parakeet": {"text": p}}}
+    >>> reasons_of(heard("75 ans", "65 ans"), ()), reasons_of(heard("75 ans", "75 ans"), ())
+    (['number'], [])
     >>> reasons_of({**base, "judges": {"turbo": {"window": 0.2}, "parakeet": {"window": 0.13}}}, ())
     ['window']
     >>> reasons_of({**base, "judges": {"turbo": {"window": 0.2}, "parakeet": {"window": 0.05}}}, ())
@@ -120,11 +135,13 @@ def reasons_of(rec: dict, audio_drops) -> list[str]:
     if not rel["splits"] and not audio_drop:
         return []  # unreleased, or dropped for its text: a redraw changes nothing
     judges = rec.get("judges") or {}
+    heard = [(judges.get(j) or {}).get("text") for j in ("turbo", "parakeet")]
+    label = rec.get("text") or ""
     windows = [(judges.get(j) or {}).get("window") for j in ("turbo", "parakeet")]
     fired = {
         "loop": "acoustic:loop" in flags and (any(f.startswith("parakeet:") for f in flags)
                                               or any(f in flags for f in PARAKEET_OVER)),
-        "number": "text:number" in flags,
+        "number": "text:number" in flags or any(h and swaps(label, h) for h in heard),
         "inserted": "text:inserted" in flags,
         "window": all(w is not None and w >= WINDOW_BOTH for w in windows),
         "asr": bool(flags & {"text:preamble", "text:repeated"}),
@@ -151,22 +168,23 @@ def read_queue(data: Path, audio_drops, only: set[str]) -> dict[str, list[str]]:
 
 
 def number_voice(mod, row: dict, audio_path: Path) -> dict:
-    """The marker fields that make a number clip skip the `h_itf_*` rung.
+    """The marker fields of the number voice rule (module docstring).
 
-    Rung 0 of the ladder is the itf pair, so claiming it spent (`voice_tier=1`) makes
-    every later escalation start at the fr pair. A clip read by an itf voice right now
-    is swapped at once, through the stage's own `swap_voice_for`.
+    Rung 0 of the stage ladder is the itf pair, so claiming it spent (`voice_tier=1`)
+    makes every later escalation start at the fr pair. A clip read by an itf voice right
+    now is also swapped at once to a `NUMBER_LADDER_FR_V2` hybrid, through the stage's
+    own `swap_voice_for`; that ladder has one rung, so the tier it returns is 1 as well.
     """
     imp = row.get("improvement") or {}
     tier = max(int(imp.get("voice_tier") or 0), 1)
     if not (mod.voice_for_redraw(row) or "").startswith(ITF_PREFIX):
         return {"voice_tier": tier}
-    probe = {**row, "improvement": {**imp, "voice_tier": tier}}
-    nxt = mod.swap_voice_for(probe, audio_path, SimpleNamespace(voice_swap=True, term_voices={}))
+    probe = {**row, "improvement": {**imp, "voice_tier": 0}}
+    nxt = mod.swap_voice_for(probe, audio_path, SimpleNamespace(voice_swap=True, term_voices={}),
+                             ladder=NUMBER_LADDER_FR_V2)
     if nxt is None:
         return {"voice_tier": tier}
-    voice, rung = nxt
-    return {"swap_voice": voice, "voice_tier": rung}
+    return {"swap_voice": nxt[0], "voice_tier": tier}
 
 
 def new_tally() -> SimpleNamespace:
