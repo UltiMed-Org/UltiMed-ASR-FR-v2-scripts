@@ -607,8 +607,8 @@ def _swap_roster(audio_dir: str) -> tuple[tuple[str, ...], str] | None:
     return roster, mode
 
 
-def swap_voice_for(row: dict, audio_path: Path,
-                   cfg: SimpleNamespace) -> tuple[str, int] | None:
+def swap_voice_for(row: dict, audio_path: Path, cfg: SimpleNamespace,
+                   ladder: tuple[tuple[str, ...], ...] | None = None) -> tuple[str, int] | None:
     """``(voice, rungs_used)`` for one more round of draws of a clip every draw failed,
     or None when the clip has run out of voices.
 
@@ -646,6 +646,10 @@ def swap_voice_for(row: dict, audio_path: Path,
     corpus than a document changing reader once, so the rule is now about keeping that
     change as small as possible rather than forbidding it.
 
+    ``ladder`` replaces `VOICE_LADDER_FR_V2` for one call. Only
+    `16_reopen_from_ledger.py` passes one, `NUMBER_LADDER_FR_V2`, to hand a wrong-number
+    clip a hybrid that is not an `h_itf_*` voice while keeping this function's keying.
+
     `cfg.term_voices` (harvested in `make_hooks`) is still honoured as a preference, so
     a rung prefers the voice not already reading the same term when it can afford to.
     """
@@ -667,7 +671,8 @@ def swap_voice_for(row: dict, audio_path: Path,
     key = str(row.get("group_id") or audio_path.stem) if mode == "group" \
         else audio_path.stem
     avoid = (getattr(cfg, "term_voices", None) or {}).get(row.get("group_id")) or ()
-    voice = _voices.ladder_voice(key, rung, roster=voices, avoid=avoid,
+    voice = _voices.ladder_voice(key, rung, ladder=ladder or _voices.VOICE_LADDER_FR_V2,
+                                 roster=voices, avoid=avoid,
                                  tried=(current, imp.get("swap_voice")))
     return None if voice is None else (voice, rung + 1)
 

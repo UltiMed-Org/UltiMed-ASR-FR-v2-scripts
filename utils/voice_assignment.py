@@ -160,6 +160,21 @@ VOICE_LADDER_FR_V2: tuple[tuple[str, ...], ...] = (
     ("fr_male", "fr_female"),     # rung 2: the shipped bases, last resort
 )
 
+#: The first voice a clip with a WRONG NUMBER gets when its own voice is an `h_itf_*`
+#: one: any hybrid but those two, so the repair keeps the accent spread. A one-rung
+#: ladder for `ladder_voice` (via `01_recursive_improvement.swap_voice_for(ladder=...)`);
+#: a clip it cannot fix then escalates on `VOICE_LADDER_FR_V2` from rung 2, the fr pair.
+#:
+#: Measured 2026-10-28 on the shipped corpus, clips whose label holds a 70-79 or 90-99
+#: number (the French "soixante-quinze" family), share where turbo AND parakeet both
+#: heard the same wrong number: h_itf_def 25.7 pct (n=6,446), h_itf_arm 12.9 (6,407),
+#: these five 0.34 to 0.69 (5,455-5,925 each), fr_male 0.16 (6,188), fr_female 0.07
+#: (5,974). So the two itf voices carry an accent error, not seed noise, and the
+#: other hybrids sit far closer to the fr pair than to them.
+NUMBER_LADDER_FR_V2: tuple[tuple[str, ...], ...] = (
+    ("h_frf_esm", "h_frf_itm", "h_frf_ptm", "h_frm_nlf", "h_frm_ptf"),
+)
+
 # How to turn a row into the thing that gets hashed. "group" keys on the group alone,
 # "row" gives every clip its own draw. v2 uses BOTH, one per stage, because the group
 # means two different things depending on the stage: for 01_dictionnary, 02_drugs and
