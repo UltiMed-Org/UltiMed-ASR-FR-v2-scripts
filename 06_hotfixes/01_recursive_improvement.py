@@ -338,6 +338,7 @@ from cfg_sidecar import (  # noqa: E402
 # tell it: the roster a directory of audio was generated with, and which OTHER voice to
 # hand a clip whose own voice could not read it (see `swap_voice_for`).
 import voice_assignment as _voices  # noqa: E402
+from number_swaps import swaps as _number_swaps  # noqa: E402
 # The per-round history (`improved/rounds.jsonl`) and its report. Format, reader and
 # renderer live in one module so `--report` cannot drift from what the passes append,
 # and so a future stage can append to the same ledger without redefining it.
@@ -427,16 +428,29 @@ class Scores(NamedTuple):
     window: float | None = None
     bad_run: int | None = None
     repeat: int | None = None
+    #: How many label numbers the judge heard as ANOTHER number ("75 ans" read "65 ans",
+    #: `utils/number_swaps.py`). Two characters out of hundreds, so no CER gate sees it.
+    numbers: int | None = None
+
+
+def best_number_swaps(transcript: str | None, source: str | None,
+                      target: str | None) -> int | None:
+    """``best_cer``'s treatment of the number check: the fewer swaps either reference
+    explains, so a number spelled differently in the source is not a defect."""
+    counts = [len(_number_swaps(ref, transcript)) for ref in (source, target) if ref]
+    return min(counts) if transcript and counts else None
 
 
 def score_reading(
     transcript: str | None, source: str | None, target: str | None, duration: float | None
 ) -> Scores:
-    """All four scores of one reading, each against whichever reference reads it best."""
+    """Every score one reading can produce, each against whichever reference reads it
+    best (``repeat`` is not one: see ``scores_from_reading``)."""
     window, bad_run = best_window_metrics(transcript, source, target)
     return Scores(cer=best_cer(transcript, source, target),
                   tail=best_tail_cer(transcript, source, target, duration),
-                  window=window, bad_run=bad_run)
+                  window=window, bad_run=bad_run,
+                  numbers=best_number_swaps(transcript, source, target))
 
 
 def scores_from_state(state: dict) -> Scores:
@@ -728,7 +742,7 @@ def reopened_statuses(cfg: SimpleNamespace) -> tuple[str, ...]:
 
 
 def is_bad(scores: Scores, cfg: SimpleNamespace) -> bool:
-    """Whether a reading fails quality: ANY of the five gates. The whole clip is off
+    """Whether a reading fails quality: ANY of its gates. The whole clip is off
     (``cer >= --cer-threshold``), or only its ending is (``tail >=
     --tail-cer-threshold``), or only one stretch of it is (``window >=
     --window-cer-threshold``), or a contiguous span of the reference went unsaid
@@ -748,14 +762,26 @@ def is_bad(scores: Scores, cfg: SimpleNamespace) -> bool:
     ``repeat_excess`` sees them (measured 2026-10-27, rx=0 on 95.1% of promotions turbo
     called clean but on only 7.9% of the ones both other judges reject). And the gate is
     a count whose scale depends on the judge, so making it mandatory would silently
-    re-judge every pass that was tuned without it."""
+    re-judge every pass that was tuned without it.
+
+    The sixth, ``numbers >= cfg.number_threshold``, is off the same way and for a related
+    reason: one judge alone mishears a number on ~1.5% of clean clips (9,198 of the
+    601,837 released ones for turbo, against 5,291 where turbo AND parakeet hear the same
+    wrong number, 2026-10-28). Inside a repair round that is cheap, a false reject costs
+    one more draw, so a round redrawing the wrong-number clips sets it to 1 and a draw
+    that still says "65" for "75" is not promoted. Turned on corpus-wide it would queue
+    those ~3,900 turbo-only clips too, so it stays a round's choice.
+    """
     repeat_gate = getattr(cfg, "repeat_threshold", 0)
+    number_gate = getattr(cfg, "number_threshold", 0)
     return ((scores.cer is not None and scores.cer >= cfg.cer_threshold)
             or (scores.tail is not None and scores.tail >= cfg.tail_cer_threshold)
             or (scores.window is not None and scores.window >= cfg.window_cer_threshold)
             or (scores.bad_run is not None and scores.bad_run >= cfg.bad_run_threshold)
             or (repeat_gate > 0 and scores.repeat is not None
-                and scores.repeat >= repeat_gate))
+                and scores.repeat >= repeat_gate)
+            or (number_gate > 0 and scores.numbers is not None
+                and scores.numbers >= number_gate))
 
 
 def _fmt_scores(scores: Scores) -> str:
@@ -767,7 +793,8 @@ def _fmt_scores(scores: Scores) -> str:
             + (f" tail={scores.tail:.3f}" if scores.tail is not None else "")
             + (f" window={scores.window:.3f}" if scores.window is not None else "")
             + (f" bad_run={scores.bad_run}" if scores.bad_run else "")
-            + (f" repeat={scores.repeat}" if scores.repeat else ""))
+            + (f" repeat={scores.repeat}" if scores.repeat else "")
+            + (f" numbers={scores.numbers}" if scores.numbers else ""))
 
 
 def _dur_s(dur: float | None) -> str:
@@ -1249,6 +1276,8 @@ def run_regeneration(
         f"tail {cfg.tail_cer_threshold} / window {cfg.window_cer_threshold} / "
         f"bad_run {cfg.bad_run_threshold}"
         + (f" / repeat {cfg.repeat_threshold}" if getattr(cfg, "repeat_threshold", 0) > 0
+           else "")
+        + (f" / numbers {cfg.number_threshold}" if getattr(cfg, "number_threshold", 0) > 0
            else "")
         + f"), up to {cfg.n_improv} attempt(s)"
     )
@@ -2157,6 +2186,7 @@ _DEFAULT_GATES = SimpleNamespace(
     # and counting them by a gate no round applied would make `count_pending` disagree
     # with the round that produced the file.
     repeat_threshold=0,
+    number_threshold=0,
 )
 
 
@@ -2276,6 +2306,7 @@ def record_round(out_file: Path, snap: Snapshot, stats: dict, cfg: SimpleNamespa
         "gates": {"cer": cfg.cer_threshold, "tail": cfg.tail_cer_threshold,
                   "window": cfg.window_cer_threshold, "bad_run": cfg.bad_run_threshold,
                   "repeat": getattr(cfg, "repeat_threshold", 0),
+                  "numbers": getattr(cfg, "number_threshold", 0),
                   "min_improvement": cfg.min_improvement},
         "n_improv": cfg.n_improv,
         "rescore_only": bool(cfg.rescore_only),
@@ -2626,7 +2657,11 @@ def make_hooks(cfg: SimpleNamespace, model_key: str, input_file: Path,
                 and (ref_len > _stt.WINDOW_CHARS
                      or ref_len * cfg.cer_threshold > cfg.bad_run_threshold)):
             window, bad_run = best_window_metrics(text, source, target)
-        return is_bad(Scores(cer, tail, window, bad_run), cfg)
+        # No reading stores the number check, and it is a token diff (well under the
+        # window scores' cost), so it is derived, but only when its gate is on.
+        numbers = (best_number_swaps(text, source, target)
+                   if getattr(cfg, "number_threshold", 0) > 0 else None)
+        return is_bad(Scores(cer, tail, window, bad_run, numbers=numbers), cfg)
 
     # {group_id: {voice, ...}} for the voice swap, or None when no swap can happen
     # anyway (--no-voice-swap, or a caller whose namespace predates the option): then
@@ -2765,6 +2800,14 @@ def _print_report(ctx, _param, value):
                    "parakeet readings. Set it when the judge is parakeet: 4 is the "
                    "measured separation on the v2 corpus (rx=0 on 99.5% of clips, >=4 on "
                    "1,391 of 602,710, i.e. 0.23%), 1 is the live QC's gate.")
+@click.option("--number-threshold", default=0, type=int,
+              help="A clip is also 'bad' when the judge hears this many label numbers as "
+                   "ANOTHER number (`utils/number_swaps.py`: '75 ans' read '65 ans'). OFF "
+                   "by default (0): one judge alone mishears a number on ~1.5% of clean "
+                   "clips, which a repair round can afford (a false reject is one more "
+                   "draw) but a corpus-wide sweep should not queue. Set 1 for a round "
+                   "redrawing the clips both judges heard a wrong number on, so a draw "
+                   "still saying the wrong number is not promoted.")
 @click.option("--min-improvement", default=0.02, type=float, help="When no draw reaches --cer-threshold, keep the lowest-CER draw only if it beats the original CER by at least this. A draw below the threshold is always kept. Non-zero matters once the gate is low: a clip flagged at 0.09 whose best draw lands at 0.088 was not repaired, it was fitted to the judge, and a clean clip's CER moves that much on Whisper's own spelling choices. Pass 0 to accept any gain.")
 @click.option("--length-tol", default=0.15, type=float, help="Among candidate draws, prefer one no more than this fraction longer than the low median of the draws that pass every gate, ahead of CER (see length_rank_of). All the draws speak the same sentence, so only speaking-rate jitter (small, symmetric) or a repeat (large, one-sided) can move their length, and no CER gate can see a repeat. Measured on the T4 round of 2026-10-27 against voice- and length-matched controls: redraws that came back shorter read +1.3 pct chars/second, ones that came back longer -11.2 pct with 47 pct carrying a loop-sized deficit. It is a preference, never a veto: is_bad still sorts first, so a draw that stops early cannot win by being short, and the same-text duration ratios form one smooth mode (p50 1.12, p90 1.32) with no gap to put a hard threshold in. Negative disables it.")
 @click.option("--start-seed", default=43, type=int, help="First seed; each attempt uses start-seed + attempt. Always sent (Voxtral respects the request seed).")
@@ -2839,7 +2882,8 @@ def main(
     stt_temperature, stt_recheck_temperature, stt_language, stt_response_format, stt_params,
     stt_timeout, stt_max_retries, tts_url, tts_voice, tts_speed, tts_model, tts_format, tts_timeout,
     tts_max_retries, max_audio_seconds, mode, n_improv, cer_threshold, tail_cer_threshold,
-    window_cer_threshold, bad_run_threshold, repeat_threshold, min_improvement,
+    window_cer_threshold, bad_run_threshold, repeat_threshold, number_threshold,
+    min_improvement,
     length_tol, start_seed, speed_jitter,
     cfg_alpha_start, cfg_alpha_step, cfg_alpha_floor, original_cfg_alpha,
     auto_token_budget, code_dump_dir, store_semantic_codes, voice_swap, refresh_duration,
@@ -2873,7 +2917,7 @@ def main(
         max_audio_seconds=max_audio_seconds,
         tts_max_retries=tts_max_retries, mode=mode,
         n_improv=n_improv, cer_threshold=cer_threshold,
-        repeat_threshold=repeat_threshold,
+        repeat_threshold=repeat_threshold, number_threshold=number_threshold,
         # A negative threshold disables that one gate (inf never compares true), which
         # is how a sweep isolates a single gate without touching the other three.
         tail_cer_threshold=(float("inf") if tail_cer_threshold < 0 else tail_cer_threshold),
