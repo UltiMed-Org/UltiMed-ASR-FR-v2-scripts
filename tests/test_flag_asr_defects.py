@@ -114,8 +114,37 @@ def test_a_repeat_both_recognizers_hear_is_flagged() -> None:
     print("test_a_repeat_both_recognizers_hear_is_flagged: OK")
 
 
+def test_number_and_inserted_are_reported_not_dropped() -> None:
+    """`number` / `inserted` fire when asked for, and stay out of the drop list.
+
+    Their labels are fine and a redraw usually fixes the take, so on by default would
+    DROP thousands of clips (5,291 number hits on 2026-10-28) a repair round can save.
+    """
+    mod = _load()
+    for reason in (mod.NUMBER, mod.INSERTED):
+        assert reason not in mod.DEFAULT_REASONS, mod.DEFAULT_REASONS
+    label = "Patiente de 75 ans, revue à 3 mois."
+    heard = "Patiente de 65 ans, revue à 3 mois."
+    assert mod.find_defect(label, heard, heard, mod.REASONS) == (mod.NUMBER, "75 -> 65")
+    assert mod.find_defect(label, heard, heard, mod.DEFAULT_REASONS) is None
+    # One recognizer alone hearing 65 is not enough.
+    assert mod.find_defect(label, heard, label, mod.REASONS) is None
+    # 034548: a mutated repeat, which `repeated` cannot see (its pairs are not the label's).
+    label = "La calcémie est normale, la magnésémie est normale."
+    loop_a = "La calcémie est normale, la falcémie est normale, la magnésémie est normale."
+    loop_b = loop_a.replace("falcémie", "palissémie")
+    assert mod.find_defect(label, loop_a, loop_b, (mod.REPEATED,)) is None
+    assert mod.find_defect(label, loop_a, loop_b, mod.REASONS)[0] == mod.INSERTED
+    # A compound split into pieces adds words, not sounds.
+    label = "Scanner thoraco-abdomino-pelvien sans particularité."
+    split = "Scanner thoraco abdo mino pel vien sans particularité."
+    assert mod.find_defect(label, split, split, mod.REASONS) is None
+    print("test_number_and_inserted_are_reported_not_dropped: OK")
+
+
 if __name__ == "__main__":
     test_find_defect()
     test_load_hyps_accepts_both_shapes()
     test_default_reasons_exclude_skipped()
     test_a_repeat_both_recognizers_hear_is_flagged()
+    test_number_and_inserted_are_reported_not_dropped()

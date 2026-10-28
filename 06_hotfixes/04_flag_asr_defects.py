@@ -123,6 +123,27 @@ clips, and of 40 read side by side nearly all were real (the date range said twi
 the dominant family, then a dose or a finding said twice). Dropped, not redrawn, for the
 reason given above for ``preamble``; the audio stays on disk.
 
+**The number and inserted rules (2026-10-28), redrawn rather than dropped.** Two more
+defects both recognizers hear, found when listening to clips the gates had passed:
+
+  * ``number``: a label number both recognizers hear as the same OTHER number ("75 ans"
+    said "soixante-cinq", "50 giga" said "cinq"). The comparison and its guards against
+    formatting and alignment drift live in ``utils/number_swaps.py``, shared with the
+    repair pass's number gate. 5,291 released clips, 2,643 of them h_itf_def and 1,404
+    h_itf_arm; of 30 non-teen hits read in context nearly all were real TTS errors.
+  * ``inserted``: a stretch of at least ``MIN_INSERTED_WORDS`` words carrying at least
+    ``MIN_INSERTED_LETTERS`` letters more than what it replaced, heard by both at the
+    same label position and sharing a content word. It catches the mutated repeat
+    ``repeated`` cannot ("la calcémie est normale, la falcémie est normale, la
+    magnésémie...", clip ``034548_0000_neurologie_00199_t0_c5``: the extra clause's
+    word pairs are not the label's) and hallucinated additions ("importé du Cameroun du
+    Cameroun"). 102 released clips; without the letter bar it was 366, mostly a
+    recognizer splitting one compound into several words.
+
+Both are OFF in ``DEFAULT_REASONS`` because this file's output DROPS clips, while these
+labels are fine and a fresh draw usually says them right. ``utils/clip_ledger.py`` reports
+them per clip (``text:number``, ``text:inserted``) for a repair round to queue.
+
 Both texts are compared after lowercasing and dropping punctuation, like the NeMo
 normalizer, which is enough since only whole missing or extra words matter here.
 
@@ -149,6 +170,7 @@ from loguru import logger
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent / "utils"))
 from nemo_manifest import clip_key, read_jsonl, resolve_audio  # noqa: E402
+from number_swaps import agreed_swaps  # noqa: E402
 
 DEFAULT_OUT = _HERE.parent / "99_hf_release" / "asr_flagged_clips.jsonl"
 #: The judge whose readings `--judge-key` picks out of a state file: the parakeet sweep,
@@ -157,14 +179,25 @@ DEFAULT_JUDGE_KEY = "onnx-asr/parakeet-tdt-0.6b-v3-ultra"
 PREAMBLE = "preamble"
 SKIPPED = "skipped"
 REPEATED = "repeated"
+NUMBER = "number"
+INSERTED = "inserted"
 #: Which rules `--reason` may ask for, and which it asks for by default. `skipped` is OFF
-#: by default: see "The 2026-10-26 measurement" in the module docstring.
-REASONS = (PREAMBLE, SKIPPED, REPEATED)
+#: by default: see "The 2026-10-26 measurement" in the module docstring. `number` and
+#: `inserted` are off too, for the opposite reason: their clips are worth REDRAWING (the
+#: label is fine, the take is not, and a fresh draw usually says it right), and this
+#: file's output drops clips. `utils/clip_ledger.py` reports them so a repair round can
+#: queue them; see "The number and inserted rules" in the module docstring.
+REASONS = (PREAMBLE, SKIPPED, REPEATED, NUMBER, INSERTED)
 DEFAULT_REASONS = (PREAMBLE, REPEATED)
 MIN_PREAMBLE_WORDS = 2
 MIN_SKIPPED_WORDS = 3
 MIN_REPEATED_WORDS = 4
 REPEATED_PAIR_SHARE = 0.75
+MIN_INSERTED_WORDS = 3
+#: Letters the inserted stretch must carry BEYOND what it replaced. Without it the rule
+#: fires on a recognizer splitting one compound into several words
+#: ("tomodensitométrique" -> "tomo dencytométrique"): more words, the same sounds.
+MIN_INSERTED_LETTERS = 12
 _PUNCT = re.compile(r"[^\w\s']")
 
 
@@ -223,6 +256,41 @@ def _said_again(ref: list[str], hyp: list[str]) -> str | None:
     return None
 
 
+def _insertions(ref: list[str], hyp: list[str]) -> list[tuple[int, str, set[str]]]:
+    """Stretches `hyp` says beyond `ref`: ``(label index, words, content words)``.
+
+    >>> [(i, text, sorted(c)) for i, text, c in _insertions(
+    ...     words("la calcémie est normale, la magnésémie aussi"),
+    ...     words("la calcémie est normale la palcémie est normale la magnésémie aussi"))]
+    [(5, 'palcémie est normale la', ['est', 'normale', 'palcémie'])]
+    >>> _insertions(words("tomodensitométrique cervico thoracique"),
+    ...             words("tomo dencytométrique cervico thoracique"))
+    []
+    """
+    ops = difflib.SequenceMatcher(a=ref, b=hyp, autojunk=False).get_opcodes()
+    out = []
+    for i1, i2, j1, j2 in _merged_diffs(ops):
+        extra = hyp[j1:j2]
+        if ((j2 - j1) - (i2 - i1) < MIN_INSERTED_WORDS
+                or len("".join(extra)) - len("".join(ref[i1:i2])) < MIN_INSERTED_LETTERS):
+            continue
+        content = {w for w in extra if _is_content(w)}
+        if len(content) >= 2:
+            out.append((i1, " ".join(extra), content))
+    return out
+
+
+def _inserted_by_both(ref: list[str], hyp: list[str], stt: list[str]) -> str | None:
+    """An insertion both recognizers hear at the same label position (two words of
+    slack), sharing a content word, so it is the same extra audio and not two unrelated
+    recognition errors."""
+    theirs = _insertions(ref, stt)
+    for i, text, content in _insertions(ref, hyp):
+        if any(abs(i - k) <= 2 and content & c for k, _t, c in theirs):
+            return text
+    return None
+
+
 def find_defect(label: str, hyp: str, stt: str | None,
                 reasons: Collection[str] = REASONS) -> tuple[str, str] | None:
     """Return ``(reason, offending words)`` for a defective clip, else ``None``.
@@ -248,6 +316,14 @@ def find_defect(label: str, hyp: str, stt: str | None,
     ('repeated', 'au 16 août 2024')
     >>> find_defect("du 14 août 2024 au 16 août 2024. Le motif", "du 14 août 2024 au 16 août 2024 au 16 août 2024 le motif", "du 14 août 2024 au 16 août 2024. Le motif") is None
     True
+    >>> find_defect("Patiente de 75 ans.", "Patiente de 65 ans.", "patiente de 65 ans")
+    ('number', '75 -> 65')
+    >>> find_defect("Patiente de 75 ans.", "Patiente de 65 ans.", "patiente de 75 ans") is None
+    True
+    >>> calc = "la calcémie est normale, la magnésémie est normale"
+    >>> looped = "la calcémie est normale la falcémie est normale la magnésémie est normale"
+    >>> find_defect(calc, looped, looped.replace("falcémie", "palcémie"))
+    ('inserted', 'est normale la falcémie')
     """
     ref, h = words(label), words(hyp)
     ops = difflib.SequenceMatcher(a=ref, b=h, autojunk=False).get_opcodes()
@@ -261,6 +337,10 @@ def find_defect(label: str, hyp: str, stt: str | None,
     # Whisper must hear the repeat too: one recognizer alone can be a recognition error.
     if REPEATED in reasons and (again := _said_again(ref, h)) and _said_again(ref, words(stt)):
         return REPEATED, again
+    if NUMBER in reasons and (swapped := agreed_swaps(label, hyp, stt)):
+        return NUMBER, ", ".join(f"{a} -> {b}" for a, b in swapped)
+    if INSERTED in reasons and (extra := _inserted_by_both(ref, h, words(stt))):
+        return INSERTED, extra
     if SKIPPED not in reasons:
         return None
     # Label word indices Whisper's transcript does match.
@@ -360,9 +440,8 @@ def main(hyps: Path, manifests: tuple[Path, ...], out: Path, judge_key: str,
                                 "text": row["text"], "hyp": hyp_by_key[key]}
     logger.info(f"rules: {', '.join(reasons)}")
     logger.info(f"checked {n_checked} clips ({len(hyp_by_key)} hypotheses), flagged {len(flagged)}: "
-                f"{sum(f['reason'] == PREAMBLE for f in flagged.values())} {PREAMBLE}, "
-                f"{sum(f['reason'] == SKIPPED for f in flagged.values())} {SKIPPED}, "
-                f"{sum(f['reason'] == REPEATED for f in flagged.values())} {REPEATED}")
+                + ", ".join(f"{sum(f['reason'] == r for f in flagged.values())} {r}"
+                            for r in REASONS))
     with out.open("w") as f:
         for key in sorted(flagged):
             f.write(json.dumps(flagged[key], ensure_ascii=False) + "\n")
