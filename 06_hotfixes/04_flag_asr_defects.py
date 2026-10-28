@@ -161,7 +161,7 @@ import difflib
 import json
 import re
 import sys
-from collections.abc import Collection
+from collections.abc import Collection, Iterator
 from pathlib import Path
 
 import click
@@ -325,24 +325,38 @@ def find_defect(label: str, hyp: str, stt: str | None,
     >>> find_defect(calc, looped, looped.replace("falcémie", "palcémie"))
     ('inserted', 'est normale la falcémie')
     """
+    return next(defects(label, hyp, stt, reasons), None)
+
+
+def defects(label: str, hyp: str, stt: str | None,
+            reasons: Collection[str] = REASONS) -> Iterator[tuple[str, str]]:
+    """Every ``(reason, offending words)`` that fires, in `REASONS` order.
+
+    `find_defect` takes the first, which is all a drop list needs; `utils/clip_ledger.py`
+    wants them all, since a clip can both loop and say a wrong number.
+
+    >>> list(defects("Âgé de 75 ans, calme.", "Euh bon. Âgé de 65 ans calme.",
+    ...              "âgé de 65 ans, calme"))
+    [('preamble', 'euh bon'), ('number', '75 -> 65')]
+    """
     ref, h = words(label), words(hyp)
     ops = difflib.SequenceMatcher(a=ref, b=h, autojunk=False).get_opcodes()
     tag, i1, i2, j1, j2 = ops[0]
     # A pure insertion only: a "replace" at the start is usually the model splitting the
     # label's first word ("Suvreza" -> "Essus UV réza"), not extra audio.
     if PREAMBLE in reasons and tag == "insert" and j2 - j1 >= MIN_PREAMBLE_WORDS:
-        return PREAMBLE, " ".join(h[j1:j2])
+        yield PREAMBLE, " ".join(h[j1:j2])
     if not stt:
-        return None
+        return
     # Whisper must hear the repeat too: one recognizer alone can be a recognition error.
     if REPEATED in reasons and (again := _said_again(ref, h)) and _said_again(ref, words(stt)):
-        return REPEATED, again
+        yield REPEATED, again
     if NUMBER in reasons and (swapped := agreed_swaps(label, hyp, stt)):
-        return NUMBER, ", ".join(f"{a} -> {b}" for a, b in swapped)
+        yield NUMBER, ", ".join(f"{a} -> {b}" for a, b in swapped)
     if INSERTED in reasons and (extra := _inserted_by_both(ref, h, words(stt))):
-        return INSERTED, extra
+        yield INSERTED, extra
     if SKIPPED not in reasons:
-        return None
+        return
     # Label word indices Whisper's transcript does match.
     s_ops = difflib.SequenceMatcher(a=ref, b=words(stt), autojunk=False).get_opcodes()
     heard_by_whisper = {i for t, a1, a2, _, _ in s_ops if t == "equal" for i in range(a1, a2)}
@@ -358,8 +372,10 @@ def find_defect(label: str, hyp: str, stt: str | None,
         glued = len("".join(h[j1:j2])) > len("".join(ref[i1:i2])) / 2
         if len(span) >= MIN_SKIPPED_WORDS and not glued:
             if sum(i in heard_by_whisper for i in span) < len(span) / 2:
-                return SKIPPED, " ".join(ref[i1:i2])
-    return None
+                # One skip is enough to condemn the clip, and the spans after it
+                # are the same alignment's leftovers, not news.
+                yield SKIPPED, " ".join(ref[i1:i2])
+                return
 
 
 def load_hyps(path: Path, judge_key: str = DEFAULT_JUDGE_KEY) -> dict[str, str]:
