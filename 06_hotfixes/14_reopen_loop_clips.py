@@ -108,6 +108,8 @@ DEFAULT_REPEAT_GATE = 4
 #: Statuses a clip may be reopened FROM. `pending_tts` and `pending_stt` are already
 #: queued, so re-marking them would reset nothing and only reshuffle their marker.
 REOPENABLE = ("improved", "exhausted", "unflagged", "deterministic", None, "")
+# A clip a human listened to and kept (`18_manual_pass.py`): no judge's flag reopens it.
+MANUAL_PASS = "manual_pass"
 
 
 def _load_pass():
@@ -198,7 +200,9 @@ def process(state: Path, mod, select, apply: bool, counts: Counter, by_voice: Co
                 scores = select(row)
                 if scores is not None:
                     status = (row.get("improvement") or {}).get("status")
-                    if status in REOPENABLE:
+                    if (row.get("improvement") or {}).get(MANUAL_PASS):
+                        counts["left::manual_pass"] += 1
+                    elif status in REOPENABLE:
                         counts["reopened"] += 1
                         counts[f"from::{status or 'no marker'}"] += 1
                         mark(row, scores)

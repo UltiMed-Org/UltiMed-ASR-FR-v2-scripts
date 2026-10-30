@@ -92,10 +92,16 @@ def rewrite_stage(path: Path, apply: bool) -> int:
 
 
 def reopen_hgvs(state: Path, reopen, mod, apply: bool, counts: Counter) -> list[str]:
-    """Rewrite one state file's texts and mark the rows whose source changed."""
-    return reopen.process(
-        state, mod, lambda row: mod.Scores() if rewrite_fields(row, STATE_FIELDS) else None,
-        apply, counts, Counter(), Counter())
+    """Rewrite one state file's texts and mark the rows whose source changed.
+
+    A manual pass is lifted from a changed row: the take that was listened to says the
+    old operator, so it no longer matches the label."""
+    def select(row):
+        if not rewrite_fields(row, STATE_FIELDS):
+            return None
+        (row.get("improvement") or {}).pop(reopen.MANUAL_PASS, None)
+        return mod.Scores()
+    return reopen.process(state, mod, select, apply, counts, Counter(), Counter())
 
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
