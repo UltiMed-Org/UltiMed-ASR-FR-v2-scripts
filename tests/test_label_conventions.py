@@ -471,21 +471,21 @@ def test_latin_names() -> None:
 
 
 def test_hgvs() -> None:
-    # Every operator spelling found in the v2 labels (2026-10-30), and look-alikes that
-    # are not a substitution: a protein change, an HbA1c, a date.
+    # The comparison spellings of ">" become "vers"; the correct French ones stay, and so
+    # do look-alikes that are not a substitution (a protein change, an HbA1c, a date).
     check(normalize_hgvs, [
         ("mutation homozygote c.1163C supérieur à T", "mutation homozygote c.1163C vers T"),
-        ("c.524G en A et c.646G vers A", "c.524G vers A et c.646G vers A"),
         ("c.877-2A plus grand que G, pathogène", "c.877-2A vers G, pathogène"),
         ("c.1146A majuscule G et c.1277A majuscule vers G", "c.1146A vers G et c.1277A vers G"),
-        ("c.1234C substitué en T, c.1025C substitué par T", "c.1234C vers T, c.1025C vers T"),
-        ("c.893T remplacée par C, c.452G remplacé par A", "c.893T vers C, c.452G vers A"),
+        ("c.1A majuscule à G", "c.1A vers G"),
         ("c.1331 plus 1 G supérieur à A", "c.1331 plus 1 G vers A"),
         ("c.-14C>T", "c.-14C vers T"),
+        ("c.524G en A, c.646G vers A", "c.524G en A, c.646G vers A"),
+        ("c.1234C substitué en T, c.893T remplacée par C", "c.1234C substitué en T, c.893T remplacée par C"),
         ("p.Arg388 vers His, HbA1c en A, c.12 en mai", "p.Arg388 vers His, HbA1c en A, c.12 en mai"),
     ])
-    assert apply_label_conventions("c.35G en T") == "c.35G vers T"
-    assert apply_label_conventions("c.35G en T", tts_source=True) == "c.35G vers T"
+    assert apply_label_conventions("c.35G supérieur à T") == "c.35G vers T"
+    assert apply_label_conventions("c.35G supérieur à T", tts_source=True) == "c.35G vers T"
     print("test_hgvs: OK")
 
 

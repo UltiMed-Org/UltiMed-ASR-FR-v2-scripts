@@ -62,7 +62,7 @@ def main() -> int:
         row("a", "mutation c.1163C supérieur à T.", {"status": "improved", "cer": 0.01}),
         row("b", "mutation c.1163C vers T."),
         row("c", "Pas de mutation."),
-        row("d", "c.35G en T.", {"status": "pending_tts", "cer": 0.2}),
+        row("d", "c.35G supérieur à T.", {"status": "pending_tts", "cer": 0.2}),
     ]
     with tempfile.TemporaryDirectory() as tmp:
         state = Path(tmp) / "full.stt.jsonl"
@@ -86,14 +86,14 @@ def main() -> int:
               and d["improvement"] == {"status": "pending_tts", "cer": 0.2}, d)
 
         stage = Path(tmp) / "generated_dataset.jsonl"
-        srow = {"term": "BRAF", "asr_training_target": "c.1799T en A",
-                "asr_training_source": "c.1799T en A", "other": "c.1799T en A"}
+        srow = {"term": "BRAF", "asr_training_target": "c.1799T supérieur à A",
+                "asr_training_source": "c.1799T supérieur à A", "other": "c.1799T supérieur à A"}
         stage.write_text(json.dumps(srow, ensure_ascii=False) + "\n" + json.dumps({"term": "x"}) + "\n")
         n = t17.rewrite_stage(stage, True)
         out = [json.loads(line) for line in stage.read_text().splitlines()]
         check("a stage file rewrites label and source only",
               n == 1 and out[0]["asr_training_target"] == out[0]["asr_training_source"] == "c.1799T vers A"
-              and out[0]["other"] == "c.1799T en A" and out[1] == {"term": "x"}, (n, out))
+              and out[0]["other"] == "c.1799T supérieur à A" and out[1] == {"term": "x"}, (n, out))
 
     print("FAILED" if failures else "all ok")
     return 1 if failures else 0

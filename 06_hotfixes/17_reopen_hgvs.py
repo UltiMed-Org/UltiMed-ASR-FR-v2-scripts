@@ -13,10 +13,10 @@
 """Rewrite HGVS substitutions to ``vers`` and queue their clips for redraw (2026-10-30).
 
 The LLM could not write ``c.1163C>T`` (``>`` is forbidden in a label, and the parakeet
-tokenizer has no such piece), so it spelt the operator seven ways: ``supérieur à``,
-``en``, ``plus grand que``, ``majuscule``, ``substitué en``, ``remplacé par``, ``vers``.
-``label_conventions.normalize_hgvs`` makes ``vers`` the one form; this script applies it
-to what already exists:
+tokenizer has no such piece), so it spelt the operator in words. Most are correct French
+(``en``, ``vers``, ``substitué en``, ``remplacé par``), three are not: ``supérieur à`` and
+``plus grand que`` (a comparison) and ``majuscule``. ``label_conventions.normalize_hgvs``
+rewrites those three to ``vers``; this script applies it to what already exists:
 
 * each stage's ``generated_dataset.jsonl`` (``asr_training_target`` and
   ``asr_training_source``), which the release rebuilds its manifests from;

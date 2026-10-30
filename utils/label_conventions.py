@@ -78,8 +78,9 @@ rewrites the minority spellings to it:
   rewrites this one is not spoken identically: the v1 audio is regenerated from the
   rewritten TTS source.
 - **HGVS substitutions** (``normalize_hgvs``, 2026-10-30). ``c.1163C supérieur à T``,
-  ``c.35G en T``, ``c.452G remplacé par A`` -> ``c.1163C vers T``: the parakeet
-  tokenizer has no ``>``, so ``vers`` is the one form, read as written. Like the generic
+  ``c.877-2A plus grand que G``, ``c.1146A majuscule G`` -> ``c.1163C vers T``: the
+  parakeet tokenizer has no ``>``, and a comparison is not what the notation says
+  (``en``, ``substitué en``, ``remplacé par`` are fine and stay). Like the generic
   labs this one is not spoken identically: the clips are redrawn.
 - **Spelling variants** (``normalize_spelling``). ``œ`` -> ``oe`` everywhere (``cœur`` ->
   ``coeur``), ``aigüe`` -> ``aiguë``, ``compte-rendu`` -> ``compte rendu``,
@@ -1094,25 +1095,26 @@ def normalize_latin_names(text: str) -> str:
 # HGVS substitutions
 # ---------------------------------------------------------------------------
 
-# ``c.1163C>T`` as the LLM spelt it, ``>`` being forbidden in a label: a position
-# (``c.1163``, ``c.877-2``, ``c.1331 plus 1``, ``c.-14``), the reference base, a
-# spelled operator, the new base. ``en`` and ``vers`` are the short ones, kept last so
-# the longer ``substitué en`` wins.
+# ``c.1163C>T`` with the ``>`` verbalised as a comparison: a position (``c.1163``,
+# ``c.877-2``, ``c.1331 plus 1``, ``c.-14``), the reference base, the operator, the new
+# base. Only the forms that say something else are rewritten: ``supérieur à`` / ``plus
+# grand que`` (the prompt's own ``>`` -> ``supérieur à`` rule, taken literally) and
+# ``majuscule`` (DeepSeek's dictation markup, in no prompt, definition or feedback).
+# ``en``, ``vers``, ``substitué en/par`` and ``remplacé par`` are correct French and stay.
 _HGVS_RE = re.compile(
     r"\b([cgmnr]\.-?[0-9]+(?:(?:\s*(?:\+|plus)\s*|[-*])[0-9]+)?\s*[ACGTU])"
-    r"(?:\s*>\s*|\s*(?:supérieure? à|plus grand que|majuscule(?:\s+vers)?|substituée?\s+(?:en|par)"
-    r"|remplacée?\s+par|en|vers)\s+)([ACGTU])\b")
+    r"(?:\s*>\s*|\s*(?:supérieure? à|plus grand que|majuscule(?:\s+(?:vers|à))?)\s+)([ACGTU])\b")
 
 
 def normalize_hgvs(text: str) -> str:
-    """One spoken operator for a nucleotide substitution: ``vers``, label and TTS source
-    alike (2026-10-30). The parakeet tokenizer has no ``>``, so ``c.1163C>T`` cannot be
-    the label; the client turns ``vers`` back into ``>`` with a regex. Not spoken
+    """``vers`` for a nucleotide substitution the LLM wrote as a comparison, label and TTS
+    source alike (2026-10-30). The parakeet tokenizer has no ``>``, so ``c.1163C>T``
+    cannot be the label; the client turns ``vers`` back into ``>`` with a regex. Not spoken
     identically, so a clip whose source changes needs its audio redrawn
     (``06_hotfixes/17_reopen_hgvs.py``). Idempotent.
 
-    >>> normalize_hgvs("mutation homozygote c.1163C supérieur à T, c.35G en T et c.1331 plus 1 G remplacé par A.")
-    'mutation homozygote c.1163C vers T, c.35G vers T et c.1331 plus 1 G vers A.'
+    >>> normalize_hgvs("mutation c.1163C supérieur à T, c.1146A majuscule G, c.35G en T.")
+    'mutation c.1163C vers T, c.1146A vers G, c.35G en T.'
     """
     return _HGVS_RE.sub(r"\1 vers \2", text)
 

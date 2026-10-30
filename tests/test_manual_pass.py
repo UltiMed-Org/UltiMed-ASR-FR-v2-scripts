@@ -55,7 +55,7 @@ def main() -> int:
     mod = reopen._load_pass()
     rows = [{"audio_filepath": f"../PARHAF/{s}.flac", "text": t, "asr_training_source": t,
              "improvement": {"status": "exhausted", "cer": 0.09, "seeds_spent": 12}}
-            for s, t in (("a", "Boucle entendue."), ("b", "Autre clip."), ("c", "c.35G en T."))]
+            for s, t in (("a", "Boucle entendue."), ("b", "Autre clip."), ("c", "c.35G supérieur à T."))]
     with tempfile.TemporaryDirectory() as tmp:
         state, ledger = Path(tmp) / "full.stt.jsonl", Path(tmp) / "dropped_clips.jsonl"
         state.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
