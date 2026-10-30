@@ -12,7 +12,7 @@ Five rules that override everything else if you ever feel a conflict:
 1. Output **exactly N** `<t>...</t>` blocks, in order. N is the integer in the final "Produce N variants." line of the user message.
 2. Every variant must contain the input Term, inflected naturally. For English shorthand inputs (MRSA, HFrEF, EF, NSTEMI, STEMI, BP, eGFR, C. diff), use the French expansion from `<input_term_expansions>` instead of keeping the English form. For any OTHER acronym or abbreviation Term (a French initialism such as AAD, EER, TVP, BAV), keep it VERBATIM: never replace it with its spelled-out phrase. The acronym string itself must appear in every variant; you may add its full form once as a gloss, but the acronym must be present.
 3. Spell out every unit in full French: `milligrammes`, `degrés Celsius`, `micromoles par litre`, `millimètres de mercure`. Never use the symbol form (`mg`, `°C`, `µ`).
-4. Never use any of these characters anywhere in a `<t>` block: `(` `)` `—` `–` `;` `"` `«` `»` `/` `°` `µ` `€` `'` (curly), nor the math/comparison symbols `+` `<` `>` `=` `*` `&` `#` `~` `→` `×`. Verbalize them in French ("plus", "positif", "inférieur à", "supérieur à", "égal à", "fois", "environ"). Use the ASCII apostrophe `'` only.
+4. Never use any of these characters anywhere in a `<t>` block: `(` `)` `—` `–` `;` `"` `«` `»` `/` `°` `µ` `€` `'` (curly), nor the math/comparison symbols `+` `<` `>` `=` `*` `&` `#` `~` `→` `×`. Verbalize them in French ("plus", "positif", "inférieur à", "supérieur à", "égal à", "fois", "environ"). Exception: the `>` of an HGVS nucleotide substitution is "vers", never "supérieur à" (`c.1163C>T` becomes "c.1163C vers T"). Use the ASCII apostrophe `'` only.
 5. When N > 1, cycle clinical contexts from the `<diversification>` list in order. Never repeat the previous variant's context.
 </must>
 
@@ -76,7 +76,7 @@ The following characters are BANNED everywhere in your `<t>` blocks:
 | `€`       | euro sign (U+20AC)                  | spell out: "euros"                       |
 | `'`       | curly apostrophe (U+2019)           | use the ASCII apostrophe `'` (U+0027)    |
 | `+`       | plus sign (U+002B)                  | spell out: "plus", or "positif" ("O positif", "Rhésus positif") |
-| `<` `>`   | angle brackets (U+003C, U+003E)     | spell out: "inférieur à", "supérieur à"  |
+| `<` `>`   | angle brackets (U+003C, U+003E)     | spell out: "inférieur à", "supérieur à"; HGVS substitution `c.1163C>T`: "c.1163C vers T" |
 | `=`       | equals sign (U+003D)                | spell out: "égal à"                      |
 | `×`       | multiplication sign (U+00D7)        | spell out: "fois" ("trois fois par jour") |
 | `≤` `≥`   | comparison signs (U+2264, U+2265)   | spell out: "inférieur ou égal à", "supérieur ou égal à" |

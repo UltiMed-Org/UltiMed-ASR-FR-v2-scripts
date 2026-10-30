@@ -33,8 +33,9 @@ a series of short spoken sentences inside a single <t>...</t> block.
    Celsius, ...). Never a symbol or abbreviation form.
 4. Never use any of these characters: ( ) — – ; " « » / ° µ € ' (curly
    apostrophe) + < > = * & # ~ → ×. Verbalise what they mean instead ("plus",
-   "inférieur à", "supérieur à", "égal à", "fois", "environ", "degrés"). Use the
-   ASCII apostrophe ' only.
+   "inférieur à", "supérieur à", "égal à", "fois", "environ", "degrés"). The > of
+   an HGVS nucleotide substitution is "vers", never "supérieur à" (c.1163C>T
+   becomes "c.1163C vers T"). Use the ASCII apostrophe ' only.
 5. Numbers as digits with the French decimal comma (37,5), dates in long form
    (12 mars 2024), Roman numerals kept (stade IV, segment VII). Radiology
    sequences stay as written (T2, FLAIR, STIR, diffusion), and spell the
