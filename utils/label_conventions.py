@@ -77,6 +77,10 @@ rewrites the minority spellings to it:
   dropped (``cholecalciferol Viatris 2,5`` -> ``cholecalciferol 2,5``). Unlike the other
   rewrites this one is not spoken identically: the v1 audio is regenerated from the
   rewritten TTS source.
+- **HGVS substitutions** (``normalize_hgvs``, 2026-10-30). ``c.1163C supérieur à T``,
+  ``c.35G en T``, ``c.452G remplacé par A`` -> ``c.1163C vers T``: the parakeet
+  tokenizer has no ``>``, so ``vers`` is the one form, read as written. Like the generic
+  labs this one is not spoken identically: the clips are redrawn.
 - **Spelling variants** (``normalize_spelling``). ``œ`` -> ``oe`` everywhere (``cœur`` ->
   ``coeur``), ``aigüe`` -> ``aiguë``, ``compte-rendu`` -> ``compte rendu``,
   ``bêta-bloquant`` / ``bêtabloquant`` -> ``bétabloquant``, ``anévrysme`` -> ``anévrisme``,
@@ -1087,6 +1091,33 @@ def normalize_latin_names(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# HGVS substitutions
+# ---------------------------------------------------------------------------
+
+# ``c.1163C>T`` as the LLM spelt it, ``>`` being forbidden in a label: a position
+# (``c.1163``, ``c.877-2``, ``c.1331 plus 1``, ``c.-14``), the reference base, a
+# spelled operator, the new base. ``en`` and ``vers`` are the short ones, kept last so
+# the longer ``substitué en`` wins.
+_HGVS_RE = re.compile(
+    r"\b([cgmnr]\.-?[0-9]+(?:(?:\s*(?:\+|plus)\s*|[-*])[0-9]+)?\s*[ACGTU])"
+    r"(?:\s*>\s*|\s*(?:supérieure? à|plus grand que|majuscule(?:\s+vers)?|substituée?\s+(?:en|par)"
+    r"|remplacée?\s+par|en|vers)\s+)([ACGTU])\b")
+
+
+def normalize_hgvs(text: str) -> str:
+    """One spoken operator for a nucleotide substitution: ``vers``, label and TTS source
+    alike (2026-10-30). The parakeet tokenizer has no ``>``, so ``c.1163C>T`` cannot be
+    the label; the client turns ``vers`` back into ``>`` with a regex. Not spoken
+    identically, so a clip whose source changes needs its audio redrawn
+    (``06_hotfixes/17_reopen_hgvs.py``). Idempotent.
+
+    >>> normalize_hgvs("mutation homozygote c.1163C supérieur à T, c.35G en T et c.1331 plus 1 G remplacé par A.")
+    'mutation homozygote c.1163C vers T, c.35G vers T et c.1331 plus 1 G vers A.'
+    """
+    return _HGVS_RE.sub(r"\1 vers \2", text)
+
+
+# ---------------------------------------------------------------------------
 # Drug names
 # ---------------------------------------------------------------------------
 
@@ -1257,7 +1288,8 @@ def apply_label_conventions(text: str, tts_source: bool = False) -> str:
     identically, keeps the accents of drug INNs (``restore_tts_accents``) and respells
     the words voxtral misreads (``respell_for_tts``).
     """
-    text = normalize_roman(normalize_staging(normalize_quantities(normalize_clock(normalize_dates(expand_titles(text))))))
+    text = normalize_roman(normalize_staging(normalize_quantities(normalize_clock(normalize_dates(
+        expand_titles(normalize_hgvs(text)))))))
     if not tts_source:
         text = normalize_thousands(normalize_sutures(text))
     # Accents last: the drug caser restores the ANSM accents an INN choice removes.

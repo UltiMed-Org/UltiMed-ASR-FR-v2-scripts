@@ -19,7 +19,7 @@ from label_conventions import (  # noqa: E402
     DrugCaser, apply_label_conventions, default_drug_caser, expand_titles, normalize_clock,
     normalize_accents, normalize_compounds, normalize_dates, normalize_quantities, normalize_spelling, normalize_staging, normalize_roman, normalize_sutures, normalize_thousands, respell_for_tts, restore_tts_accents, strip_generic_labs,
     parse_french_number, normalize_compound_spellings, normalize_official_names, normalize_non, normalize_ordinals,
-    lowercase_eponym_nouns, normalize_latin_names,
+    lowercase_eponym_nouns, normalize_latin_names, normalize_hgvs,
 )
 
 
@@ -470,6 +470,25 @@ def test_latin_names() -> None:
     print("test_latin_names: OK")
 
 
+def test_hgvs() -> None:
+    # Every operator spelling found in the v2 labels (2026-10-30), and look-alikes that
+    # are not a substitution: a protein change, an HbA1c, a date.
+    check(normalize_hgvs, [
+        ("mutation homozygote c.1163C supérieur à T", "mutation homozygote c.1163C vers T"),
+        ("c.524G en A et c.646G vers A", "c.524G vers A et c.646G vers A"),
+        ("c.877-2A plus grand que G, pathogène", "c.877-2A vers G, pathogène"),
+        ("c.1146A majuscule G et c.1277A majuscule vers G", "c.1146A vers G et c.1277A vers G"),
+        ("c.1234C substitué en T, c.1025C substitué par T", "c.1234C vers T, c.1025C vers T"),
+        ("c.893T remplacée par C, c.452G remplacé par A", "c.893T vers C, c.452G vers A"),
+        ("c.1331 plus 1 G supérieur à A", "c.1331 plus 1 G vers A"),
+        ("c.-14C>T", "c.-14C vers T"),
+        ("p.Arg388 vers His, HbA1c en A, c.12 en mai", "p.Arg388 vers His, HbA1c en A, c.12 en mai"),
+    ])
+    assert apply_label_conventions("c.35G en T") == "c.35G vers T"
+    assert apply_label_conventions("c.35G en T", tts_source=True) == "c.35G vers T"
+    print("test_hgvs: OK")
+
+
 def test_all() -> None:
     raw = ("M. Dupont prend du DOLIPRANE à 14h30 depuis le quinze mars deux mille vingt, "
            "deux comprimés de cinq cents milligrammes au petit déjeuner.")
@@ -514,5 +533,6 @@ if __name__ == "__main__":
     test_ordinals()
     test_eponym_nouns()
     test_latin_names()
+    test_hgvs()
     test_all()
     test_generator_parse()
