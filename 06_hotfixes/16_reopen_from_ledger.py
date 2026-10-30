@@ -98,6 +98,8 @@ from script_module import load_script  # noqa: E402
 
 CATEGORIES = ("PARHAF", "PARROT", "acronyms", "dictionary", "drugs")
 REASONS = ("loop", "number", "inserted", "window", "asr", "dropped")
+#: The marker a queued clip gets: redraw it, or (`--exhaust`) give up so the release drops it.
+PENDING, EXHAUSTED = "pending_tts", "exhausted"
 #: Both judges' worst window at once (see module docstring).
 WINDOW_BOTH = 0.12
 #: Parakeet-side verdicts that confirm an acoustic loop.
@@ -215,7 +217,8 @@ def new_tally() -> SimpleNamespace:
 
 
 def reopen_state(state: Path, base: Path, queue: dict[str, list[str]], reopen, mod,
-                 apply: bool, tally: SimpleNamespace, last_rung: bool = False) -> list[dict]:
+                 apply: bool, tally: SimpleNamespace, last_rung: bool = False,
+                 exhaust: bool = False) -> list[dict]:
     """Mark every row of one stage-06 state file whose clip is in `queue`.
 
     `base` is the directory the rows' `audio_filepath` is relative to (the state's
@@ -223,7 +226,8 @@ def reopen_state(state: Path, base: Path, queue: dict[str, list[str]], reopen, m
     The streaming, the reopenable statuses and the counts are `14.process`'s; this only
     supplies which rows (`select`) and the marker (`mark`). Returns one record per
     marked row: clip, reasons, and the voice swapped to if any. `last_rung` replaces the
-    number rule with `last_rung_voice` for every reason.
+    number rule with `last_rung_voice` for every reason. `exhaust` gives up instead:
+    the marker is `exhausted`, with no voice change, so the release drops the clip.
     """
     picked, current = [], {}
 
@@ -238,7 +242,9 @@ def reopen_state(state: Path, base: Path, queue: dict[str, list[str]], reopen, m
 
     def mark(row, scores):
         reasons = current["reasons"]
-        if last_rung:
+        if exhaust:
+            extra = {}
+        elif last_rung:
             extra = last_rung_voice(mod, row, current["audio"])
         else:
             extra = number_voice(mod, row, current["audio"]) if "number" in reasons else {}
@@ -251,7 +257,7 @@ def reopen_state(state: Path, base: Path, queue: dict[str, list[str]], reopen, m
         tally.by_reason.update(reasons)
         picked.append({"clip": clip_key(current["audio"]), "reasons": reasons,
                        **({"swap_voice": extra["swap_voice"]} if extra.get("swap_voice") else {})})
-        mod.set_improvement(row, "pending_tts", scores, **extra)
+        mod.set_improvement(row, EXHAUSTED if exhaust else PENDING, scores, **extra)
 
     reopen.process(state, mod, select, apply, tally.counts, tally.by_voice, tally.by_cat,
                    mark=mark)
@@ -269,10 +275,15 @@ def reopen_state(state: Path, base: Path, queue: dict[str, list[str]], reopen, m
               help="Accept a ledger older than a state file (it may queue on old verdicts).")
 @click.option("--apply", is_flag=True,
               help="Write the markers. Without it: census only, nothing is changed.")
+@click.option("--exhaust", is_flag=True,
+              help="Mark every queued clip exhausted instead of pending_tts, so the release "
+                   "drops it: the residue no redraw fixed.")
 @click.option("--last-rung", is_flag=True,
               help="Send every queued clip to the fr pair, the voice ladder's last rung, "
                    "instead of the number rule (see `last_rung_voice`).")
-def main(only, out_stems, out_queue, allow_stale_ledger, apply, last_rung) -> None:
+def main(only, out_stems, out_queue, allow_stale_ledger, apply, last_rung, exhaust) -> None:
+    if exhaust and last_rung:
+        raise click.UsageError("--exhaust and --last-rung are exclusive")
     reopen = load_script(_HERE / "14_reopen_loop_clips.py", "reopen_for_t6")
     sync = load_script(RELEASE / "03_sync_hotfix_results.py", "sync_for_t6")
     drop = load_script(RELEASE / "04_drop_bad_rows.py", "drop_for_t6")
@@ -299,8 +310,9 @@ def main(only, out_stems, out_queue, allow_stale_ledger, apply, last_rung) -> No
         if not state.exists():
             logger.warning(f"{state} does not exist, skipping it")
             continue
-        found = reopen_state(state, base, queue, reopen, mod, apply, tally, last_rung)
-        logger.info(f"{state.parent.name}/{state.name}: {len(found)} clip(s) marked pending_tts")
+        found = reopen_state(state, base, queue, reopen, mod, apply, tally, last_rung, exhaust)
+        logger.info(f"{state.parent.name}/{state.name}: {len(found)} clip(s) marked "
+                    f"{EXHAUSTED if exhaust else PENDING}")
         picked.extend(found)
     counts = tally.counts
 

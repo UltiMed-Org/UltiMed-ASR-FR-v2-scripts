@@ -145,6 +145,17 @@ def main() -> int:
         check("--last-rung moves an fr reader to the other fr voice",
               imp["number_fr"].get("swap_voice") == "fr_male", imp["number_fr"])
 
+        # --exhaust: the residue gives up, every queued clip exhausted, no voice change.
+        state.write_text("".join(json.dumps(r) + "\n" for r in ROWS))
+        tally = t16.new_tally()
+        picked = t16.reopen_state(state, base, QUEUE, reopen, mod, True, tally, exhaust=True)
+        imp = {Path(r["audio_filepath"]).stem: r.get("improvement") or {}
+               for r in map(json.loads, state.read_text().splitlines())}
+        marked = [imp[Path(p["clip"]).stem] for p in picked]
+        check("--exhaust marks every queued clip exhausted, without a voice move",
+              len(marked) == 4 and all(m["status"] == t16.EXHAUSTED for m in marked)
+              and not tally.voice_moves, (marked, dict(tally.voice_moves)))
+
     print("FAILED" if failures else "all ok")
     return 1 if failures else 0
 
