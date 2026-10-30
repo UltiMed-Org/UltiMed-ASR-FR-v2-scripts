@@ -20,6 +20,10 @@ rewrites those three to ``vers``; this script applies it to what already exists:
 
 * each stage's ``generated_dataset.jsonl`` (``asr_training_target`` and
   ``asr_training_source``), which the release rebuilds its manifests from;
+* the release manifests the rounds read (the ``HOTFIX_SOURCES`` targets'
+  ``full.jsonl``). The stt pass takes a clip's text from there and drops a stored
+  state row whose text differs as stale, marker included: rewriting the state alone
+  was silently undone by the next round on 2026-10-30 (425 of 430 clips never redrawn);
 * the stage-06 state files (``text``, ``asr_training_source``, ``asr_training_target``),
   which the tts pass reads its text from. A row whose source changed is marked
   ``pending_tts`` with no reference score, so a draw replaces the audio only once it
@@ -66,8 +70,8 @@ def rewrite_fields(row: dict, fields: tuple[str, ...]) -> bool:
     return row.get("asr_training_source") != spoken
 
 
-def rewrite_stage(path: Path, apply: bool) -> int:
-    """Rewrite one stage file, streamed; returns how many rows changed."""
+def rewrite_stage(path: Path, apply: bool, fields: tuple[str, ...] = STAGE_FIELDS) -> int:
+    """Rewrite `fields` of one jsonl file, streamed; returns how many rows changed."""
     n = 0
     tmp = path.with_suffix(path.suffix + ".hgvs.tmp")
     out = tmp.open("w", encoding="utf-8") if apply else None
@@ -75,9 +79,9 @@ def rewrite_stage(path: Path, apply: bool) -> int:
         with path.open(encoding="utf-8") as fh:
             for line in fh:
                 row = json.loads(line)
-                before = [row.get(f) for f in STAGE_FIELDS]
-                rewrite_fields(row, STAGE_FIELDS)
-                if [row.get(f) for f in STAGE_FIELDS] != before:
+                before = [row.get(f) for f in fields]
+                rewrite_fields(row, fields)
+                if [row.get(f) for f in fields] != before:
                     n += 1
                     if out is not None:
                         line = json.dumps(row, ensure_ascii=False) + "\n"
@@ -118,6 +122,10 @@ def main(out_stems, apply) -> None:
         path = ROOT / stage / "generated_dataset.jsonl"
         if path.exists():
             logger.info(f"{stage}: {rewrite_stage(path, apply)} row(s) rewritten")
+    for _, target in sync.HOTFIX_SOURCES:
+        path = RELEASE / target / "full.jsonl"
+        if path.exists():
+            logger.info(f"{target}/full.jsonl: {rewrite_stage(path, apply, STATE_FIELDS)} row(s) rewritten")
     counts, stems = Counter(), set()
     for src, _ in sync.HOTFIX_SOURCES:
         state = (RELEASE / src).resolve()

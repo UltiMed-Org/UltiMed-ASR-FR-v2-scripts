@@ -95,6 +95,16 @@ def main() -> int:
               n == 1 and out[0]["asr_training_target"] == out[0]["asr_training_source"] == "c.1799T vers A"
               and out[0]["other"] == "c.1799T supérieur à A" and out[1] == {"term": "x"}, (n, out))
 
+        manifest = Path(tmp) / "full.jsonl"
+        mrow = {"audio_filepath": "a.flac", "text": "c.1799T supérieur à A",
+                "asr_training_source": "c.1799T supérieur à A"}
+        manifest.write_text(json.dumps(mrow, ensure_ascii=False) + "\n")
+        n = t17.rewrite_stage(manifest, True, t17.STATE_FIELDS)
+        out = json.loads(manifest.read_text())
+        check("a release manifest rewrites text too, or the next stt pass drops the "
+              "rewritten state row as stale",
+              n == 1 and out["text"] == out["asr_training_source"] == "c.1799T vers A", (n, out))
+
     print("FAILED" if failures else "all ok")
     return 1 if failures else 0
 
