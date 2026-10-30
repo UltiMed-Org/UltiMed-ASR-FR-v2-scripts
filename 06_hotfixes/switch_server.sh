@@ -16,8 +16,9 @@
 # The compose file path comes from the environment / an argument so no local absolute
 # path (which would embed a username) is committed.
 #
-# Usage:  switch_server.sh {stt|tts} [/path/to/docker-compose.yml]     # already root
-#         sudo switch_server.sh {stt|tts} [/path/to/docker-compose.yml] # interactive
+# Usage:  switch_server.sh {stt|tts|off} [/path/to/docker-compose.yml]     # already root
+#         sudo switch_server.sh {stt|tts|off} [/path/to/docker-compose.yml] # interactive
+# `off` stops both stacks, handing the whole GPU to something else (training).
 #         (or export CRISPASR_COMPOSE and omit the 2nd argument)
 #
 # This file was written with Claude Code.
@@ -73,8 +74,11 @@ case "${MODE}" in
     "${DC[@]}" up -d voxtral-tts
     wait_healthy voxtral-tts
     ;;
+  off)
+    "${DC[@]}" stop voxtral-tts crispasr crispasr-lb crispasr-tts >/dev/null 2>&1 || true
+    ;;
   *)
-    echo "usage: sudo switch_server.sh {stt|tts} [compose.yml]   (or export CRISPASR_COMPOSE)" >&2
+    echo "usage: sudo switch_server.sh {stt|tts|off} [compose.yml]   (or export CRISPASR_COMPOSE)" >&2
     exit 64
     ;;
 esac
