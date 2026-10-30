@@ -66,23 +66,12 @@ Seven kinds of rows are dropped:
    list is older than the clips it flags, and ``--no-asr-flagged`` turns it off until
    ``06_hotfixes/04_flag_asr_defects.py`` has re-run on the new audio
    (``--asr-flagged-list PATH`` points at another one).
-7. **Draws made with CFG off.** A row whose ``cfg_alpha`` is exactly 1.0, i.e. whose
-   audio was synthesized with classifier-free guidance disabled. These are all
-   ``improved`` rows: the field records the WINNING draw's value, and a sixth draw on
-   the improver's ladder (start 2.0, step -0.2) landed on 1.0 before
-   ``utils/cfg_sidecar.py`` grew ``CFG_ALPHA_FLOOR = 1.2``, which is why the rung decays
-   1.8 -> 3141, 1.6 -> 2294, 1.4 -> 1606, 1.2 -> 1250 and then 1.0 -> only 55: the floor
-   landed partway through v2 and clamped the rest back. CFG off is the measured failure
-   mode where the flow-matching decoder stops following the text and emits
-   phonetically-plausible-but-wrong audio, which is exactly what a Whisper judge is
-   worst at catching (its LM repairs the wrong word back to the label). The 55 do NOT
-   look damaged: their second judge disagrees by >= 0.05 CER on 4 of 55 (7.3%), BELOW
-   the 12.3% that redrawn rows show as a class, against 1.8% corpus-wide. They are
-   dropped anyway because 55 rows are 0.009% of the corpus, so "probably fine" is not
-   worth either the risk or softening ``08_validate_manifests.py``'s error on them,
-   which is also the guard that will catch any future one.
+(Rule 7, ``cfg-off``, dropped every take at exactly ``cfg_alpha`` 1.0. Retired on
+2026-10-30: the T9c redraw at cfg 1.0 fixed 59 of the 143 hardest clips, loops 100 ->
+38, and those takes pass the same per-clip judges as any other, so the judges alone
+decide. Old ``cfg-off`` entries in the drop ledger are no longer re-applied.)
 
-Three of those reasons (exhausted, ASR-flagged, CFG off) are not in the row itself:
+Two of those reasons (exhausted, ASR-flagged) are not in the row itself:
 they come from stage 06's state files, through the sync or the flag list. And stage
 06's state follows the manifest it is pointed at, so a QC round run AFTER this script
 forgets every clip this script removed, and the next ``01_build_nemo_manifest.py``
@@ -144,19 +133,12 @@ TOO_FAST = "too-fast"
 MAX_WORDS_PER_SECOND = 8.0
 ASR_FLAGGED = "asr-flagged"
 ASR_FLAGGED_LIST = _HERE / "asr_flagged_clips.jsonl"
-CFG_OFF = "cfg-off"
-#: The one cfg_alpha value that means classifier-free guidance was OFF for that take.
-#: Not a band check (the validator warns about the band): exactly 1.0, because that is
-#: the rung the improver's ladder could reach before utils/cfg_sidecar.py grew its
-#: CFG_ALPHA_FLOOR, and CFG off is the documented failure mode where the flow-matching
-#: decoder stops following the text and emits plausible-sounding wrong words.
-CFG_OFF_VALUE = 1.0
 PREVIOUSLY_DROPPED = "previously-dropped"
 DROP_LEDGER = _HERE / "dropped_clips.jsonl"
 #: The reasons whose evidence lives outside the row (stage 06's state, the flag list),
 #: so a later QC round can erase it. The others are re-derived from the row's own
 #: text, duration and split on every run and need no memory.
-REMEMBERED_REASONS = frozenset({EXHAUSTED, ASR_FLAGGED, CFG_OFF})
+REMEMBERED_REASONS = frozenset({EXHAUSTED, ASR_FLAGGED})
 
 _PUNCT = re.compile(r"[^\w\s]")
 
@@ -326,7 +308,7 @@ def filter_rows(rows: list[dict], manifest_dir: Path, drop_audio: Collection[str
         Rows that stay (order preserved).
     dropped : list[tuple[dict, str]]
         Each dropped row with its reason: ``EXHAUSTED``, ``DUPLICATE``, ``ELLIPSIS``,
-        ``LLM_LEAK``, ``TOO_FAST``, ``ASR_FLAGGED``, ``CFG_OFF`` or
+        ``LLM_LEAK``, ``TOO_FAST``, ``ASR_FLAGGED`` or
         ``"previously-dropped (<reason>)"``.
     n_unsynced : int
         How many rows carry no ``qc_status`` key at all, i.e. were never touched by
@@ -351,9 +333,8 @@ def filter_rows(rows: list[dict], manifest_dir: Path, drop_audio: Collection[str
             dropped.append((row, TOO_FAST))
         elif asr_flagged and clip_key(resolve_audio(manifest_dir, row["audio_filepath"])) in asr_flagged:
             dropped.append((row, ASR_FLAGGED))
-        elif row.get("cfg_alpha") == CFG_OFF_VALUE:
-            dropped.append((row, CFG_OFF))
         elif ledger and (entry := ledger.get(clip_key(resolve_audio(manifest_dir, row["audio_filepath"])))) \
+                and entry["reason"] in REMEMBERED_REASONS \
                 and still_dropped(entry, resolve_audio(manifest_dir, row["audio_filepath"])):
             dropped.append((row, f"{PREVIOUSLY_DROPPED} ({entry['reason']})"))
         else:

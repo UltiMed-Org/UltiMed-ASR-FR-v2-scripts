@@ -289,9 +289,8 @@ def check_structure(rows: list[dict], name: str, f: Findings) -> None:
 
         cfg = r.get("cfg_alpha")
         if isinstance(cfg, (int, float)):
-            if cfg == 1.0:
-                f.error(name, "cfg_alpha 1.0 disables CFG (hallucination risk)", ident)
-            elif not (CFG_FLOOR <= cfg <= CFG_CEILING):
+            # 1.0 (CFG off) is only a warning since 2026-10-30: the per-clip judges vet it.
+            if not (CFG_FLOOR <= cfg <= CFG_CEILING):
                 f.warn(name, f"cfg_alpha outside the measured {CFG_FLOOR}-{CFG_CEILING} "
                              f"band", f"{ident} cfg_alpha={cfg}")
 

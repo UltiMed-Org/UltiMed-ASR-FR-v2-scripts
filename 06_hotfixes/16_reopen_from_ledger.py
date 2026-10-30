@@ -40,7 +40,7 @@ nothing new.
   language-id flips); both at once is audio.
 * `asr`: the release's own ASR-flag rules (`text:preamble`, `text:repeated`).
 * `dropped`: dropped by the release for an audio reason (`REMEMBERED_REASONS` of
-  `99_hf_release/04_drop_bad_rows.py`: exhausted, asr-flagged, cfg-off). A redraw can
+  `99_hf_release/04_drop_bad_rows.py`: exhausted, asr-flagged). A redraw can
   bring those back; a text-side drop (ellipsis, llm-leak, too-fast) it cannot, so those
   are never queued.
 

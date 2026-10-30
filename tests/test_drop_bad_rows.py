@@ -157,25 +157,26 @@ def test_asr_flagged_stale() -> None:
 
 
 def test_cfg_off() -> None:
-    """A draw made with CFG disabled (cfg_alpha exactly 1.0) is dropped; the rest of the
-    measured band is kept. The field holds the WINNING draw's value, so only a redrawn
-    row can carry 1.0, and 1.2 (the ladder's floor) must survive: it is the bottom rung
-    the improver is allowed to use, not a defect."""
+    """A take at cfg_alpha 1.0 (CFG off) is kept since the rule was retired: the
+    per-clip judges decide. An old ``cfg-off`` ledger entry no longer re-drops it,
+    even on unchanged audio, while an ``exhausted`` one still does."""
     mod = load_sync_module(script=SCRIPT)
     rows = [
-        {"audio_filepath": "a.flac", "qc_status": "original", "cfg_alpha": 2.0},
         {"audio_filepath": "b.flac", "qc_status": "improved", "cfg_alpha": 1.0},
-        {"audio_filepath": "c.flac", "qc_status": "improved", "cfg_alpha": 1.2},
-        {"audio_filepath": "d.flac", "qc_status": "original", "cfg_alpha": 1.3},
-        {"audio_filepath": "e.flac", "qc_status": "original"},          # no field at all
         {"audio_filepath": "f.flac", "qc_status": "improved", "cfg_alpha": 1},  # int 1
     ]
-    kept, dropped, _ = mod.filter_rows(rows, Path("/m"))
-    assert [r["audio_filepath"] for r in kept] == ["a.flac", "c.flac", "d.flac", "e.flac"], kept
-    assert [(r["audio_filepath"], why) for r, why in dropped] == [
-        ("b.flac", mod.CFG_OFF), ("f.flac", mod.CFG_OFF)], dropped
-    # Idempotent, like every other rule.
-    assert mod.filter_rows(kept, Path("/m"))[1] == []
+    assert mod.filter_rows(rows, Path("/m"))[1] == []
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for name in ("b.flac", "f.flac"):
+            (root / name).write_bytes(b"x")
+        mtime = mod.audio_mtime_ns(str(root / "b.flac")) + 10**12
+        ledger = {mod.clip_key(str(root / n)): {"clip": mod.clip_key(str(root / n)), "reason": why,
+                                                  "audio_mtime_ns": mtime}
+                  for n, why in (("b.flac", "cfg-off"), ("f.flac", mod.EXHAUSTED))}
+        kept, dropped, _ = mod.filter_rows(rows, root, ledger=ledger)
+        assert [r["audio_filepath"] for r in kept] == ["b.flac"], kept
+        assert [why for _, why in dropped] == [f"{mod.PREVIOUSLY_DROPPED} ({mod.EXHAUSTED})"], dropped
     print("test_cfg_off: OK")
 
 
