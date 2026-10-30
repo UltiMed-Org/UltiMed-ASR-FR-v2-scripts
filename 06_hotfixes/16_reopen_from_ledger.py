@@ -93,7 +93,7 @@ sys.path.insert(0, str(ROOT / "utils"))
 from clip_ledger import LEDGER_NAME  # noqa: E402
 from nemo_manifest import clip_key, resolve_audio  # noqa: E402
 from number_swaps import swaps  # noqa: E402
-from voice_assignment import NUMBER_LADDER_FR_V2  # noqa: E402
+from voice_assignment import NUMBER_LADDER_FR_V2, VOICE_LADDER_FR_V2  # noqa: E402
 from script_module import load_script  # noqa: E402
 
 CATEGORIES = ("PARHAF", "PARROT", "acronyms", "dictionary", "drugs")
@@ -167,6 +167,29 @@ def read_queue(data: Path, audio_drops, only: set[str]) -> dict[str, list[str]]:
     return queue
 
 
+def _swap_at(mod, row: dict, audio_path: Path, rung: int, ladder=None) -> tuple[str, int] | None:
+    """The stage's own `swap_voice_for`, asked as if the clip stood at `rung` of `ladder`,
+    so the pick keeps its keying (one new reader per PARHAF document) and its exclusions."""
+    imp = row.get("improvement") or {}
+    probe = {**row, "improvement": {**imp, "voice_tier": rung}}
+    return mod.swap_voice_for(probe, audio_path, SimpleNamespace(voice_swap=True, term_voices={}),
+                              ladder=ladder)
+
+
+def last_rung_voice(mod, row: dict, audio_path: Path) -> dict:
+    """The marker fields of `--last-rung`: straight to the fr pair, the ladder's last rung.
+
+    For the clips three same-voice cycles could not fix (T8, 2026-10-30: 792, 541, then
+    408 still flagged, 477 of cycle 2's 485 loops looping again). A loop never exhausts its
+    draws, because the in-loop whisper judge reads a looping take at a CER near 0, so the
+    ladder that would have moved it never fired. The tier lands at the ladder's length: a
+    clip this round cannot fix exhausts instead of climbing further. A clip already read
+    by one fr voice gets the other; one both fr voices have read keeps its voice.
+    """
+    nxt = _swap_at(mod, row, audio_path, len(VOICE_LADDER_FR_V2) - 1)
+    return {} if nxt is None else {"swap_voice": nxt[0], "voice_tier": nxt[1]}
+
+
 def number_voice(mod, row: dict, audio_path: Path) -> dict:
     """The marker fields of the number voice rule (module docstring).
 
@@ -179,9 +202,7 @@ def number_voice(mod, row: dict, audio_path: Path) -> dict:
     tier = max(int(imp.get("voice_tier") or 0), 1)
     if not (mod.voice_for_redraw(row) or "").startswith(ITF_PREFIX):
         return {"voice_tier": tier}
-    probe = {**row, "improvement": {**imp, "voice_tier": 0}}
-    nxt = mod.swap_voice_for(probe, audio_path, SimpleNamespace(voice_swap=True, term_voices={}),
-                             ladder=NUMBER_LADDER_FR_V2)
+    nxt = _swap_at(mod, row, audio_path, 0, NUMBER_LADDER_FR_V2)
     if nxt is None:
         return {"voice_tier": tier}
     return {"swap_voice": nxt[0], "voice_tier": tier}
@@ -194,14 +215,15 @@ def new_tally() -> SimpleNamespace:
 
 
 def reopen_state(state: Path, base: Path, queue: dict[str, list[str]], reopen, mod,
-                 apply: bool, tally: SimpleNamespace) -> list[dict]:
+                 apply: bool, tally: SimpleNamespace, last_rung: bool = False) -> list[dict]:
     """Mark every row of one stage-06 state file whose clip is in `queue`.
 
     `base` is the directory the rows' `audio_filepath` is relative to (the state's
     `HOTFIX_SOURCES` entry), so a row is matched on the same `clip_key` the ledger uses.
     The streaming, the reopenable statuses and the counts are `14.process`'s; this only
     supplies which rows (`select`) and the marker (`mark`). Returns one record per
-    marked row: clip, reasons, and the voice swapped to if any.
+    marked row: clip, reasons, and the voice swapped to if any. `last_rung` replaces the
+    number rule with `last_rung_voice` for every reason.
     """
     picked, current = [], {}
 
@@ -216,9 +238,14 @@ def reopen_state(state: Path, base: Path, queue: dict[str, list[str]], reopen, m
 
     def mark(row, scores):
         reasons = current["reasons"]
-        extra = number_voice(mod, row, current["audio"]) if "number" in reasons else {}
+        if last_rung:
+            extra = last_rung_voice(mod, row, current["audio"])
+        else:
+            extra = number_voice(mod, row, current["audio"]) if "number" in reasons else {}
         if extra.get("swap_voice"):
             tally.voice_moves[f"{mod.voice_for_redraw(row)} -> {extra['swap_voice']}"] += 1
+        elif last_rung:
+            tally.voice_moves["keeps voice, both fr voices tried"] += 1
         elif extra:
             tally.voice_moves["keeps voice, itf rung skipped"] += 1
         tally.by_reason.update(reasons)
@@ -242,7 +269,10 @@ def reopen_state(state: Path, base: Path, queue: dict[str, list[str]], reopen, m
               help="Accept a ledger older than a state file (it may queue on old verdicts).")
 @click.option("--apply", is_flag=True,
               help="Write the markers. Without it: census only, nothing is changed.")
-def main(only, out_stems, out_queue, allow_stale_ledger, apply) -> None:
+@click.option("--last-rung", is_flag=True,
+              help="Send every queued clip to the fr pair, the voice ladder's last rung, "
+                   "instead of the number rule (see `last_rung_voice`).")
+def main(only, out_stems, out_queue, allow_stale_ledger, apply, last_rung) -> None:
     reopen = load_script(_HERE / "14_reopen_loop_clips.py", "reopen_for_t6")
     sync = load_script(RELEASE / "03_sync_hotfix_results.py", "sync_for_t6")
     drop = load_script(RELEASE / "04_drop_bad_rows.py", "drop_for_t6")
@@ -269,7 +299,7 @@ def main(only, out_stems, out_queue, allow_stale_ledger, apply) -> None:
         if not state.exists():
             logger.warning(f"{state} does not exist, skipping it")
             continue
-        found = reopen_state(state, base, queue, reopen, mod, apply, tally)
+        found = reopen_state(state, base, queue, reopen, mod, apply, tally, last_rung)
         logger.info(f"{state.parent.name}/{state.name}: {len(found)} clip(s) marked pending_tts")
         picked.extend(found)
     counts = tally.counts
@@ -284,7 +314,7 @@ def main(only, out_stems, out_queue, allow_stale_ledger, apply) -> None:
     logger.info(f"by reason: {dict(tally.by_reason.most_common())}")
     logger.info(f"by voice: {dict(tally.by_voice.most_common())}")
     logger.info(f"by category: {dict(tally.by_cat.most_common())}")
-    logger.info(f"number voice rule: {dict(tally.voice_moves.most_common())}")
+    logger.info(f"voice moves: {dict(tally.voice_moves.most_common())}")
     missing = len(queue) - len(stems)
     if missing:
         logger.warning(f"{missing} queued clip(s) not marked (already pending, or not "

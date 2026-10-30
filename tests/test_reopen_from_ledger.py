@@ -40,7 +40,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(ROOT / "utils"))
 from script_module import load_script  # noqa: E402
-from voice_assignment import NUMBER_LADDER_FR_V2  # noqa: E402
+from voice_assignment import NUMBER_LADDER_FR_V2, VOICE_LADDER_FR_V2  # noqa: E402
 
 JUDGE = "onnx-asr/parakeet-tdt-0.6b-v3-ultra"
 TURBO = "whisper.cpp/ggml-large-v3-turbo"
@@ -130,6 +130,20 @@ def main() -> int:
         check("the census counts the voice moves",
               sum(tally.voice_moves.values()) == 3 and tally.by_reason["number"] == 3,
               dict(tally.voice_moves))
+
+        # --last-rung: every reason goes to the fr pair, an fr reader to the other fr voice.
+        state.write_text("".join(json.dumps(r) + "\n" for r in ROWS))
+        tally = t16.new_tally()
+        t16.reopen_state(state, base, QUEUE, reopen, mod, True, tally, last_rung=True)
+        imp = {Path(r["audio_filepath"]).stem: r.get("improvement") or {}
+               for r in map(json.loads, state.read_text().splitlines())}
+        fr_pair, top = set(VOICE_LADDER_FR_V2[-1]), len(VOICE_LADDER_FR_V2)
+        check("--last-rung sends the loop and itf clips to the fr pair, tier at the top",
+              all(imp[s].get("swap_voice") in fr_pair and imp[s].get("voice_tier") == top
+                  for s in ("loop_itf", "number_itf", "number_laddered_itf")),
+              {s: imp[s] for s in ("loop_itf", "number_itf", "number_laddered_itf")})
+        check("--last-rung moves an fr reader to the other fr voice",
+              imp["number_fr"].get("swap_voice") == "fr_male", imp["number_fr"])
 
     print("FAILED" if failures else "all ok")
     return 1 if failures else 0
