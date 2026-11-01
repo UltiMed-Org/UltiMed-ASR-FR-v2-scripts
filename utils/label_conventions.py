@@ -580,11 +580,12 @@ _NUM_WORD = (rf"(?:{'|'.join(sorted(set(_NUMBER_VALUES) | set(_SCALES) | {'cent'
              r"(?!\w)")
 _NUM_SEP = r"(?:\s+et\s+|-et-|[\s-]+)"
 _NUM_RUN = rf"{_NUM_WORD}(?:{_NUM_SEP}{_NUM_WORD})*"
-# An elision is allowed before the run only for the half-converted form ("d'un million
-# 500000" -> "d'1500000"), checked in ``_replace_number``. Not after "pour": "0,10 gramme
-# pour cent une fois par jour" is a g% the percent guards keep spelled, not 101.
-_NUMBER_RE = re.compile(rf"(?i:(?<![\w-])(?<!\bpour )({_NUM_RUN})(?:(\s+virgule\s+)({_NUM_RUN}))?"
-                        rf"(?:(\s+)(\d+)(?![\w]|[,.]\d))?)")
+# An elided "d'un" ("de") only changes in the half-converted form, where it becomes
+# "de": "d'un million 500000" -> "de 1500000" (``_replace_number``). Not after "pour":
+# "0,10 gramme pour cent une fois par jour" is a g% the percent guards keep spelled, not 101.
+_NUMBER_RE = re.compile(rf"(?i:(?<![\w-])(?<!\bpour )(?:(?P<de>d)['’](?=une?\b))?(?P<run>{_NUM_RUN})"
+                        rf"(?:(?P<vsep>\s+virgule\s+)(?P<dec>{_NUM_RUN}))?"
+                        rf"(?:(?P<dsep>\s+)(?P<digits>\d+)(?![\w]|[,.]\d))?)")
 
 
 def _num_words(run: str) -> list[str]:
@@ -634,9 +635,11 @@ def _decimal(int_run: str, dec_run: str) -> str | None:
 
 
 def _replace_number(m: re.Match, text: str) -> str:
-    run, vsep, dec_run, dsep, digits = m.groups()
+    de, run, vsep, dec_run, dsep, digits = m.group("de", "run", "vsep", "dec", "dsep", "digits")
     words = _num_words(run)
-    elided = m.start() > 0 and text[m.start() - 1] in "'’"
+    elided = de is not None or (m.start() > 0 and text[m.start() - 1] in "'’")
+    if de is not None and not (digits and not vsep):
+        return m.group(0)  # "d'un mois", "d'une fois": only the merge below rewrites "d'"
     if vsep and not elided:
         dec = _decimal(run, dec_run)
         if dec is not None:
@@ -646,24 +649,25 @@ def _replace_number(m: re.Match, text: str) -> str:
         lead = re.match(r"\S+?(?=[\s-])[\s-]+", run)
         if lead is None:
             return m.group(0)
-        tail = text[m.start() + lead.end():]
+        tail = text[m.start("run") + lead.end():]
         sub = _NUMBER_RE.match(tail)
         if sub is None:
             return m.group(0)
-        return run[:lead.end()] + _replace_number(sub, tail) + m.group(0)[lead.end() + sub.end():]
+        return (text[m.start():m.start("run")] + run[:lead.end()] + _replace_number(sub, tail)
+                + text[m.start("run") + lead.end() + sub.end():m.end()])
     # An ordinal or suffixed word continues the run ("vingt-cinquième"), or a fraction
     # ends it ("au un sur deux cent cinquantième", "au mille six centième").
-    if re.match(r"-\w|[\s-]+\w+ièmes?\b", text[m.end(1):]):
+    if re.match(r"-\w|[\s-]+\w+ièmes?\b", text[m.end("run"):]):
         return m.group(0)
     # "un million 500000": a run ending in a multiplier, then the rest in digits.
     if digits and not vsep and words[-1] in _SCALES and len(words) >= 2:
         value = parse_french_number(words)
         if value is not None and "zéro" not in words and int(digits) < _SCALES[words[-1]]:
-            return str(value + int(digits))
+            return (f"{de}e " if de else "") + str(value + int(digits))
     if elided:
         return m.group(0)
     converted = _number_digits(run)
-    return m.group(0) if converted is None else converted + m.group(0)[len(run):]
+    return m.group(0) if converted is None else converted + text[m.end("run"):m.end()]
 
 
 def normalize_numbers(text: str) -> str:

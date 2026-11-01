@@ -517,7 +517,8 @@ def test_numbers() -> None:
         ("Dose de un million cinq cent mille unités.", "Dose de 1500000 unités."),
         # Half converted by the LLM: the multiplier run and its digits are one number.
         ("Spiramycine un million 500000 unités internationales.", "Spiramycine 1500000 unités internationales."),
-        ("À la dose d'un million 500000 unités.", "À la dose d'1500000 unités."),
+        ("À la dose d'un million 500000 unités.", "À la dose de 1500000 unités."),
+        ("D'un million 500000 unités.", "De 1500000 unités."),
         ("Thrombocytose à six cent mille, deux mille 24.", "Thrombocytose à 600000, 2024."),
     ])
     for untouched in [
