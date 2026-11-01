@@ -49,6 +49,19 @@ here and is deliberate: see `refresh_row`. The manifest is the truth about lengt
 probed from the file) and the state is the truth about who read the clip (a voice swap is
 recorded there and nowhere else).
 
+Except when the manifest is OLDER than the audio, which is the driver's own step order:
+the manifests are rebuilt first, the redraw rounds then overwrite clips (and
+``01_recursive_improvement.py`` writes the new take's length into the state row), and
+this script runs last. Trusting the manifest there handed every clip redrawn in the run
+its previous take's length back: 108 PARHAF clips on 2026-11-01, e.g.
+``002522_0000_cancero_adulte_00042_t0_c0``, file 31.04 s, state set to 31.04 by the
+redraw, then reset to the manifest's 45.28 (the take in ``.flac.bak2``). So a
+disagreement is settled by the file itself (``nemo_manifest.probe_durations``, header
+only, a few hundred clips per run), and the manifest's number is used only when the file
+cannot be read. ``--probe-files`` also probes every ``improved`` row whose state and
+manifest AGREE, to repair rows this bug already reset (both sides then carry the old
+take's length, so nothing else can see them).
+
 This file was written with Claude Code.
 """
 from __future__ import annotations
@@ -67,7 +80,7 @@ _HERE = Path(__file__).resolve().parent
 ROOT = _HERE.parent
 sys.path.insert(0, str(ROOT / "utils"))
 
-from nemo_manifest import clip_key  # noqa: E402
+from nemo_manifest import clip_key, probe_durations  # noqa: E402
 
 #: Where the state files live, relative to this directory.
 DEFAULT_STATES = ("improved/full.stt.jsonl", "improved_parrot/full.stt.jsonl")
@@ -111,8 +124,39 @@ def load_truth(manifest: Path) -> dict[str, tuple[float | None, str | None]]:
     return truth
 
 
-def refresh_row(row: dict, truth: dict, stt, counts: Counter) -> bool:
-    """Repair one row in place. True when anything changed.
+def _disagrees(old, new) -> bool:
+    return new is not None and (old is None or abs(float(old) - float(new)) > TOL_S)
+
+
+def probe_candidates(path: Path, truth: dict, audio_base: Path, *,
+                     probe_improved: bool) -> dict[str, float]:
+    """``{clip_key: duration read from the file}`` for the rows of state ``path`` whose
+    length is in doubt: the manifest disagrees with the state (either side may be the
+    stale one, see the module docstring), or, with ``probe_improved``, the row was
+    redrawn (``improvement.status == "improved"``). Audio paths are resolved like the
+    manifest's own, relative to its directory (``audio_base``)."""
+    paths: dict[str, Path] = {}
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            key = clip_key(row.get("audio_filepath", ""))
+            if key not in truth:
+                continue
+            improved = ((row.get("improvement") or {}).get("status") == "improved")
+            if _disagrees(row.get("duration"), truth[key][0]) or (probe_improved and improved):
+                paths[key] = audio_base / row["audio_filepath"]
+    if not paths:
+        return {}
+    by_name = probe_durations(list(paths.values()), progress=len(paths) > 1000)
+    return {key: by_name[p.name] for key, p in paths.items() if p.name in by_name}
+
+
+def refresh_row(row: dict, truth: dict, stt, counts: Counter,
+                probed: dict[str, float] | None = None) -> bool:
+    """Repair one row in place. True when anything changed. ``probed`` holds the file's
+    own duration for the rows `probe_candidates` picked, which beats the manifest's.
 
     The reference for `cer_tail` is `text`, the LABEL, the same choice
     `08_validate_manifests.py` recomputes against: `asr_training_source` carries the TTS
@@ -123,9 +167,14 @@ def refresh_row(row: dict, truth: dict, stt, counts: Counter) -> bool:
         counts["clip_not_in_manifest"] += 1
         return False
     duration, voice = truth[key]
+    from_file = (probed or {}).get(key)
+    if from_file is not None:
+        if _disagrees(duration, from_file):
+            counts["manifest_stale_file_wins"] += 1
+        duration = round(from_file, 4)
     old = row.get("duration")
     changed = False
-    if duration is not None and (old is None or abs(float(old) - float(duration)) > TOL_S):
+    if _disagrees(old, duration):
         row["duration"] = duration
         counts["duration_refreshed"] += 1
         changed = True
@@ -175,7 +224,8 @@ def refresh_row(row: dict, truth: dict, stt, counts: Counter) -> bool:
     return True
 
 
-def refresh_file(path: Path, truth: dict, stt, *, apply: bool) -> Counter:
+def refresh_file(path: Path, truth: dict, stt, *, apply: bool,
+                 probed: dict[str, float] | None = None) -> Counter:
     """Stream one state file through `refresh_row`.
 
     Streamed rather than `read_jsonl`-ed because `improved/full.stt.jsonl` is ~800 MB of
@@ -192,7 +242,7 @@ def refresh_file(path: Path, truth: dict, stt, *, apply: bool) -> Counter:
                     continue
                 row = json.loads(line)
                 counts["rows"] += 1
-                if refresh_row(row, truth, stt, counts):
+                if refresh_row(row, truth, stt, counts, probed):
                     counts["rows_changed"] += 1
                 if out is not None:
                     out.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -212,7 +262,10 @@ def refresh_file(path: Path, truth: dict, stt, *, apply: bool) -> Counter:
 @click.option("--manifest", default=str(DEFAULT_MANIFEST), show_default=False,
               type=click.Path(path_type=Path), help="The manifest that owns durations.")
 @click.option("--apply", is_flag=True, help="Write. Without it this is a dry run.")
-def main(states: tuple[Path, ...], manifest: Path, apply: bool) -> None:
+@click.option("--probe-files", is_flag=True,
+              help="Also read the audio of every `improved` row whose state and manifest "
+                   "agree (repairs rows an older run reset to the previous take's length).")
+def main(states: tuple[Path, ...], manifest: Path, apply: bool, probe_files: bool = False) -> None:
     """Make the state rows' durations match the audio, and rescore the tail gate."""
     manifest = Path(manifest)
     if not manifest.exists():
@@ -227,7 +280,9 @@ def main(states: tuple[Path, ...], manifest: Path, apply: bool) -> None:
     stt = _load_stt()
     total = Counter()
     for path in targets:
-        counts = refresh_file(path, truth, stt, apply=apply)
+        probed = probe_candidates(path, truth, manifest.parent, probe_improved=probe_files)
+        counts = refresh_file(path, truth, stt, apply=apply, probed=probed)
+        counts["files_probed"] = len(probed)
         # A `--state` given by hand can sit anywhere, so shorten only when it really is
         # under this directory rather than letting relative_to raise on everything else.
         resolved = path.resolve()

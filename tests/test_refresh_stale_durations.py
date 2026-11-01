@@ -123,6 +123,65 @@ def read(state: Path) -> list[dict]:
     return [json.loads(line) for line in state.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+def _flac(path: Path, seconds: float) -> None:
+    import numpy as np
+    import soundfile as sf
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(str(path), np.zeros(int(seconds * 16000), dtype="int16"), 16000, format="FLAC")
+
+
+def redraw_after_manifest() -> None:
+    """The driver rebuilds the manifests BEFORE its redraw rounds, so on a clip redrawn in
+    the run the manifest holds the previous take's length and the state the new one
+    (002522_0000_cancero_adulte_00042_t0_c0, 2026-11-01: file 31.04 s, manifest 45.28).
+    The file must win, and ``--probe-files`` must repair a row both sides got wrong."""
+    print("13_refresh_stale_durations: a manifest older than the audio")
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        manifest = tmp / "NeMO_files" / "full.jsonl"
+        manifest.parent.mkdir()
+        _flac(tmp / "PARHAF" / "000010_0000_redrawn.flac", 31.04)
+        _flac(tmp / "PARHAF" / "000011_0000_reset.flac", 33.84)
+        manifest.write_text("".join(json.dumps(r) + "\n" for r in [
+            {"audio_filepath": "../PARHAF/000010_0000_redrawn.flac", "duration": 45.28,
+             "text": LABEL, "voice": "fr_female"},
+            {"audio_filepath": "../PARHAF/000011_0000_reset.flac", "duration": 36.4,
+             "text": LABEL, "voice": "fr_female"},
+        ]), encoding="utf-8")
+        improved = {"status": "improved"}
+        state = tmp / "full.stt.jsonl"
+        state.write_text("".join(json.dumps(r) + "\n" for r in [
+            # the redraw wrote the right length, the manifest is the old take's
+            {"audio_filepath": "../PARHAF/000010_0000_redrawn.flac", "duration": 31.04,
+             "text": LABEL, "voice": "fr_female", "improvement": improved,
+             "transcriptions": {"turbo": {"text": LABEL, "stt_seconds": 10.0}}},
+            # an earlier run already reset it: state and manifest agree, both wrong
+            {"audio_filepath": "../PARHAF/000011_0000_reset.flac", "duration": 36.4,
+             "text": LABEL, "voice": "fr_female", "improvement": improved,
+             "transcriptions": {"turbo": {"text": LABEL, "stt_seconds": 10.0}}},
+        ]), encoding="utf-8")
+        run(manifest, state, apply=True)
+        redrawn, reset = read(state)
+        check("a redrawn clip keeps the length of the file, not the older manifest's",
+              redrawn["duration"] == 31.04, str(redrawn["duration"]))
+        check("without --probe-files a row both sides agree on is left alone",
+              reset["duration"] == 36.4, str(reset["duration"]))
+        lines: list[str] = []
+        sink = logger.add(lambda message: lines.append(str(message)), level="INFO")
+        try:
+            CliRunner().invoke(_mod.main, ["--manifest", str(manifest), "--state", str(state),
+                                           "--apply", "--probe-files"], catch_exceptions=False)
+        finally:
+            logger.remove(sink)
+        redrawn, reset = read(state)
+        check("--probe-files repairs an improved row from its file", reset["duration"] == 33.84,
+              str(reset["duration"]))
+        check("and refreshes its rtf", reset["transcriptions"]["turbo"].get("stt_rtf")
+              == round(10.0 / 33.84, 5), str(reset["transcriptions"]["turbo"].get("stt_rtf")))
+        check("and still keeps the redrawn one right", redrawn["duration"] == 31.04,
+              str(redrawn["duration"]))
+
+
 def main() -> int:
     print("13_refresh_stale_durations: the tail blind spot, and nothing else")
 
@@ -204,6 +263,8 @@ def main() -> int:
         check("a clip missing from the manifest is reported, not rewritten",
               orphan.read_text(encoding="utf-8") == line
               and "clip_not_in_manifest" in orphan_log, orphan_log[-300:])
+
+    redraw_after_manifest()
 
     if failures:
         print(f"\nFAILED: {len(failures)}")
