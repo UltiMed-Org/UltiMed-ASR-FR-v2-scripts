@@ -552,8 +552,9 @@ def normalize_sutures(text: str) -> str:
 
 # Thousands glued (author's choice 2026-10-08, the majority: 26k labels wrote ``3200``,
 # 4.6k ``3 200``), so ``18 000`` and ``18000`` are not two transcripts of one sound.
-# Groups after the first are exactly three digits, so ``12 18`` (two numbers) stays.
-_THOUSANDS_RE = re.compile(r"(?<![\w,.])(\d{1,3})((?: \d{3})+)(?![\d])")
+# Groups after the first are exactly three digits, so ``12 18`` (two numbers) stays. Not
+# after a hyphen: ``oméga-3 500 milligrammes`` and ``CA 15-3 272`` are a code then a number.
+_THOUSANDS_RE = re.compile(r"(?<![\w,.-])(\d{1,3})((?: \d{3})+)(?![\d])")
 
 
 def normalize_thousands(text: str) -> str:
@@ -1422,7 +1423,9 @@ def apply_label_conventions(text: str, tts_source: bool = False) -> str:
     text = normalize_roman(normalize_staging(normalize_quantities(normalize_clock(normalize_dates(
         expand_titles(normalize_hgvs(text)))))))
     if not tts_source:
-        text = normalize_numbers(normalize_thousands(normalize_sutures(text)))
+        # Thousands on both sides: before, so "un million 500 000" merges whole; after,
+        # so "cent trente-quatre 500" -> "134 500" is glued now, not on the next pass.
+        text = normalize_thousands(normalize_numbers(normalize_thousands(normalize_sutures(text))))
     # Accents last: the drug caser restores the ANSM accents an INN choice removes.
     # Eponyms lowercased before the compound table, which keys on lowercase forms but
     # keeps their capitals (``Echo-Doppler`` is looked up as ``echo-doppler``).

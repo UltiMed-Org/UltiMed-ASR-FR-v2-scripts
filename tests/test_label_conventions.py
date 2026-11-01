@@ -256,7 +256,13 @@ def test_thousands() -> None:
         # two numbers, a name with digits, a decimal part
         ("Tension 12 18, vitamine D3 100 000 unités, coenzyme Q10 300, 0,5 000.",
          "Tension 12 18, vitamine D3 100000 unités, coenzyme Q10 300, 0,5 000."),
+        # a code ending in a digit, then a number
+        ("Oméga-3 500 milligrammes, CA 15-3 272 unités.",) * 2,
     ])
+    # idempotent once the spelled number is converted (it ran before normalize_numbers)
+    once = apply_label_conventions("CA 19-9 cent trente-quatre versus 90.")
+    assert once == "CA 19-9 134 versus 90." == apply_label_conventions(once), once
+    assert apply_label_conventions("Soit cent trente-quatre 500 unités.") == "Soit 134500 unités."
     # the TTS source keeps the spaced form
     assert apply_label_conventions("18 000 plaquettes.", tts_source=True) == "18 000 plaquettes."
     tts = "Naevus et naevomatose, placenta praevia, technétium-99m."
