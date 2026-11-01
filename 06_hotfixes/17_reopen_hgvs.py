@@ -54,6 +54,7 @@ ROOT = _HERE.parent
 RELEASE = ROOT / "99_hf_release"
 sys.path.insert(0, str(ROOT / "utils"))
 from label_conventions import normalize_hgvs  # noqa: E402
+from nemo_manifest import rewrite_jsonl  # noqa: E402
 from script_module import load_script  # noqa: E402
 
 STAGES = ("01_dictionnary", "02_drugs", "03_PARHAF", "04_PARROT", "07_acronyms")
@@ -72,27 +73,7 @@ def rewrite_fields(row: dict, fields: tuple[str, ...]) -> bool:
 
 def rewrite_stage(path: Path, apply: bool, fields: tuple[str, ...] = STAGE_FIELDS) -> int:
     """Rewrite `fields` of one jsonl file, streamed; returns how many rows changed."""
-    n = 0
-    tmp = path.with_suffix(path.suffix + ".hgvs.tmp")
-    out = tmp.open("w", encoding="utf-8") if apply else None
-    try:
-        with path.open(encoding="utf-8") as fh:
-            for line in fh:
-                row = json.loads(line)
-                before = [row.get(f) for f in fields]
-                rewrite_fields(row, fields)
-                if [row.get(f) for f in fields] != before:
-                    n += 1
-                    if out is not None:
-                        line = json.dumps(row, ensure_ascii=False) + "\n"
-                if out is not None:
-                    out.write(line)
-    finally:
-        if out is not None:
-            out.close()
-    if apply:
-        tmp.replace(path)
-    return n
+    return rewrite_jsonl(path, lambda row: rewrite_fields(row, fields), apply)
 
 
 def reopen_hgvs(state: Path, reopen, mod, apply: bool, counts: Counter) -> list[str]:

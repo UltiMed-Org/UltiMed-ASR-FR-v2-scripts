@@ -9,6 +9,7 @@ Run AFTER ``04_drop_bad_rows.py --apply`` and BEFORE ``scripts/build_parquet.py`
 
     uv run 05_normalize_text.py            # dry run, reports counts + examples
     uv run 05_normalize_text.py --apply
+    uv run 05_normalize_text.py --stages [--apply]   # the stage generated_dataset.jsonl labels
 
 Each row carries two texts, and they are normalized differently because they serve
 different readers:
@@ -74,12 +75,18 @@ from loguru import logger
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent / "utils"))
-from nemo_manifest import MANIFEST_GLOBS, read_jsonl, write_jsonl  # noqa: E402
+from nemo_manifest import MANIFEST_GLOBS, read_jsonl, rewrite_jsonl, write_jsonl  # noqa: E402
+from script_module import load_script  # noqa: E402
 from label_conventions import apply_label_conventions  # noqa: E402
 from parakeet_tokenizer import ParakeetTokenizer  # noqa: E402
 from percent_normalize import (  # noqa: E402
     LEFTOVER_RE, percent_sign_to_one_word, percent_to_one_word, percent_to_symbol,
 )
+
+def normalize_label(text: str, tok: ParakeetTokenizer) -> str:
+    """The ASR label form: character fold, ``%``, then every label convention."""
+    return apply_label_conventions(percent_to_symbol(tok.clean_label(text)))
+
 
 def normalize_row(row: dict, tok: ParakeetTokenizer) -> dict:
     """Return a copy of ``row`` with ``text`` and ``asr_training_source`` normalized.
@@ -88,7 +95,7 @@ def normalize_row(row: dict, tok: ParakeetTokenizer) -> dict:
     its ``nfkc`` setting does not matter here.
     """
     out = dict(row)
-    out["text"] = apply_label_conventions(percent_to_symbol(tok.clean_label(row["text"])))
+    out["text"] = normalize_label(row["text"], tok)
     if "asr_training_source" in row:
         # One space between words here too, without clean_label's character fold.
         out["asr_training_source"] = apply_label_conventions(" ".join(percent_sign_to_one_word(
@@ -125,6 +132,29 @@ def normalize_keys(keys: set, jobs: int) -> dict:
         return dict(pool.imap_unordered(_normalize_key, list(keys), chunksize=500))
 
 
+def normalize_stage_targets(paths: list[Path], apply: bool, jobs: int) -> dict[Path, int]:
+    """``--stages``: the label normalization applied to ``asr_training_target`` of each
+    stage ``generated_dataset.jsonl``; returns the changed-row count per file.
+
+    The release manifests are rebuilt from those files (``01_build_nemo_manifest.py``
+    copies ``asr_training_target`` into ``text`` as is, the hotfix driver reruns it every
+    round), so a rewrite of the manifests alone is undone by the next rebuild. Only that
+    field changes: ``asr_training_source`` (what the TTS read) and every other field and
+    row stay, unchanged lines byte for byte (``rewrite_jsonl``). No row is ever dropped,
+    unlike ``07_write_back_texts.py``, which drops rows missing from the manifests. The
+    audio says the same thing before and after, so nothing is queued for a redraw.
+    """
+    keys = {(r["asr_training_target"], None) for p in paths for r in read_jsonl(p)
+            if isinstance(r.get("asr_training_target"), str)}
+    done = normalize_keys(keys, jobs)
+
+    def rewrite(row: dict) -> None:
+        if isinstance(row.get("asr_training_target"), str):
+            row["asr_training_target"] = done[(row["asr_training_target"], None)][0]
+
+    return {p: rewrite_jsonl(p, rewrite, apply) for p in paths}
+
+
 @click.command()
 @click.argument("manifests", nargs=-1, type=click.Path(path_type=Path))
 @click.option("--root", default=str(_HERE), show_default="99_hf_release/",
@@ -132,8 +162,20 @@ def normalize_keys(keys: set, jobs: int) -> dict:
 @click.option("--apply", is_flag=True, help="Write. Without it this is a dry run.")
 @click.option("--jobs", default=os.cpu_count() or 1, show_default="all cores")
 @click.option("--examples", default=10, show_default=True, help="Changed labels to print.")
-def main(manifests: tuple[Path, ...], root: str, apply: bool, jobs: int, examples: int) -> None:
+@click.option("--stages", is_flag=True,
+              help="Normalize asr_training_target of the stage generated_dataset.jsonl files "
+                   "(the ones 01_build_nemo_manifest.py reads) instead of the manifests.")
+def main(manifests: tuple[Path, ...], root: str, apply: bool, jobs: int, examples: int,
+         stages: bool = False) -> None:
     """Normalize percent spellings, whitespace and uncovered characters in the manifests."""
+    if stages:
+        build = load_script(_HERE / "01_build_nemo_manifest.py", "build_manifest_for_normalize")
+        paths = [_HERE.parent / stage["input"] for stage in build.STAGES]
+        for path, n in normalize_stage_targets(paths, apply, jobs).items():
+            logger.info(f"{path.relative_to(_HERE.parent)}: asr_training_target changed in {n}")
+        if not apply:
+            logger.warning("dry run, nothing written (pass --apply)")
+        return
     root_path = Path(root).resolve()
     targets = [Path(m) for m in manifests]
     if not targets:

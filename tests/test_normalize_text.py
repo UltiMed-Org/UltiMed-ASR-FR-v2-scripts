@@ -84,8 +84,40 @@ def test_main_dedup_parallel() -> None:
     print("test_main_dedup_parallel: OK")
 
 
+def test_stage_targets() -> None:
+    """--stages rewrites asr_training_target of a stage file and nothing else: the source,
+    the other fields and every row stay, an unchanged line byte for byte."""
+    import json
+    import tempfile
+    mod = load_sync_module(script=SCRIPT)
+    rows = [
+        {"term": "spiramycine", "asr_training_target": "un comprimé de un million 500000 unités, à 94%.",
+         "asr_training_source": "un comprimé de un million cinq cent mille unités, à 94 pourcent.",
+         "other": "un million 500000"},
+        {"term": "x", "asr_training_target": "Rien à changer.", "asr_training_source": "Rien à changer."},
+        {"term": "no label"},
+    ]
+    lines = [json.dumps(rows[0], ensure_ascii=False) + "\n",
+             # unusual spacing and escaping: kept verbatim since the row does not change
+             '{"term":"x",  "asr_training_target": "Rien \\u00e0 changer.", "asr_training_source": "Rien à changer."}\n',
+             json.dumps(rows[2]) + "\n"]
+    with tempfile.TemporaryDirectory() as d:
+        stage = Path(d) / "generated_dataset.jsonl"
+        stage.write_text("".join(lines), encoding="utf-8")
+        assert mod.normalize_stage_targets([stage], False, 1) == {stage: 1}
+        assert stage.read_text(encoding="utf-8") == "".join(lines), "dry run wrote"
+        assert mod.normalize_stage_targets([stage], True, 1) == {stage: 1}
+        got = stage.read_text(encoding="utf-8").splitlines(keepends=True)
+        assert len(got) == 3 and got[1:] == lines[1:], got
+        out = json.loads(got[0])
+        assert out == dict(rows[0], asr_training_target="un comprimé de 1500000 unités, à 94 %."), out
+        assert not list(Path(d).glob("*.tmp")), "temp file left behind"
+    print("test_stage_targets: OK")
+
+
 if __name__ == "__main__":
     test_normalize_row()
     test_label_conventions_both_texts()
     test_cp1252_mojibake()
     test_main_dedup_parallel()
+    test_stage_targets()

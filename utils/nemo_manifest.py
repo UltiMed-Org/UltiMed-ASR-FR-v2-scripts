@@ -642,6 +642,34 @@ def write_jsonl(path: Path, rows: Iterable[dict]) -> int:
     return n
 
 
+def rewrite_jsonl(path: Path, rewrite: Callable[[dict], None], apply: bool) -> int:
+    """Stream ``path`` through ``rewrite`` (which edits a row in place); returns how many
+    rows it changed. Every row is kept, in order, and an unchanged row's line is written
+    back byte for byte; with ``apply`` the file is replaced atomically (temp file +
+    ``os.replace``), so a reader never sees it half written. Used on the stage
+    ``generated_dataset.jsonl`` files, which the release manifests are rebuilt from."""
+    n = 0
+    tmp = path.with_suffix(path.suffix + ".rewrite.tmp")
+    out = tmp.open("w", encoding="utf-8") if apply else None
+    try:
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                row = json.loads(line)
+                before = json.dumps(row, ensure_ascii=False, sort_keys=True)
+                rewrite(row)
+                if json.dumps(row, ensure_ascii=False, sort_keys=True) != before:
+                    n += 1
+                    line = json.dumps(row, ensure_ascii=False) + "\n"
+                if out is not None:
+                    out.write(line)
+    finally:
+        if out is not None:
+            out.close()
+    if apply:
+        tmp.replace(path)
+    return n
+
+
 def write_splits(
     out_dir: Path,
     rows: Sequence[dict],
