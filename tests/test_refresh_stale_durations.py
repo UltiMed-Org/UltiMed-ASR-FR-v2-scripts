@@ -182,6 +182,36 @@ def redraw_after_manifest() -> None:
               str(redrawn["duration"]))
 
 
+def probe_uses_manifest_paths() -> None:
+    """The PARROT state stores its audio paths relative to ``NeMO_files/PARROT``
+    (``../../PARROT/x.flac``), not to the manifest's directory. Joined onto the manifest's
+    directory, that spelling walks out of the dataset through the ``data`` symlink onto
+    the v1 tree's file of the same name, a different take (2026-11-02: 89 PARROT rows got
+    v1 lengths, e.g. 000041_0000_parrot_60_c3 file 32.48 s, written 27.04). The probe must
+    read the file the manifest points at, whatever the state's spelling."""
+    print("13_refresh_stale_durations: probe the manifest's file, not the state's spelling")
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        manifest = root / "data" / "NeMO_files" / "full.jsonl"
+        manifest.parent.mkdir(parents=True)
+        _flac(root / "data" / "PARROT" / "000041_0000_parrot.flac", 32.48)
+        _flac(root / "PARROT" / "000041_0000_parrot.flac", 27.04)  # the v1 decoy
+        manifest.write_text(json.dumps(
+            {"audio_filepath": "../PARROT/000041_0000_parrot.flac", "duration": 32.48,
+             "text": LABEL, "voice": "fr_female"}) + "\n", encoding="utf-8")
+        state = root / "full.stt.jsonl"
+        state.write_text(json.dumps(
+            {"audio_filepath": "../../PARROT/000041_0000_parrot.flac", "duration": 32.48,
+             "text": LABEL, "voice": "fr_female", "improvement": {"status": "improved"},
+             "transcriptions": {"turbo": {"text": LABEL, "stt_seconds": 10.0}}}) + "\n",
+            encoding="utf-8")
+        CliRunner().invoke(_mod.main, ["--manifest", str(manifest), "--state", str(state),
+                                       "--apply", "--probe-files"], catch_exceptions=False)
+        (row,) = read(state)
+        check("a PARROT-spelled state row keeps the length of the manifest's file",
+              row["duration"] == 32.48, str(row["duration"]))
+
+
 def main() -> int:
     print("13_refresh_stale_durations: the tail blind spot, and nothing else")
 
@@ -265,6 +295,7 @@ def main() -> int:
               and "clip_not_in_manifest" in orphan_log, orphan_log[-300:])
 
     redraw_after_manifest()
+    probe_uses_manifest_paths()
 
     if failures:
         print(f"\nFAILED: {len(failures)}")

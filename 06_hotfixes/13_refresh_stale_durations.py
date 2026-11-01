@@ -128,14 +128,19 @@ def _disagrees(old, new) -> bool:
     return new is not None and (old is None or abs(float(old) - float(new)) > TOL_S)
 
 
-def probe_candidates(path: Path, truth: dict, audio_base: Path, *,
+def probe_candidates(path: Path, truth: dict, manifest: Path, *,
                      probe_improved: bool) -> dict[str, float]:
     """``{clip_key: duration read from the file}`` for the rows of state ``path`` whose
     length is in doubt: the manifest disagrees with the state (either side may be the
     stale one, see the module docstring), or, with ``probe_improved``, the row was
-    redrawn (``improvement.status == "improved"``). Audio paths are resolved like the
-    manifest's own, relative to its directory (``audio_base``)."""
-    paths: dict[str, Path] = {}
+    redrawn (``improvement.status == "improved"``).
+
+    The file read is the one the MANIFEST points at, never the state row's own path: the
+    PARROT state spells its paths relative to ``NeMO_files/PARROT`` (``../../PARROT/x``),
+    and joined onto the manifest's directory that walks through the ``data`` symlink onto
+    the v1 tree's file of the same name, a different take (2026-11-02, Claude Code: 89
+    PARROT rows written with v1 lengths)."""
+    keys: set[str] = set()
     with path.open(encoding="utf-8") as handle:
         for line in handle:
             if not line.strip():
@@ -146,9 +151,16 @@ def probe_candidates(path: Path, truth: dict, audio_base: Path, *,
                 continue
             improved = ((row.get("improvement") or {}).get("status") == "improved")
             if _disagrees(row.get("duration"), truth[key][0]) or (probe_improved and improved):
-                paths[key] = audio_base / row["audio_filepath"]
-    if not paths:
+                keys.add(key)
+    if not keys:
         return {}
+    paths: dict[str, Path] = {}
+    with manifest.open(encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                rel = json.loads(line)["audio_filepath"]
+                if clip_key(rel) in keys:
+                    paths[clip_key(rel)] = manifest.parent / rel
     by_name = probe_durations(list(paths.values()), progress=len(paths) > 1000)
     return {key: by_name[p.name] for key, p in paths.items() if p.name in by_name}
 
@@ -280,7 +292,7 @@ def main(states: tuple[Path, ...], manifest: Path, apply: bool, probe_files: boo
     stt = _load_stt()
     total = Counter()
     for path in targets:
-        probed = probe_candidates(path, truth, manifest.parent, probe_improved=probe_files)
+        probed = probe_candidates(path, truth, manifest, probe_improved=probe_files)
         counts = refresh_file(path, truth, stt, apply=apply, probed=probed)
         counts["files_probed"] = len(probed)
         # A `--state` given by hand can sit anywhere, so shorten only when it really is
