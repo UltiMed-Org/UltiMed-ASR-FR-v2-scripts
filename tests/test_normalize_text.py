@@ -54,8 +54,8 @@ def test_cp1252_mojibake() -> None:
     row = {"audio_filepath": "a.flac", "text": "Une goutte dans chaque \u009cil, c\u009cur \u0081."}
     out = mod.normalize_row(row, tok)
     # U+0081 is undefined in cp1252: left for the <unk> gate, never guessed. The repaired
-    # "œ" then follows the label convention like any other, hence "oe".
-    assert out["text"] == "Une goutte dans chaque oeil, coeur \u0081.", out["text"]
+    # "œ" then follows the label convention like any other, hence "oe" (and "Une goutte" -> "1 goutte", 2026-11-01).
+    assert out["text"] == "1 goutte dans chaque oeil, coeur \u0081.", out["text"]
     assert mod.normalize_row(out, tok) == out
     print("test_cp1252_mojibake: OK")
 
@@ -110,7 +110,7 @@ def test_stage_targets() -> None:
         got = stage.read_text(encoding="utf-8").splitlines(keepends=True)
         assert len(got) == 3 and got[1:] == lines[1:], got
         out = json.loads(got[0])
-        assert out == dict(rows[0], asr_training_target="un comprimé de 1500000 unités, à 94 %."), out
+        assert out == dict(rows[0], asr_training_target="1 comprimé de 1500000 unités, à 94 %."), out
         assert not list(Path(d).glob("*.tmp")), "temp file left behind"
     print("test_stage_targets: OK")
 

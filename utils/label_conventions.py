@@ -364,21 +364,36 @@ def normalize_clock(text: str) -> str:
 # (``milligrammes`` 62k digits against 1.9k words, ``ans`` 241k / 2.9k, ``mois``
 # 64k / 11k, ``heures`` 38k / 3.3k). ``fois`` and ``séances`` were split (8.9k digits
 # against 31.7k words, 1.8k against 2.2k) and the author chose digits (2026-09-28,
-# "2 fois par jour"), although words were the majority. Other counts of things are NOT
-# here, the corpus spells them (``comprimés`` 263 digits / 406 words, ``bouffées``,
-# ``gélules``, ``prises``, ``doses``): "deux comprimés de 4 milligrammes". The singular
+# "2 fois par jour"), although words were the majority. Dosage forms joined them on
+# 2026-11-01 (author's choice, ``_DOSAGE_FORMS``): "2 comprimés de 4 milligrammes",
+# although the labels mostly spelled them. The singular
 # forms follow a decimal (``zéro virgule cinq milligramme``) or a single ``un``/``une``,
-# which becomes ``1`` before a unit or a duration (``à un mois`` -> ``à 1 mois``, author's
-# choice 2026-10-08: the corpus mixed both in the same phrases, 16.6k ``un mois`` against
-# 4.6k ``1 mois``, and the fine-tuned model wrote whichever it liked, about 2.6k flips in
-# a third of the corpus) but stays spelled before ``fois`` / ``séances`` (``une fois par
-# jour``: 4.8k against 64 ``1 fois``, and ``une fois que`` is a conjunction).
+# which becomes ``1`` before a unit (``un gramme`` -> ``1 gramme``, ``un comprimé`` ->
+# ``1 comprimé``, author's choice 2026-10-08 then 2026-11-01: the corpus mixed both in
+# the same phrases, 16.6k ``un mois`` against 4.6k ``1 mois``, and the fine-tuned model
+# wrote whichever it liked, about 2.6k flips in a third of the corpus), before a duration
+# only in a quantity context (``_DURATION_CONTEXT_RE``: ``à un mois`` -> ``à 1 mois`` but
+# ``Un an plus tard`` stays), and stays spelled before ``fois`` / ``séances``
+# (``une fois par jour``: 4.8k against 64 ``1 fois``, and ``une fois que`` is a
+# conjunction) and the other words of ``_COUNT_UNIT_RE``.
+# Dosage forms (2026-11-01), labels-only counts of the release full.jsonl before the
+# change, "N digits / N spelled (any value) | 1 / un(e)": comprimés 577 / 7432 | 236 /
+# 6918, gélules 133 / 982 | 53 / 847, sachets 140 / 704 | 69 / 563, gouttes 416 / 2074 |
+# 180 / 1990, bouffées 74 / 581 | 4 / 271, suppositoires 1 / 44 | 0 / 43, flacons 52 /
+# 239 | 15 / 126, cuillères 18 / 182 | 9 / 162, capsules 11 / 187 | 2 / 176, ampoules
+# 37 / 535 | 18 / 517, doses 76 / 1823 | 13 / 1644, injections 61 / 1712 | 5 / 1543,
+# patchs 1 / 235 | 0 / 231. A "demi" is left alone: 310 ``un demi`` / ``une demi``
+# against 1 ``1 demi`` (``un demi-comprimé`` 128 / 1), so ``un comprimé et demi`` becomes
+# ``1 comprimé et demi`` and ``un demi-comprimé`` stays.
+_DOSAGE_FORMS = (r"comprimés?|gélules?|sachets?|gouttes?|bouffées?|suppositoires?|flacons?"
+                 r"|cuillères?|capsules?|ampoules?|doses?|injections?|patchs?")
 _QTY_UNITS = (r"(?:(?:milli|micro|nano|kilo)?grammes?|kilos?|(?:milli|micro|centi)?litres?"
               r"|(?:milli|centi|kilo)?mètres?|(?:milli|micro)moles?|unités?|degrés?"
-              r"|heures?|minutes?|secondes?|jours?|semaines?|mois|ans?|fois|séances?"
+              r"|heures?|minutes?|secondes?|jours?|semaines?|mois|ans?|années?|fois|séances?"
               # Radiology units: 588 labels write "N grays", 11 spelled them; hertz
               # 356 / 3, teslas 114 / 3.
-              r"|(?:milli|centi)?grays?|(?:kilo|méga)?hertz|teslas?|dioptries?)")
+              r"|(?:milli|centi)?grays?|(?:kilo|méga)?hertz|teslas?|dioptries?"
+              rf"|{_DOSAGE_FORMS})")
 # Every word a French number up to 999,999 is spelled with ("et" only inside one).
 _NUMBER_VALUES = {w: i for i, w in enumerate(_UNITS)} | {w: n for n, w in _TENS.items()}
 _NUMBER_VALUES |= {"une": 1, "vingts": 20}
@@ -392,9 +407,11 @@ _QTY_WORD = rf"(?:{'|'.join(sorted(_NUMBER_VALUES, key=len, reverse=True))}|cent
 _QTY_SEQ = rf"(?i:(?<![\w'’-]){_QTY_WORD}(?:[\s-]+{_QTY_WORD})*)"
 # A ratio's second number ("cinq jours sur sept") follows the first, else the label
 # mixes forms ("5 jours sur sept") the corpus never uses (362 all-words, 280 all-digits).
-# Not right after "pour": "0,10 gramme pour cent une fois par jour" is a percentage
-# followed by a count, not "101 fois" (the match then starts at "une", which stays).
-_QUANTITY_RE = re.compile(rf"(?<!\bpour )({_QTY_SEQ})(?:(\s+virgule\s+)({_QTY_SEQ}))?(\s+{_QTY_UNITS})\b"
+# Not a "cent" right after "pour": "0,10 gramme pour cent une fois par jour" is a
+# percentage followed by a count, not "101 fois" (the match then starts at "une", which
+# stays). Any other number after "pour" converts (2026-11-01: ``pour 1 mois``, labels
+# wrote "pour <digits> <unit>" 9.0k times against 534 spelled).
+_QUANTITY_RE = re.compile(rf"(?!(?<=\bpour )cent\b)({_QTY_SEQ})(?:(\s+virgule\s+)({_QTY_SEQ}))?(\s+{_QTY_UNITS})\b"
                           rf"(?:(\s+sur\s+)({_QTY_SEQ})\b)?")
 # A decimal the LLM wrote half in digits (94 labels, "3 virgule 5 mégahertz"): the
 # corpus writes "3,5" everywhere else.
@@ -408,8 +425,25 @@ _RANGE_HEAD_RE = re.compile(rf"({_QTY_SEQ})(\s+(?:à|ou)\s+\d+(?:,\d+)?\s+{_QTY_
 # Where a single one stays spelled, unlike a single unit of measure or duration ("1 mois",
 # author's choice 2026-10-08): the counts (``une fois par jour``, ``une séance``) and the
 # words that are rarely a measure after ``un``/``une`` (``un degré de gravité``, ``une
-# unité de soins``, ``en seconde intention``).
-_COUNT_UNIT_RE = re.compile(r"\s+(?:fois|séances?|degrés?|unités?|secondes?)$")
+# unité de soins``, ``en seconde intention``), and the dosage forms whose ``un``/``une``
+# is mostly an article, in anatomy, surgery or procedures (``une capsule de Glisson``,
+# ``une ampoule galactophore``, ``une dose d'irradiation``, ``admis pour une injection
+# sous-conjonctivale``, ``un patch veineux``): only from two up there.
+_COUNT_UNIT_RE = re.compile(r"\s+(?:fois|séances?|degrés?|unités?|secondes?"
+                            r"|capsules?|ampoules?|doses?|injections?|patchs?)$")
+# A single ``un``/``une`` before a duration becomes ``1`` only in a quantity context
+# (2026-11-01): ``dans un mois``, ``depuis une semaine``, ``il y a un an``, ``toutes les
+# une heure``, or ``et`` right after a number (``2 ans et un mois``). Elsewhere it is an
+# article or an idiom and stays spelled: ``Un an plus tard``, ``Et un jour, le fiancé``,
+# ``un jour ou l'autre``. Words before ``1 <duration>`` in UltiMed: dans 28.6k, à 28.2k,
+# pendant 7.3k, depuis 4.0k, a 3.1k (typo for à, and ``il y a``), de 1.0k, en 1.0k, après
+# 0.7k, et 0.5k, sur 0.5k, pour 0.3k, environ 0.3k. ``d'`` needs no entry (``d'un an``
+# never converts, see ``_QTY_SEQ``), nor ``plus de`` / ``moins de`` (``de`` covers them).
+_DURATION_UNIT_RE = re.compile(r"\s+(?:heures?|minutes?|jours?|semaines?|mois|ans?|années?)$")
+_DURATION_CONTEXT_RE = re.compile(
+    r"(?i)(?:^|[^\w'’])(?:dans|à|a|pendant|depuis|de|en|après|avant|sur|pour|environ|durant"
+    r"|sous|par|tous les|toutes les)\s+$"
+    r"|\d(?:\s+\w+)?\s+et\s+$")
 _SCORE_BASE = {"dix": 10, "vingt": 20, "cent": 100}
 _SCORE_RE = re.compile(rf"({_QTY_SEQ})(\s+sur\s+)(dix|vingt|cent)\b")
 # Suture gauges: "Vicryl trois zéro" (~250), "Vicryl 3 zéro" (~255), "Vicryl 3-0" (~300,
@@ -485,7 +519,9 @@ def _decimal_digits(words: list[str]) -> str | None:
     return "0" * zeros + ("" if rest is None else str(rest))
 
 
-def _replace_quantity(m: re.Match) -> str:
+def _replace_quantity(m: re.Match, before: str = "") -> str:
+    """``before`` is the text already rewritten in front of the match, which decides
+    whether a single ``un`` before a duration is a quantity (``_DURATION_CONTEXT_RE``)."""
     whole = _words(m.group(1))
     # A leading "et" belongs to the sentence ("et deux milligrammes"), not the number.
     head = ""
@@ -507,7 +543,26 @@ def _replace_quantity(m: re.Match) -> str:
     if value == 1 and _COUNT_UNIT_RE.match(m.group(4)):
         # "une fois par jour", "une unité de soins": see _COUNT_UNIT_RE.
         return m.group(0)
+    if (value == 1 and not ratio and _DURATION_UNIT_RE.match(m.group(4))
+            and not _DURATION_CONTEXT_RE.search(before + head)):
+        # "Un an plus tard": see _DURATION_CONTEXT_RE. A ratio ("un jour sur deux") is a
+        # quantity whatever comes before it.
+        return m.group(0)
     return f"{head}{value}{m.group(4)}{ratio}"
+
+
+def _sub_quantities(text: str) -> str:
+    """``_QUANTITY_RE.sub(_replace_quantity, text)``, except each replacement sees the
+    rewritten text before it, so ``un an et un mois`` after ``à`` gives ``à 1 an et 1
+    mois`` in one pass (the second ``et`` follows a digit only once the first is done),
+    which keeps the function idempotent."""
+    out = ""
+    last = 0
+    for m in _QUANTITY_RE.finditer(text):
+        out += text[last:m.start()]
+        out += _replace_quantity(m, out)
+        last = m.end()
+    return out + text[last:]
 
 
 def normalize_quantities(text: str) -> str:
@@ -515,14 +570,17 @@ def normalize_quantities(text: str) -> str:
     -> ``0,25 microgrammes``, ``toutes les huit heures`` -> ``toutes les 8 heures``,
     ``dans un mois`` -> ``dans 1 mois``.
 
-    Only before a unit of measure, a duration, ``fois`` or ``séances`` (``_QTY_UNITS``);
-    other counts (``deux comprimés``) and a single ``une fois`` / ``une séance`` stay
-    spelled, except as the head of a range (``un à deux fois`` -> ``1 à 2 fois``). A score becomes digits
+    Only before a unit of measure, a duration, a dosage form, ``fois`` or ``séances``
+    (``_QTY_UNITS``; ``deux comprimés`` -> ``2 comprimés``, ``un comprimé`` -> ``1
+    comprimé``). A single ``une fois`` / ``une séance`` stays spelled, except as the head of a
+    range (``un à deux fois`` -> ``1 à 2 fois``), and a single ``un`` before a duration
+    converts only in a quantity context (``dans un an`` -> ``dans 1 an``, ``Un an plus
+    tard`` stays). A score becomes digits
     too (``deux sur dix`` -> ``2 sur 10``). Minutes after
     a spelled hour (``huit heures trente``) are left alone: telling them from a count
     that follows (``deux heures deux fois par jour``) needs more than a regex. Idempotent.
     """
-    text = _QUANTITY_RE.sub(_replace_quantity, text)
+    text = _sub_quantities(text)
     text = _RANGE_HEAD_RE.sub(lambda m: _digits_or_keep(m, 1) + m.group(2), text)
     text = _SCORE_RE.sub(lambda m: f"{_digits_or_keep(m, 1)}{m.group(2)}{_SCORE_BASE[m.group(3)]}"
                          if parse_french_number(_words(m.group(1))) is not None else m.group(0), text)

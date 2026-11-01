@@ -2,8 +2,8 @@
 
 The cases are real UltiMed v1 label fragments: every rewrite must reach the corpus
 majority form, leave the look-alikes alone (``PCR M. tuberculosis``, ``le monsieur du
-lit 4``, ``les 4H et 4T``, ``mille neuf cent soixante-quatorze grammes``, ``deux
-comprimés``, ``deux trois jours``), and be idempotent. ``test_generator_parse`` checks that ``parse_asr_training_target`` (every
+lit 4``, ``les 4H et 4T``, ``mille neuf cent soixante-quatorze grammes``, ``Un an
+plus tard``, ``deux trois jours``), and be idempotent. ``test_generator_parse`` checks that ``parse_asr_training_target`` (every
 generator's parse step) applies them; it needs the LLM stack and is skipped when that
 is not installed.
 
@@ -127,20 +127,20 @@ def test_parse_french_number() -> None:
 
 
 def test_quantities() -> None:
-    # Real drug_sentence references: the dose is a measure (digits), the count of
-    # tablets is not (words), like the UltiMed majority.
+    # Real drug_sentence references: the dose is a measure (digits), and so is the count
+    # of tablets since 2026-11-01 (author's choice), "un" included.
     check(normalize_quantities, [
         ("On réduit la dose de silodosine à une gélule de quatre milligrammes par jour.",
-         "On réduit la dose de silodosine à une gélule de 4 milligrammes par jour."),
+         "On réduit la dose de silodosine à 1 gélule de 4 milligrammes par jour."),
         ("deux comprimés de deux cent cinquante microgrammes par jour",
-         "deux comprimés de 250 microgrammes par jour"),
+         "2 comprimés de 250 microgrammes par jour"),
         ("une capsule de zéro virgule vingt-cinq microgrammes chaque matin",
          "une capsule de 0,25 microgrammes chaque matin"),
         ("un flacon de deux cent cinquante-sept virgule cinquante milligrammes",
-         "un flacon de 257,50 milligrammes"),
+         "1 flacon de 257,50 milligrammes"),
         ("zéro virgule zéro cinq milligramme", "0,05 milligramme"),
         ("une goutte toutes les deux heures pendant dix-huit mois",
-         "une goutte toutes les 2 heures pendant 18 mois"),
+         "1 goutte toutes les 2 heures pendant 18 mois"),
         ("Soixante-quinze milligrammes et quatre-vingt-dix-sept ans, trois mille cinq cents unités.",
          "75 milligrammes et 97 ans, 3500 unités."),
         ("vingt et une heures", "21 heures"),
@@ -148,7 +148,7 @@ def test_quantities() -> None:
         ("cinq jours sur sept, vingt-quatre heures sur vingt-quatre, trois semaines sur quatre",
          "5 jours sur 7, 24 heures sur 24, 3 semaines sur 4"),
         # Counts of times / sessions, range heads and scores: digits (author's choice).
-        ("deux comprimés trois fois par jour, dix séances", "deux comprimés 3 fois par jour, 10 séances"),
+        ("deux comprimés trois fois par jour, dix séances", "2 comprimés 3 fois par jour, 10 séances"),
         ("pendant deux à trois jours, un à 2 fois, et deux à 4 semaines",
          "pendant 2 à 3 jours, 1 à 2 fois, et 2 à 4 semaines"),
         ("douleur à deux sur dix, EVA zéro sur dix", "douleur à 2 sur 10, EVA 0 sur 10"),
@@ -156,11 +156,10 @@ def test_quantities() -> None:
         ("0,10 gramme pour cent une fois par jour", "0,10 gramme pour cent une fois par jour"),
         # A single unit or duration: digits (author's choice 2026-10-08).
         ("Contrôle à un mois, puis dans une semaine. Un gramme de paracétamol, un an après.",
-         "Contrôle à 1 mois, puis dans 1 semaine. 1 gramme de paracétamol, 1 an après."),
+         "Contrôle à 1 mois, puis dans 1 semaine. 1 gramme de paracétamol, un an après."),
         ("correction de deux dioptries", "correction de 2 dioptries"),
     ])
     for untouched in [
-        "deux comprimés",
         "une fois par jour",
         # Counts, and words rarely a measure after "un"/"une".
         "une séance, une unité de soins, en seconde intention, un degré de gravité",
@@ -171,6 +170,69 @@ def test_quantities() -> None:
     ]:
         assert normalize_quantities(untouched) == untouched, (untouched, normalize_quantities(untouched))
     print("test_quantities: OK")
+
+
+def test_dosage_forms() -> None:
+    # 2026-11-01 (author's choice): a dosage form takes digits for every value, 1 included.
+    check(normalize_quantities, [
+        ("Prendre un comprimé le soir.", "Prendre 1 comprimé le soir."),
+        ("deux comprimés matin et soir", "2 comprimés matin et soir"),
+        ("un comprimé et demi au coucher", "1 comprimé et demi au coucher"),
+        ("une gélule, un sachet, deux bouffées, une cuillère-mesure",
+         "1 gélule, 1 sachet, 2 bouffées, 1 cuillère-mesure"),
+        ("trois gouttes dans chaque oeil, un suppositoire", "3 gouttes dans chaque oeil, 1 suppositoire"),
+        # From two up, the article-heavy forms convert too.
+        ("deux capsules, trois ampoules, deux doses, deux injections, deux patchs",
+         "2 capsules, 3 ampoules, 2 doses, 2 injections, 2 patchs"),
+    ])
+    for untouched in [
+        # A "demi" stays spelled: 310 "un demi" against 1 "1 demi" in the labels.
+        "un demi-comprimé le soir",
+        "un demi comprimé le soir",
+        # A single "un"/"une" before these is mostly an article.
+        "une capsule de Glisson, une ampoule galactophore, une dose d'irradiation",
+        "admis pour une injection sous-conjonctivale, un patch veineux",
+    ]:
+        assert normalize_quantities(untouched) == untouched, (untouched, normalize_quantities(untouched))
+    print("test_dosage_forms: OK")
+
+
+def test_single_duration_context() -> None:
+    # 2026-11-01: a lone "un"/"une" before a duration converts only in a quantity context.
+    check(normalize_quantities, [
+        ("Revoir dans un mois, contrôle à une semaine.", "Revoir dans 1 mois, contrôle à 1 semaine."),
+        ("Traité pendant un an, depuis une semaine, il y a un an.",
+         "Traité pendant 1 an, depuis 1 semaine, il y a 1 an."),
+        ("Bilan a un mois, en une heure, après une minute, avant un jour.",
+         "Bilan a 1 mois, en 1 heure, après 1 minute, avant 1 jour."),
+        ("une durée de un an, sur un mois, pour une semaine, environ une heure",
+         "une durée de 1 an, sur 1 mois, pour 1 semaine, environ 1 heure"),
+        ("durant un mois, sous une semaine, par une heure, toutes les une heure, tous les un an",
+         "durant 1 mois, sous 1 semaine, par 1 heure, toutes les 1 heure, tous les 1 an"),
+        ("plus de un an, moins de une heure", "plus de 1 an, moins de 1 heure"),
+        # "et" after a number, whether that number was already digits or not.
+        ("2 ans et un mois", "2 ans et 1 mois"),
+        ("deux ans et un mois", "2 ans et 1 mois"),
+        ("à un an et un mois", "à 1 an et 1 mois"),
+        # A ratio is a quantity wherever it stands.
+        ("Un jour sur deux.", "1 jour sur 2."),
+        # Values from two up and other units keep converting anywhere.
+        ("Deux heures plus tard, un gramme.", "2 heures plus tard, 1 gramme."),
+        ("deux années", "2 années"),
+        # "pour" before any number but "cent".
+        ("pour deux mois", "pour 2 mois"),
+    ])
+    for untouched in [
+        "Un an plus tard, il revient.",
+        "Et un jour, le fiancé est parti.",
+        "un jour ou l'autre",
+        "Une semaine après, la fièvre cède.",
+        "C'est un an de suivi.",
+        "un an et un mois",
+        "0,10 gramme pour cent une fois par jour",
+    ]:
+        assert normalize_quantities(untouched) == untouched, (untouched, normalize_quantities(untouched))
+    print("test_single_duration_context: OK")
 
 
 def test_compounds() -> None:
@@ -552,7 +614,7 @@ def test_all() -> None:
     raw = ("M. Dupont prend du DOLIPRANE à 14h30 depuis le quinze mars deux mille vingt, "
            "deux comprimés de cinq cents milligrammes au petit déjeuner.")
     want = ("Monsieur Dupont prend du Doliprane à 14 heures 30 depuis le 15 mars 2020, "
-            "deux comprimés de 500 milligrammes au petit-déjeuner.")
+            "2 comprimés de 500 milligrammes au petit-déjeuner.")
     assert apply_label_conventions(raw) == want, apply_label_conventions(raw)
     assert apply_label_conventions(want) == want
     print("test_all: OK")
@@ -576,6 +638,8 @@ if __name__ == "__main__":
     test_clock()
     test_parse_french_number()
     test_quantities()
+    test_dosage_forms()
+    test_single_duration_context()
     test_compounds()
     test_sutures_and_decimals()
     test_tts_source_pipeline_idempotent()

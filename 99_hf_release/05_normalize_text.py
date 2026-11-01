@@ -45,7 +45,8 @@ Both texts then go through ``utils/label_conventions.apply_label_conventions``: 
 written form for titles (``M. Dupont`` -> ``Monsieur Dupont``, ``Dr`` -> ``docteur``),
 dates (``le quinze mars deux mille vingt`` -> ``le 15 mars 2020``, ``premier mai`` ->
 ``1er mai``), clock times (``14h30`` -> ``14 heures 30``), quantities (``quatre
-milligrammes`` -> ``4 milligrammes``, counts like ``deux comprimés`` kept), compounds
+milligrammes`` -> ``4 milligrammes``, ``un comprimé`` -> ``1 comprimé``, ``Un an plus
+tard`` kept), compounds
 (``petit déjeuner`` -> ``petit-déjeuner``) and drug names (``PRIMPERAN`` / ``Primperan``
 -> ``Primpéran``, ``UVEDOSE`` -> ``Uvedose``, from
 ``utils/drug_casing.json``). The source gets them too because each rewrite is spoken
