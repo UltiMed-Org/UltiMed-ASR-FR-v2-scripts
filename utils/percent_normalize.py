@@ -8,7 +8,7 @@ provenance. The label is instead canonicalized AFTER the LLM:
 
 - ``percent_to_symbol`` gives the label form, ``95 pour cent`` / ``95 pourcent`` ->
   ``95 %`` (the space before ``%`` is French typography, and what the v1 rows already
-  written with ``%`` do). The text generators apply it in
+  written with ``%`` do; a glued ``95%`` gets the space too). The text generators apply it in
   ``_pipeline_shared.parse_asr_training_target``, so every freshly generated
   ``asr_training_target`` uses ``%``; ``99_hf_release/05_normalize_text.py`` applies
   it to the v1 manifests, generated before that.
@@ -66,9 +66,14 @@ _PERCENT_RE = re.compile(
 LEFTOVER_RE = re.compile(r"\bpour\s+cent\b|\bpourcent\b", re.IGNORECASE)
 
 
+# A sign glued to its number: 2 v2 train labels against 22k "N %" (2026-11-01).
+# Only after a digit, so a "vol%" or "g%" unit is untouched.
+_GLUED_SIGN_RE = re.compile(r"(\d)%")
+
+
 def percent_to_symbol(text: str) -> str:
-    """ASR label form: ``95 pour cent`` / ``95 pourcent`` -> ``95 %``. Idempotent."""
-    return _PERCENT_RE.sub(r"\1\2%", text)
+    """ASR label form: ``95 pour cent`` / ``95 pourcent`` / ``95%`` -> ``95 %``. Idempotent."""
+    return _GLUED_SIGN_RE.sub(r"\1 %", _PERCENT_RE.sub(r"\1\2%", text))
 
 
 def percent_to_one_word(text: str) -> str:

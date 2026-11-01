@@ -19,7 +19,7 @@ from label_conventions import (  # noqa: E402
     DrugCaser, apply_label_conventions, default_drug_caser, expand_titles, normalize_clock,
     normalize_accents, normalize_compounds, normalize_dates, normalize_quantities, normalize_spelling, normalize_staging, normalize_roman, normalize_sutures, normalize_thousands, respell_for_tts, restore_tts_accents, strip_generic_labs,
     parse_french_number, normalize_compound_spellings, normalize_official_names, normalize_non, normalize_ordinals,
-    lowercase_eponym_nouns, normalize_latin_names, normalize_hgvs,
+    lowercase_eponym_nouns, normalize_latin_names, normalize_hgvs, normalize_numbers,
 )
 
 
@@ -113,7 +113,11 @@ def test_parse_french_number() -> None:
     for words, want in [
         ("deux cent cinquante", 250), ("quatre vingt dix sept", 97), ("soixante et onze", 71),
         ("trois mille cinq cents", 3500), ("cent quatre vingts", 180), ("vingt et une", 21),
-        ("dix sept", 17), ("mille", 1000), ("zéro", 0),
+        ("dix sept", 17), ("mille", 1000), ("zéro", 0), ("septante cinq", 75),
+        ("un million cinq cent mille", 1500000), ("deux millions trois mille", 2003000),
+        ("trois milliards", 3000000000),
+        # A multiplier smaller than the one before it, and a bare "million".
+        ("mille million", None), ("million", None), ("deux mille mille", None),
         # Juxtaposed numbers are not one number: "deux trois jours" is 2 or 3 days.
         ("deux trois", None), ("vingt trente", None), ("cent cent", None),
         ("et deux", None), ("deux et", None), ("comprimé", None),
@@ -489,6 +493,54 @@ def test_hgvs() -> None:
     print("test_hgvs: OK")
 
 
+def test_numbers() -> None:
+    # Compound number words become digits wherever their role is unknown; real v2 label
+    # fragments, plus the user's examples (2026-11-01).
+    check(normalize_numbers, [
+        ("La maladie débute fin deux mille vingt-quatre.", "La maladie débute fin 2024."),
+        ("Saturation à quatre-vingt-dix % en air ambiant.", "Saturation à 90 % en air ambiant."),
+        ("Plaquettes à deux cents giga par litre.", "Plaquettes à 200 giga par litre."),
+        ("On compte vingt-cinq mitoses, curage en onze à dix-huit.", "On compte 25 mitoses, curage en onze à 18."),
+        ("Escherichia coli à cent mille par millilitre.", "Escherichia coli à 100000 par millilitre."),
+        ("Grossissement fois quatre cents.", "Grossissement fois 400."),
+        ("Sur vingt et un ganglions, Vingt-et-un lobe droit.", "Sur 21 ganglions, 21 lobe droit."),
+        ("Tension à cent quarante et un sur 80, quatre-vingt-un.", "Tension à 141 sur 80, 81."),
+        ("Macrogol quatre mille, mille neuf cent quatre-vingt-six.", "Macrogol 4000, 1986."),
+        # Decimals, comma like the 43k "N,N" of v2.
+        ("Mitoses à zéro virgule quatre-vingt-seize par millimètre carré.", "Mitoses à 0,96 par millimètre carré."),
+        ("Ballon de trois virgule cinq, pH à sept virgule trente et un.", "Ballon de 3,5, pH à 7,31."),
+        ("TSH à un virgule deux, éosinophiles à zéro virgule zéro deux.", "TSH à 1,2, éosinophiles à 0,02."),
+        # A final million / milliard keeps its word (v2: "4 millions d'unités").
+        ("Colimycine deux millions d'unités, un milliard d'UFC.", "Colimycine 2 millions d'unités, 1 milliard d'UFC."),
+        ("Leucocyturie supérieure à un million par millilitre.", "Leucocyturie supérieure à 1 million par millilitre."),
+        ("Rovamycine un virgule cinq millions d'unités.", "Rovamycine 1,5 millions d'unités."),
+        ("Dose de un million cinq cent mille unités.", "Dose de 1500000 unités."),
+        # Half converted by the LLM: the multiplier run and its digits are one number.
+        ("Spiramycine un million 500000 unités internationales.", "Spiramycine 1500000 unités internationales."),
+        ("À la dose d'un million 500000 unités.", "À la dose d'1500000 unités."),
+        ("Thrombocytose à six cent mille, deux mille 24.", "Thrombocytose à 600000, 2024."),
+    ])
+    for untouched in [
+        "Cytokératine cinq six négative.",
+        "Valeur cinq 3, facteur cinq 67 %, nerf cinq 3.",
+        "Mille mercis, cent pas, grade trois, cotée trois croix.",
+        "Le vingt-cinquième jour, au un sur deux cent cinquantième, au mille six centième.",
+        "Hôpital des Quinze-Vingts.",
+        "Schéma zéro un zéro, mobilité zéro cinq.",
+        "Un deux trois, une vingtaine, d'un million de cellules.",
+        "Mille parties par million 2 fois par jour.",
+        # Two numbers side by side, not one.
+        "Janumet mille sur cinquante un comprimé, Symbicort deux cents deux bouffées.",
+        "Deux trois jours, vingt trente.",
+        "Collyre 0,10 grammes pour cent une fois par jour.",
+    ]:
+        assert normalize_numbers(untouched) == untouched, (untouched, normalize_numbers(untouched))
+    # Label only: the TTS source keeps the words voxtral read.
+    assert apply_label_conventions("Saturation à quatre-vingt-dix %.", tts_source=True) == "Saturation à quatre-vingt-dix %."
+    assert apply_label_conventions("Saturation à quatre-vingt-dix %.") == "Saturation à 90 %."
+    print("test_numbers: OK")
+
+
 def test_all() -> None:
     raw = ("M. Dupont prend du DOLIPRANE à 14h30 depuis le quinze mars deux mille vingt, "
            "deux comprimés de cinq cents milligrammes au petit déjeuner.")
@@ -534,5 +586,6 @@ if __name__ == "__main__":
     test_eponym_nouns()
     test_latin_names()
     test_hgvs()
+    test_numbers()
     test_all()
     test_generator_parse()

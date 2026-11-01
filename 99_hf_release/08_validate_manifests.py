@@ -27,7 +27,11 @@ not held hostage by the 20-minute acoustic one:
 ``structure``
     Every row carries every expected column, filled, of the right type, with values in
     range: text non-empty, duration positive, voice on the roster, cfg_alpha inside the
-    measured usable band, qc_status a known value. Cheap, reads nothing but the jsonl.
+    measured usable band, qc_status a known value. Also the label number conventions
+    05 applies (``percent_to_symbol``: ``94 %``, not ``94%``; ``normalize_numbers``: no
+    spelled compound number, no ``un million 500000``), so a regression in a
+    regenerated text is caught. Reads nothing but the jsonl (the number check costs
+    about 40 s over full.jsonl).
 
 ``files``
     The audio each row points at exists, and `soundfile` agrees with the stored
@@ -74,6 +78,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -84,6 +89,9 @@ from loguru import logger
 from tqdm import tqdm
 
 _HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_HERE.parent / "utils"))
+from label_conventions import normalize_numbers  # noqa: E402
+from percent_normalize import percent_to_symbol  # noqa: E402
 _STT = None
 
 
@@ -168,6 +176,9 @@ CFG_FLOOR, CFG_CEILING = 1.2, 2.0
 SCORE_EPSILON = 1e-4
 
 #: Stray-file suffixes that mean an interrupted write, not a clip.
+# Only names which kind of normalize_numbers finding a label is (``un million 500000``).
+_HALF_CONVERTED_RE = re.compile(r"(?i)\b(?:mille|millions?|milliards?) \d")
+
 STRAY_SUFFIXES = (".bak", ".tmp", ".flac.tmp", ".part")
 
 
@@ -274,6 +285,15 @@ def check_structure(rows: list[dict], name: str, f: Findings) -> None:
             elif not isinstance(got, (int, float)) or abs(got - want) > 1e-9:
                 f.error(name, f"'{top}' is {got}, want {want} "
                               f"(max of {', '.join(parts)})", ident)
+
+        text = r.get("text")
+        if isinstance(text, str):
+            if percent_to_symbol(text) != text:
+                f.error(name, "label percent not in the '94 %' form (rerun 05)", f"{ident} text={text[:120]!r}")
+            if normalize_numbers(text) != text:
+                kind = ("multiplier words followed by digits" if _HALF_CONVERTED_RE.search(text)
+                        else "spelled compound number")
+                f.error(name, f"label has a {kind} (rerun 05)", f"{ident} text={text[:120]!r}")
 
         dur = r.get("duration")
         if isinstance(dur, (int, float)) and dur <= 0:

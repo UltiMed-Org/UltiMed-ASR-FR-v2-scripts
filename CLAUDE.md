@@ -223,7 +223,7 @@ from _pipeline_shared import call_llm, PricingTracker  # noqa: E402
   (every generator's parse step) and `99_hf_release/05_normalize_text.py` both call it;
   covered by `tests/test_uncovered_fold.py`.
 - **`percent_normalize.py`** (stdlib only) holds the one percent rule:
-  `percent_to_symbol` (`95 pour cent` / `95 pourcent` -> `95 %`, the label form every
+  `percent_to_symbol` (`95 pour cent` / `95 pourcent` / `95%` -> `95 %`, the label form every
   generator applies at parse time) and `percent_to_one_word` (`-> 95 pourcent`, used
   only by `99_hf_release/05_normalize_text.py` on the v1 TTS sources, which were read
   from `pour cent`), with the guards that keep a "per hundred X" and the vol% / g%
@@ -251,7 +251,7 @@ from _pipeline_shared import call_llm, PricingTracker  # noqa: E402
   (`stade IIIb` -> `stade 3b`, `palier deux` -> `palier 2`, only after a staging word),
   compounds (`petit déjeuner` -> `petit-déjeuner`, split prefixes glued: `extra
   hépatiques` -> `extra-hépatiques`), suture gauges (`Vicryl trois zéro` -> `Vicryl 3-0`, label only,
-  `tts_source=True` skips it), spelling variants (`œ` -> `oe`, `aigüe` -> `aiguë`,
+  `tts_source=True` skips it), any other spelled compound number (`normalize_numbers`, label only, 2026-11-01: a run of 2+ number words that parses as one number -> glued digits, `deux mille vingt-quatre` -> `2024`, `cent mille` -> `100000`, `trois virgule cinq` -> `3,5`, a final `million` / `milliard` keeps its word, `deux millions` -> `2 millions`, and a half-converted `un million 500000` -> `1500000`; a single word, `zéro` runs, ordinals, fractions and capitalized names stay), spelling variants (`œ` -> `oe`, `aigüe` -> `aiguë`,
   `compte-rendu` -> `compte rendu`, `bétabloquant`, `anévrisme`, `urètre`, `A surveiller` ->
   `À surveiller`) and drug casing (`DrugCaser`, driven by the committed lexicon
   `utils/drug_casing.json`: `PRIMPERAN` / `Primperan` -> `Primpéran`, `PARACETAMOL` ->

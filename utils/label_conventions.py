@@ -44,6 +44,11 @@ rewrites the minority spellings to it:
   number formatting, not recognition. The radiology units (``grays``, ``hertz``,
   ``teslas``) count as units, and a decimal written half in digits becomes a decimal
   (``3 virgule 5 mégahertz`` -> ``3,5 mégahertz``).
+- **Other spelled numbers** (``normalize_numbers``, label only, 2026-11-01). Any other
+  run of two or more number words that spells one number: ``deux mille vingt-quatre``
+  -> ``2024``, ``quatre-vingt-dix %`` -> ``90 %``, ``trois virgule cinq`` -> ``3,5``,
+  ``deux millions`` -> ``2 millions``, ``un million 500000`` -> ``1500000``. See the
+  comment above ``_NUMBER_RE`` for what stays.
 - **Suture gauges** (``normalize_sutures``, label only). ``Vicryl trois zéro`` /
   ``Vicryl 3 zéros`` / ``Vicryl 3/0`` -> ``Vicryl 3-0``, only after a suture material.
   Skipped for a TTS source (``tts_source=True``) because voxtral does not read ``3-0``
@@ -377,6 +382,11 @@ _QTY_UNITS = (r"(?:(?:milli|micro|nano|kilo)?grammes?|kilos?|(?:milli|micro|cent
 # Every word a French number up to 999,999 is spelled with ("et" only inside one).
 _NUMBER_VALUES = {w: i for i, w in enumerate(_UNITS)} | {w: n for n, w in _TENS.items()}
 _NUMBER_VALUES |= {"une": 1, "vingts": 20}
+# Belgian and Swiss tens, rare in the corpus but the same numbers.
+_NUMBER_VALUES |= {"septante": 70, "huitante": 80, "octante": 80, "nonante": 90}
+# The multipliers, largest last word of each group: "deux millions trois cent mille".
+_SCALES = {"mille": 1000, "mil": 1000, "million": 10**6, "millions": 10**6,
+           "milliard": 10**9, "milliards": 10**9}
 _QTY_WORD = rf"(?:{'|'.join(sorted(_NUMBER_VALUES, key=len, reverse=True))}|cents?|mille|mil|et)"
 # Not after an elision: "d'un mois" stays, "d'1 mois" is not written.
 _QTY_SEQ = rf"(?i:(?<![\w'’-]){_QTY_WORD}(?:[\s-]+{_QTY_WORD})*)"
@@ -420,11 +430,13 @@ def parse_french_number(words: list[str]) -> int | None:
     """Value of spelled-out French number words, or None when they do not spell one.
 
     ``["deux", "cent", "cinquante"]`` -> 250, ``["quatre", "vingt", "dix", "sept"]``
-    -> 97, ``["trois", "mille", "cinq", "cents"]`` -> 3500. Hyphens must already be
-    split off. Lenient on spelling variants (``cent``/``cents``, ``vingt``/``vingts``),
-    strict on structure (``_can_follow``, one ``mille``, one ``cent`` per thousand).
+    -> 97, ``["trois", "mille", "cinq", "cents"]`` -> 3500, ``["un", "million", "cinq",
+    "cent", "mille"]`` -> 1500000. Hyphens must already be split off. Lenient on
+    spelling variants (``cent``/``cents``, ``vingt``/``vingts``), strict on structure
+    (``_can_follow``, each multiplier smaller than the one before, one ``cent`` per
+    group, ``million`` / ``milliard`` only after their count).
     """
-    total, current = 0, 0
+    total, current, last_scale = 0, 0, None
     for i, raw in enumerate(words):
         w = raw.lower()
         if w == "et":
@@ -435,10 +447,11 @@ def parse_french_number(words: list[str]) -> int | None:
             if current >= 100:
                 return None
             current = (current or 1) * 100
-        elif w in ("mille", "mil"):
-            if total:
+        elif w in _SCALES:
+            scale = _SCALES[w]
+            if (last_scale is not None and scale >= last_scale) or (scale > 1000 and not current):
                 return None
-            total, current = (current or 1) * 1000, 0
+            total, current, last_scale = total + (current or 1) * scale, 0, scale
         elif w in ("vingt", "vingts") and current % 100 == 4:
             current += 76  # "quatre vingt" is 80
         elif w in _NUMBER_VALUES:
@@ -547,6 +560,118 @@ def normalize_thousands(text: str) -> str:
     """``18 000`` -> ``18000``, ``1 sur 10 000`` -> ``1 sur 10000``. Label only: the TTS
     source keeps the spaced form voxtral reads as one number. Idempotent."""
     return _THOUSANDS_RE.sub(lambda m: m.group(1) + m.group(2).replace(" ", ""), text)
+
+
+# Spelled numbers elsewhere (2026-11-01). The rules above convert a number where its
+# role is known (a date, a dose, a stage); the LLM still spelled ~600 other quantities
+# in a corpus that writes them in digits, so a model trained on it wrote both. Any run
+# of two or more number words that parses as ONE number becomes digits (``deux mille
+# vingt-quatre`` -> ``2024``, ``quatre-vingt-dix %`` -> ``90 %``, ``cent mille`` ->
+# ``100000``, glued like ``normalize_thousands``: v2 has no ``1 500 000``), and so does
+# a decimal (``trois virgule cinq`` -> ``3,5``). Left alone: a single word (``mille
+# mercis``, ``grade trois``), a run that is not one number (``cytokératine cinq six``),
+# a run with ``zéro`` (``zéro un`` is a code, not 1), a leading ``un`` / ``une`` unless a
+# multiplier follows (``un deux``), ordinals and suffixed words (``vingt-cinquième``),
+# capitalized names (``les Quinze-Vingts``). A final ``million`` / ``milliard`` keeps its
+# word (v2 writes ``4 millions d'unités``, 180 labels): ``deux millions`` -> ``2
+# millions``. A run ending in a multiplier and followed by digits is one number the LLM
+# half-converted: ``un million 500000 unités`` -> ``1500000 unités``.
+_NUM_WORD = (rf"(?:{'|'.join(sorted(set(_NUMBER_VALUES) | set(_SCALES) | {'cent', 'cents'}, key=len, reverse=True))})"
+             r"(?!\w)")
+_NUM_SEP = r"(?:\s+et\s+|-et-|[\s-]+)"
+_NUM_RUN = rf"{_NUM_WORD}(?:{_NUM_SEP}{_NUM_WORD})*"
+# An elision is allowed before the run only for the half-converted form ("d'un million
+# 500000" -> "d'1500000"), checked in ``_replace_number``. Not after "pour": "0,10 gramme
+# pour cent une fois par jour" is a g% the percent guards keep spelled, not 101.
+_NUMBER_RE = re.compile(rf"(?i:(?<![\w-])(?<!\bpour )({_NUM_RUN})(?:(\s+virgule\s+)({_NUM_RUN}))?"
+                        rf"(?:(\s+)(\d+)(?![\w]|[,.]\d))?)")
+
+
+def _num_words(run: str) -> list[str]:
+    """Lowercased words of a run, ``et`` kept (``parse_french_number`` checks it)."""
+    return [w.lower() for w in _words(run)]
+
+
+def _number_digits(run: str) -> str | None:
+    """Digits for a run of two or more words that spells one number, a final ``million`` /
+    ``milliard`` kept as a word (``deux millions`` -> ``2 millions``). None otherwise."""
+    words = _num_words(run)
+    counted = [w for w in words if w != "et"]
+    if len(counted) < 2 or "zéro" in counted or any(w[0].isupper() for w in _words(run)[1:]):
+        return None
+    # Not one number but two side by side: "Janumet mille sur cinquante un comprimé"
+    # (51 is "cinquante et un", 81 "quatre-vingt-un"), "Symbicort deux cents deux
+    # bouffées" (a plural "cents" or "vingts" ends its number, except before a multiplier).
+    for prev, w, nxt in zip([""] + words, words, words[1:]):
+        if (w in ("vingt", "trente", "quarante", "cinquante", "soixante") and nxt in ("un", "une")
+                and not (w == "vingt" and prev == "quatre")) \
+                or (w in ("cents", "vingts") and nxt not in _SCALES):
+            return None
+    value = parse_french_number(words)
+    if value is None:
+        return None
+    scales = [w for w in counted if w in _SCALES]
+    if counted[-1] in _SCALES and _SCALES[counted[-1]] > 1000 and len(scales) == 1:
+        return f"{value // _SCALES[counted[-1]]} {_words(run)[-1]}"
+    return str(value)
+
+
+def _decimal(int_run: str, dec_run: str) -> str | None:
+    """``trois`` + ``cinq`` -> ``3,5``, ``deux`` + ``cinq millions`` -> ``2,5 millions``."""
+    int_words, dec_words = _num_words(int_run), _words(dec_run)
+    tail = ""
+    if dec_words[-1].lower() in _SCALES and _SCALES[dec_words[-1].lower()] > 1000:
+        tail = " " + dec_words.pop()
+    if any(w in _SCALES for w in int_words) or any(w.lower() in _SCALES for w in dec_words) or not dec_words:
+        return None
+    if "zéro" in int_words and int_words != ["zéro"]:
+        return None
+    value = 0 if int_words == ["zéro"] else parse_french_number(int_words)
+    digits = _decimal_digits(dec_words)
+    if value is None or digits is None:
+        return None
+    return f"{value},{digits}{tail}"
+
+
+def _replace_number(m: re.Match, text: str) -> str:
+    run, vsep, dec_run, dsep, digits = m.groups()
+    words = _num_words(run)
+    elided = m.start() > 0 and text[m.start() - 1] in "'’"
+    if vsep and not elided:
+        dec = _decimal(run, dec_run)
+        if dec is not None:
+            return dec + (dsep + digits if digits else "")
+    # A leading "un" / "une" is an article unless a multiplier follows ("un million").
+    if words[0] in ("un", "une") and (len(words) < 2 or words[1] not in _SCALES):
+        lead = re.match(r"\S+?(?=[\s-])[\s-]+", run)
+        if lead is None:
+            return m.group(0)
+        tail = text[m.start() + lead.end():]
+        sub = _NUMBER_RE.match(tail)
+        if sub is None:
+            return m.group(0)
+        return run[:lead.end()] + _replace_number(sub, tail) + m.group(0)[lead.end() + sub.end():]
+    # An ordinal or suffixed word continues the run ("vingt-cinquième"), or a fraction
+    # ends it ("au un sur deux cent cinquantième", "au mille six centième").
+    if re.match(r"-\w|[\s-]+\w+ièmes?\b", text[m.end(1):]):
+        return m.group(0)
+    # "un million 500000": a run ending in a multiplier, then the rest in digits.
+    if digits and not vsep and words[-1] in _SCALES and len(words) >= 2:
+        value = parse_french_number(words)
+        if value is not None and "zéro" not in words and int(digits) < _SCALES[words[-1]]:
+            return str(value + int(digits))
+    if elided:
+        return m.group(0)
+    converted = _number_digits(run)
+    return m.group(0) if converted is None else converted + m.group(0)[len(run):]
+
+
+def normalize_numbers(text: str) -> str:
+    """Spelled compound numbers to digits: ``deux mille vingt-quatre`` -> ``2024``,
+    ``trois virgule cinq`` -> ``3,5``, ``deux millions`` -> ``2 millions``, ``un million
+    500000 unités`` -> ``1500000 unités``. Label only, like ``normalize_thousands``: the
+    TTS source keeps the words voxtral read. Idempotent."""
+    return _NUMBER_RE.sub(lambda m: _replace_number(m, text), text)
 
 
 def _replace_suture(m: re.Match) -> str:
@@ -1286,14 +1411,14 @@ def apply_label_conventions(text: str, tts_source: bool = False) -> str:
     and dates before quantities so a spelled year is read as a year, not as a count.
 
     ``tts_source=True`` is for a text the TTS reads (05 on the v1 sources): it skips
-    ``normalize_sutures`` and ``normalize_thousands``, which voxtral may not speak
-    identically, keeps the accents of drug INNs (``restore_tts_accents``) and respells
+    ``normalize_sutures``, ``normalize_thousands`` and ``normalize_numbers``, which
+    voxtral may not speak identically, keeps the accents of drug INNs (``restore_tts_accents``) and respells
     the words voxtral misreads (``respell_for_tts``).
     """
     text = normalize_roman(normalize_staging(normalize_quantities(normalize_clock(normalize_dates(
         expand_titles(normalize_hgvs(text)))))))
     if not tts_source:
-        text = normalize_thousands(normalize_sutures(text))
+        text = normalize_numbers(normalize_thousands(normalize_sutures(text)))
     # Accents last: the drug caser restores the ANSM accents an INN choice removes.
     # Eponyms lowercased before the compound table, which keys on lowercase forms but
     # keeps their capitals (``Echo-Doppler`` is looked up as ``echo-doppler``).

@@ -71,6 +71,9 @@ def test_percent() -> None:
     for raw in NOT_PERCENT:
         assert percent_to_symbol(raw) == raw, (raw, percent_to_symbol(raw))
         assert percent_to_one_word(raw) == raw, raw
+    # A glued sign gets its space (2 v2 train labels against 22k "N %"); a unit is untouched.
+    assert percent_to_symbol("Brûlure de 12% et 88 %.") == "Brûlure de 12 % et 88 %."
+    assert percent_to_symbol("Concentration en vol% et g%.") == "Concentration en vol% et g%."
     assert LEFTOVER_RE.search(NOT_PERCENT[0]) and not LEFTOVER_RE.search(PERCENT_CASES[0][1])
     print("test_percent: OK")
 
