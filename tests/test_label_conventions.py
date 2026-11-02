@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "utils"))
+from percent_normalize import percent_to_symbol  # noqa: E402
 from label_conventions import (  # noqa: E402
     DrugCaser, apply_label_conventions, default_drug_caser, expand_titles, normalize_clock,
     normalize_accents, normalize_compounds, normalize_dates, normalize_quantities, normalize_spelling, normalize_staging, normalize_roman, normalize_sutures, normalize_thousands, respell_for_tts, restore_tts_accents, strip_generic_labs,
@@ -615,6 +616,26 @@ def test_numbers() -> None:
     print("test_numbers: OK")
 
 
+def test_single_word_percent() -> None:
+    # 2026-11-02 (author's choice): one number word before "%" converts too, cent and
+    # mille included, so "cent pour cent" is "100 %" rather than "cent %".
+    check(normalize_numbers, [
+        ("Réduction de dix %, cent %, mille %.", "Réduction de 10 %, 100 %, 1000 %."),
+        ("Un % des cas, zéro % de rechute.", "1 % des cas, 0 % de rechute."),
+    ])
+    # Through the label path 05 uses: percent_to_symbol, then the conventions.
+    for raw, want in [("dix pour cent", "10 %"), ("cent pour cent", "100 %"),
+                      ("zéro virgule cinq pour cent", "0,5 %"), ("cent pourcent", "100 %")]:
+        got = apply_label_conventions(percent_to_symbol(raw))
+        assert got == want, (raw, got)
+    for untouched in ["Collyre 0,10 grammes pour cent une fois par jour.",
+                      "dix patients, cent fois, quelques %"]:
+        assert normalize_numbers(untouched) == untouched, (untouched, normalize_numbers(untouched))
+    # Label only: the TTS source keeps the word.
+    assert apply_label_conventions("cent %", tts_source=True) == "cent %"
+    print("test_single_word_percent: OK")
+
+
 def test_all() -> None:
     raw = ("M. Dupont prend du DOLIPRANE à 14h30 depuis le quinze mars deux mille vingt, "
            "deux comprimés de cinq cents milligrammes au petit déjeuner.")
@@ -663,5 +684,6 @@ if __name__ == "__main__":
     test_latin_names()
     test_hgvs()
     test_numbers()
+    test_single_word_percent()
     test_all()
     test_generator_parse()

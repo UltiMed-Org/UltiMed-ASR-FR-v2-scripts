@@ -648,6 +648,8 @@ _NUMBER_RE = re.compile(rf"(?i:(?<![\w-])(?<!\bpour )(?:(?P<de>d)['’](?=une?\b
                         rf"(?:(?P<vsep>\s+virgule\s+)(?P<dec>{_NUM_RUN}))?"
                         rf"(?:(?P<dsep>\s+)(?P<digits>\d+)(?![\w]|[,.]\d))?)")
 
+# What makes a single number word a quantity for ``normalize_numbers``: a ``%`` next.
+_PERCENT_AFTER_RE = re.compile(r"\s*%")
 
 def _num_words(run: str) -> list[str]:
     """Lowercased words of a run, ``et`` kept (``parse_french_number`` checks it)."""
@@ -705,6 +707,10 @@ def _replace_number(m: re.Match, text: str) -> str:
         dec = _decimal(run, dec_run)
         if dec is not None:
             return dec + (dsep + digits if digits else "")
+    # One number word before a percent sign is a quantity too (2026-11-02, author's
+    # choice): "dix %" -> "10 %", "cent %" (from "cent pour cent") -> "100 %".
+    if len(words) == 1 and not (vsep or digits or elided) and _PERCENT_AFTER_RE.match(text, m.end("run")):
+        return f"{parse_french_number(words)}{text[m.end('run'):m.end()]}"
     # A leading "un" / "une" is an article unless a multiplier follows ("un million").
     if words[0] in ("un", "une") and (len(words) < 2 or words[1] not in _SCALES):
         lead = re.match(r"\S+?(?=[\s-])[\s-]+", run)
@@ -735,7 +741,8 @@ def normalize_numbers(text: str) -> str:
     """Spelled compound numbers to digits: ``deux mille vingt-quatre`` -> ``2024``,
     ``trois virgule cinq`` -> ``3,5``, ``deux millions`` -> ``2 millions``, ``un million
     500000 unités`` -> ``1500000 unités``. Label only, like ``normalize_thousands``: the
-    TTS source keeps the words voxtral read. Idempotent."""
+    TTS source keeps the words voxtral read. A single word converts only before
+    ``%`` (``cent %`` -> ``100 %``). Idempotent."""
     return _NUMBER_RE.sub(lambda m: _replace_number(m, text), text)
 
 
