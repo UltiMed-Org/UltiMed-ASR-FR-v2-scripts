@@ -21,7 +21,7 @@ from label_conventions import (  # noqa: E402
     normalize_accents, normalize_compounds, normalize_dates, normalize_quantities, normalize_spelling, normalize_staging, normalize_roman, normalize_sutures, normalize_thousands, respell_for_tts, restore_tts_accents, strip_generic_labs,
     parse_french_number, normalize_compound_spellings, normalize_official_names, normalize_non, normalize_ordinals,
     lowercase_eponym_nouns, normalize_latin_names, normalize_hgvs, normalize_numbers,
-    normalize_elided_quantities,
+    normalize_elided_quantities, normalize_label_numbers,
 )
 
 
@@ -664,6 +664,9 @@ def test_elided_one() -> None:
     assert apply_label_conventions("La prise d'un comprimé.") == "La prise d'1 comprimé."
     # Label only: the TTS source keeps what voxtral reads.
     assert apply_label_conventions("La prise d'un comprimé.", tts_source=True) == "La prise d'un comprimé."
+    # The label-only number steps as one function (what Common Voice rehearsal runs).
+    check(normalize_label_numbers, [("Prise d'un comprimé, dix %, un million 500 000 unités.",
+                                     "Prise d'1 comprimé, 10 %, 1500000 unités.")])
     print("test_elided_one: OK")
 
 

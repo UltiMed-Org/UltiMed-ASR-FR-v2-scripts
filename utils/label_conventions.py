@@ -1508,6 +1508,15 @@ def respell_for_tts(text: str) -> str:
     return text
 
 
+def normalize_label_numbers(text: str) -> str:
+    """The label-only number steps, in order: ``normalize_elided_quantities``, then
+    ``normalize_numbers`` between two ``normalize_thousands`` (before, so "un million 500
+    000" merges whole; after, so "cent trente-quatre 500" -> "134 500" is glued now, not
+    on the next pass). One function so the training repo's general-French chain (Common
+    Voice rehearsal) runs exactly these instead of re-listing them (Claude Code,
+    2026-11-02). Idempotent."""
+    return normalize_thousands(normalize_numbers(normalize_thousands(normalize_elided_quantities(text))))
+
 def apply_label_conventions(text: str, tts_source: bool = False) -> str:
     """Every rewrite, titles first so ``M.`` is gone before sentence starts are judged,
     and dates before quantities so a spelled year is read as a year, not as a count.
@@ -1520,10 +1529,7 @@ def apply_label_conventions(text: str, tts_source: bool = False) -> str:
     text = normalize_roman(normalize_staging(normalize_quantities(normalize_clock(normalize_dates(
         expand_titles(normalize_hgvs(text)))))))
     if not tts_source:
-        # Thousands on both sides: before, so "un million 500 000" merges whole; after,
-        # so "cent trente-quatre 500" -> "134 500" is glued now, not on the next pass.
-        text = normalize_thousands(normalize_numbers(normalize_thousands(normalize_sutures(
-            normalize_elided_quantities(text)))))
+        text = normalize_label_numbers(normalize_sutures(text))
     # Accents last: the drug caser restores the ANSM accents an INN choice removes.
     # Eponyms lowercased before the compound table, which keys on lowercase forms but
     # keeps their capitals (``Echo-Doppler`` is looked up as ``echo-doppler``).
