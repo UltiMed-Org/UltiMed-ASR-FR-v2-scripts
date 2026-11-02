@@ -39,6 +39,8 @@ def test_buckets() -> None:
 
 def test_digits_only_is_silent() -> None:
     assert not any(run("2 comprimés de 500 milligrammes, 10 %, 3 sur 10.").values())
+    # "pourcentage" is no "pourcent"
+    assert not run("avec un pourcentage de cellules")["c. spelled number before a percent or score"]
 
 
 if __name__ == "__main__":

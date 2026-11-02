@@ -23,7 +23,8 @@ in the shipped labels, so a new rule is decided from counts rather than from mem
      patients``), a pointer to recurring shapes none of the above names.
 
 Each with its count and a few examples. Reads only. ``--conventions`` first runs every
-label through ``apply_label_conventions`` (what 05 would ship with the current rules).
+label through ``percent_to_symbol`` and ``apply_label_conventions`` (what 05 would ship
+with the current rules).
 
     uv run audit_number_words.py
     uv run audit_number_words.py --conventions --manifest data/NeMO_files/full.jsonl
@@ -45,6 +46,7 @@ sys.path.insert(0, str(_HERE.parent / "utils"))
 from label_conventions import (  # noqa: E402
     _QTY_SEQ, _QTY_UNITS, _words, apply_label_conventions, parse_french_number,
 )
+from percent_normalize import percent_to_symbol  # noqa: E402
 
 DEFAULT_MANIFESTS = (
     _HERE / "data" / "NeMO_files" / "full.jsonl",
@@ -55,7 +57,7 @@ DEFAULT_MANIFESTS = (
 _UNIT = rf"(?i:{_QTY_UNITS})\b"
 SPELLED_UNIT_RE = re.compile(rf"({_QTY_SEQ})\s+({_UNIT})")
 ELIDED_UNIT_RE = re.compile(rf"(?i:\b(?:d|qu|l|jusqu)['’]\s*(?:à\s+)?une?)\s+({_UNIT})")
-PERCENT_RE = re.compile(rf"({_QTY_SEQ})\s+(pour\s+cent|pourcent|pour\s+mille|%|sur\s+(?:dix|vingt|cent)\b)")
+PERCENT_RE = re.compile(rf"({_QTY_SEQ})\s+(pour\s+cent\b|pourcents?\b|pour\s+mille\b|%|sur\s+(?:dix|vingt|cent)\b)")
 DIGIT_UNIT_RE = re.compile(rf"(?<![\w,])\d+(?:,\d+)?\s+({_UNIT})")
 FOLLOWER_RE = re.compile(rf"({_QTY_SEQ})\s+([^\W\d_]+)")
 _UNIT_ONLY_RE = re.compile(rf"^{_UNIT}$")
@@ -120,7 +122,7 @@ def print_report(name: str, rows: int, report: dict[str, Counter], examples: dic
               help="NeMo manifest(s) to read, repeatable. Default: the release full.jsonl "
                    "and the training repo's converted Common Voice fr manifest.")
 @click.option("--conventions", is_flag=True,
-              help="Run every label through apply_label_conventions first.")
+              help="Run every label through the label rules 05 applies first.")
 @click.option("--top", default=12, show_default=True, help="Keys shown per bucket.")
 def main(manifests: tuple[Path, ...], conventions: bool, top: int) -> None:
     """Count the spelled numbers the label rules leave behind."""
@@ -136,7 +138,9 @@ def main(manifests: tuple[Path, ...], conventions: bool, top: int) -> None:
                 if not line.strip():
                     continue
                 text = json.loads(line)["text"]
-                audit_text(apply_label_conventions(text) if conventions else text, report, examples)
+                if conventions:
+                    text = apply_label_conventions(percent_to_symbol(text))
+                audit_text(text, report, examples)
                 rows += 1
         print_report(path.name, rows, report, examples, top)
 
