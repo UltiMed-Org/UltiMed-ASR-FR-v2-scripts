@@ -584,8 +584,9 @@ def normalize_quantities(text: str) -> str:
     """
     text = _sub_quantities(text)
     text = _RANGE_HEAD_RE.sub(lambda m: _digits_or_keep(m, 1) + m.group(2), text)
-    text = _SCORE_RE.sub(lambda m: f"{_digits_or_keep(m, 1)}{m.group(2)}{_SCORE_BASE[m.group(3)]}"
-                         if parse_french_number(_words(m.group(1))) is not None else m.group(0), text)
+    # Through _digits_or_keep, which drops a sentence "et" ("et huit sur dix") before parsing.
+    text = _SCORE_RE.sub(lambda m: f"{digits}{m.group(2)}{_SCORE_BASE[m.group(3)]}"
+                         if (digits := _digits_or_keep(m, 1)) != m.group(1) else m.group(0), text)
     return _DIGIT_VIRGULE_RE.sub(r"\1,\2", text)
 
 

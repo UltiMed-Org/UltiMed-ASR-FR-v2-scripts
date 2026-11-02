@@ -154,6 +154,8 @@ def test_quantities() -> None:
         ("pendant deux à trois jours, un à 2 fois, et deux à 4 semaines",
          "pendant 2 à 3 jours, 1 à 2 fois, et 2 à 4 semaines"),
         ("douleur à deux sur dix, EVA zéro sur dix", "douleur à 2 sur 10, EVA 0 sur 10"),
+        # A score after "et" (2026-11-02): the "et" belongs to the sentence.
+        ("5 sur 10 au repos et huit sur dix à la marche", "5 sur 10 au repos et 8 sur 10 à la marche"),
         # A percentage before a count is not one number.
         ("0,10 gramme pour cent une fois par jour", "0,10 gramme pour cent une fois par jour"),
         # A single unit or duration: digits (author's choice 2026-10-08).
