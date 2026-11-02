@@ -655,6 +655,8 @@ def test_elided_one() -> None:
         # what keeps a lone un spelled keeps it after the elision too
         "d'une fois par jour, d'une année, d'une séance, d'une ampoule",
         "d'un jour à l'autre, d'une semaine sur l'autre",
+        # Common Voice 2026-11-02: an adjective after the unit is the idiom, not a span
+        "est éclairé d'un jour nouveau, d'un jour meilleur",
         "d'un demi-comprimé",
         "d'un million cinq cent mille unités",
     ]:

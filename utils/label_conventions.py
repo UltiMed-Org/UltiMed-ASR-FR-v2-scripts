@@ -597,10 +597,11 @@ def normalize_quantities(text: str) -> str:
 # quantity context ("de"), and the rest is ``_replace_quantity``'s: a lone one stays
 # before the words of ``_COUNT_UNIT_RE`` ("d'une fois", "d'une année"), and "d'une part"
 # never matches since "part" is no unit. Only a single "un"/"une": "d'un million 500000"
-# is ``normalize_numbers``' merge into "de 1500000". Not the idiom "d'un jour à l'autre".
+# is ``normalize_numbers``' merge into "de 1500000". Not the idioms "d'un jour à l'autre"
+# and "éclairé d'un jour nouveau" (an adjective after the unit makes it no quantity).
 # Label only (``apply_label_conventions``): the TTS source keeps the "d'un" voxtral reads.
 _ELIDED_ONE_RE = re.compile(r"(?<![\w'’-])[dD]['’](?=une?\b)")
-_OTHER_ONE_RE = re.compile(r"\s+(?:à|sur|ou)\s+l['’]autre\b")
+_OTHER_ONE_RE = re.compile(r"\s+(?:(?:à|sur|ou)\s+l['’]autre|nouveau|meilleur)\b")
 
 
 def normalize_elided_quantities(text: str) -> str:
