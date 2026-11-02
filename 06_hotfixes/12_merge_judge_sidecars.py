@@ -96,7 +96,7 @@ DEFAULT_OUT_NAME = "qc_parakeet_ultra.jsonl"
 DEFAULT_JUDGE = "onnx-asr/parakeet-tdt-0.6b-v3-ultra"
 
 #: Stage 06 state files, same pairing `99_hf_release/03_sync_hotfix_results.py` uses.
-DEFAULT_STATES = ("improved/full.stt.jsonl", "improved_parrot/full.stt.jsonl")
+from hotfix_states import DEFAULT_STATES  # noqa: E402
 
 #: sidecar field -> reading field. The two sides spell the same four metrics
 #: differently, which is the whole reason this mapping is explicit and in one place.

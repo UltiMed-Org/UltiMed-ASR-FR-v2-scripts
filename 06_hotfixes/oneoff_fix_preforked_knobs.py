@@ -64,6 +64,7 @@ import importlib.util
 import json
 import os
 import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -94,7 +95,8 @@ FORK_CUTOFF_ISO = "2026-07-31T22:00:00+00:00"
 # is what stage 0 actually used on every pre-fork draw, whatever the request said.
 SERVER_CFG_ALPHA = 1.3
 
-DEFAULT_FILES = ("improved/full.stt.jsonl", "improved_parrot/full.stt.jsonl")
+sys.path.insert(0, str(_HERE.parent / "utils"))
+from hotfix_states import DEFAULT_STATES  # noqa: E402
 
 
 def running_passes() -> list[int]:
@@ -228,7 +230,7 @@ def verify(stt_path: Path, audio_key: str, server_cfg_alpha: float) -> None:
 def main(files: tuple[Path, ...], cutoff: str, server_cfg_alpha: float, audio_key: str,
          apply: bool, backup: bool) -> None:
     """Rewrite the recorded per-draw knobs of pre-fork wins to what the server used."""
-    targets = [Path(f) for f in files] or [_HERE / name for name in DEFAULT_FILES]
+    targets = [Path(f) for f in files] or [_HERE / name for name in DEFAULT_STATES]
     cutoff_ts = datetime.fromisoformat(cutoff).timestamp()
     logger.info(f"cutoff {cutoff} ({cutoff_ts:.0f}), server cfg_alpha {server_cfg_alpha}")
 

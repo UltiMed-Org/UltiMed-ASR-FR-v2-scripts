@@ -101,7 +101,8 @@ _HERE = Path(__file__).resolve().parent
 #: deliberately does not compute it, so every whisper reading in the corpus lacks the
 #: field, and `12_merge_judge_sidecars.py` derives it when it merges the sweep.
 DEFAULT_JUDGE_KEY = "onnx-asr/parakeet-tdt-0.6b-v3-ultra"
-DEFAULT_STATES = ("improved/full.stt.jsonl", "improved_parrot/full.stt.jsonl")
+sys.path.insert(0, str(_HERE.parent / "utils"))
+from hotfix_states import DEFAULT_STATES  # noqa: E402
 #: The measured cut (see the module docstring). The live QC's gate is 1, which is right
 #: for "ask a human to listen" and too tight for "spend five TTS draws".
 DEFAULT_REPEAT_GATE = 4

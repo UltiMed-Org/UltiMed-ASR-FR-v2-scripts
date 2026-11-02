@@ -91,7 +91,8 @@ def _load_pass():
     return _recimp
 
 
-DEFAULT_STATES = ("improved/full.stt.jsonl", "improved_parrot/full.stt.jsonl")
+sys.path.insert(0, str(_HERE.parent / "utils"))
+from hotfix_states import DEFAULT_STATES  # noqa: E402
 KEY_TURBO = "whisper.cpp/ggml-large-v3-turbo"
 KEY_LARGE_V3 = "whisper.cpp/ggml-large-v3"
 

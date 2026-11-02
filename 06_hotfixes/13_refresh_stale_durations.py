@@ -83,7 +83,7 @@ sys.path.insert(0, str(ROOT / "utils"))
 from nemo_manifest import clip_key, probe_durations  # noqa: E402
 
 #: Where the state files live, relative to this directory.
-DEFAULT_STATES = ("improved/full.stt.jsonl", "improved_parrot/full.stt.jsonl")
+from hotfix_states import DEFAULT_STATES  # noqa: E402
 #: The manifest that owns the truth about a clip's length: `01_build_nemo_manifest.py`
 #: statts every file to build it, so it is the audio's own answer, one join away.
 DEFAULT_MANIFEST = ROOT / "99_hf_release" / "data" / "NeMO_files" / "full.jsonl"

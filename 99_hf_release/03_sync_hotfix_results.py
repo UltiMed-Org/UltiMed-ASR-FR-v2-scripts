@@ -106,6 +106,7 @@ from loguru import logger
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent / "utils"))
+from hotfix_states import STATE_AUDIO_BASES  # noqa: E402
 from nemo_manifest import MANIFEST_GLOBS, read_jsonl, resolve_audio, write_jsonl  # noqa: E402
 
 # The STT side of the corpus, named as it actually is rather than as the OpenAI-compatible
@@ -123,11 +124,10 @@ STT_MODEL = "whisper.cpp/ggml-large-v3-turbo"
 STT_KEY = "whisper-1"
 
 # Stage 06's scored outputs. Each was produced from one manifest, so its rows' relative
-# audio paths resolve against that manifest's directory.
-HOTFIX_SOURCES = (
-    ("../06_hotfixes/improved/full.stt.jsonl", "data/NeMO_files"),
-    ("../06_hotfixes/improved_parrot/full.stt.jsonl", "data/NeMO_files/PARROT"),
-)
+# audio paths resolve against that manifest's directory (the pairing is
+# hotfix_states.STATE_AUDIO_BASES), spelled relative to this directory.
+HOTFIX_SOURCES = tuple((f"../06_hotfixes/{state}", base)
+                       for state, base in STATE_AUDIO_BASES.items())
 
 # Every judge whose reading reaches a released row, and the column prefix it gets.
 # Adding a judge is one line here plus its sweep; nothing else in this file knows a
