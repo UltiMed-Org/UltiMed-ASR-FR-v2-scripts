@@ -482,6 +482,20 @@ def audio_index(audio_dir: Path) -> dict[str, Path]:
     return index
 
 
+def probe_duration(path: Path) -> float | None:
+    """One clip's length in seconds from its header (``soundfile.info``, no decode), or
+    None when it cannot be read (logged). The single probe `probe_durations` maps over,
+    and what a caller holding one fresh clip uses (Claude Code, 2026-11-02)."""
+    import soundfile as sf  # lazy: keeps the module importable without the wheel
+
+    try:
+        info = sf.info(str(path))
+        return info.frames / info.samplerate if info.samplerate else None
+    except Exception as exc:  # noqa: BLE001 - any decode error drops the clip
+        log.warning("cannot read duration of %s: %s", Path(path).name, exc)
+        return None
+
+
 def probe_durations(
     paths: Sequence[Path],
     cache_path: Path | None = None,
@@ -507,8 +521,6 @@ def probe_durations(
     written before the stamp existed, is simply re-probed and counted in a
     warning. Corrupt/unreadable clips are logged and omitted from the result.
     """
-    import soundfile as sf  # lazy: keeps the module importable without the wheel
-
     cache: dict[str, list] = {}
     if cache_path and cache_path.exists():
         try:
@@ -555,12 +567,7 @@ def probe_durations(
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         def one(p: Path) -> tuple[str, float | None]:
-            try:
-                info = sf.info(str(p))
-                return p.name, (info.frames / info.samplerate if info.samplerate else None)
-            except Exception as exc:  # noqa: BLE001 - any decode error drops the clip
-                log.warning("cannot read duration of %s: %s", p.name, exc)
-                return p.name, None
+            return p.name, probe_duration(p)
 
         bar = None
         if progress:

@@ -43,11 +43,11 @@ from pathlib import Path
 
 import click
 import numpy as np
-import soundfile as sf
 from loguru import logger
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "utils"))
+from nemo_manifest import probe_duration  # noqa: E402
 from frame_budget import (  # noqa: E402
     BUDGET_FIXED_S,
     budget_seconds,
@@ -90,15 +90,6 @@ def _load_generator():
     sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
-
-
-def probe(path: Path) -> float | None:
-    """Clip duration in seconds from the container header, None if unreadable."""
-    try:
-        info = sf.info(str(path))
-        return info.frames / info.samplerate if info.samplerate else None
-    except Exception:  # noqa: BLE001 - an unreadable clip is reported, not raised
-        return None
 
 
 def audit_stage(stage: Path, mode: str, normalize_term, *, fixed: float,
@@ -159,7 +150,7 @@ def audit_stage(stage: Path, mode: str, normalize_term, *, fixed: float,
     # Threads because this is pure I/O: sf.info reads a header, so 600k files are
     # minutes rather than hours, and the GIL is released during the read.
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        durations = list(pool.map(lambda r: probe(r[2]), rows))
+        durations = list(pool.map(lambda r: probe_duration(r[2]), rows))
 
     verdicts: Counter = Counter()
     per_voice: defaultdict[str, Counter] = defaultdict(Counter)

@@ -262,7 +262,6 @@ from types import SimpleNamespace
 from typing import NamedTuple
 
 import click
-import soundfile as sf
 from loguru import logger
 from tqdm import tqdm
 
@@ -318,7 +317,7 @@ _tts = _load_module(
 # (stdlib-only import, so it costs nothing here).
 sys.path.insert(0, str(_HERE.parent / "utils"))
 from progress import bar_safe_sink  # noqa: E402
-from nemo_manifest import parse_clip_name  # noqa: E402
+from nemo_manifest import parse_clip_name, probe_duration  # noqa: E402
 # "Work on exactly these clips" lists, shared with the live CPU QC that produces them
 # (05_generate_audio/03_qc_cpu_stt.py --stems-from reads the same two file shapes).
 import stem_requests as _stems  # noqa: E402
@@ -859,16 +858,6 @@ def length_rank_of(dur: float | None, reference: float | None,
     if tol is None or tol < 0 or not dur or not reference:
         return 0
     return 1 if dur > reference * (1.0 + tol) else 0
-
-
-def flac_duration(path: Path) -> float | None:
-    """Clip length in seconds from the audio header (no full decode)."""
-    try:
-        info = sf.info(str(path))
-        return info.frames / info.samplerate if info.samplerate else None
-    except Exception as exc:  # noqa: BLE001 - any unreadable file, just skip refresh
-        logger.warning(f"could not probe duration of {path.name}: {exc}")
-        return None
 
 
 def attempt_speed(base_speed: float | None, jitter: float, attempt: int) -> float | None:
@@ -1882,7 +1871,7 @@ def _apply_improvement(
     _stt.atomic_write_bytes(audio_path, imp["payload"])
 
     if cfg.refresh_duration:
-        new_dur = flac_duration(audio_path)
+        new_dur = probe_duration(audio_path)
         if new_dur is not None:
             row["duration"] = round(new_dur, 4)
 

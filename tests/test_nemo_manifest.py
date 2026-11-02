@@ -21,6 +21,7 @@ from nemo_manifest import (  # noqa: E402
     audio_index,
     load_pinned_splits,
     parse_split,
+    probe_duration,
     probe_durations,
     relativize,
     summarize,
@@ -303,6 +304,17 @@ def test_probe_durations_drops_legacy_unstamped_entries():
         assert fake.calls == [clip.name]
         assert json.loads(cache.read_text())[clip.name][0] == 3.0
 
+
+def test_probe_duration_one_clip_and_unreadable():
+    """The single-clip probe 01_recursive_improvement and 02_audit_durations call: the
+    header's length, or None (not a raise) for a clip that cannot be read."""
+    with tempfile.TemporaryDirectory() as td:
+        clip = Path(td) / "000014_0000_abaissement.flac"
+        clip.write_bytes(b"xxxx")                   # 4 bytes -> 4.0 s
+        fake = _with_fake_sf()
+        assert probe_duration(clip) == 4.0
+        assert fake.calls == [clip.name]
+        assert probe_duration(Path(td) / "missing.flac") is None
 
 # --------------------------------------------------------------------------- #
 # pinning: a regenerated corpus must inherit the previous generation's split
