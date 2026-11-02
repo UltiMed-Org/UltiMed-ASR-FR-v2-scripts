@@ -649,6 +649,10 @@ def test_elided_one() -> None:
         ("Un délai d'une heure, d'un mois, D'un an.", "Un délai d'1 heure, d'1 mois, D'1 an."),
         ("Ajout d'un gramme, d'un jour sur deux.", "Ajout d'1 gramme, d'1 jour sur 2."),
         ("Le contenu d'une cuillère-mesure.", "Le contenu d'1 cuillère-mesure."),
+        # the restrictive "ne ... qu'un" likewise
+        ("Ne prendre qu'un comprimé le matin.", "Ne prendre qu'1 comprimé le matin."),
+        ("Il n'en faut qu'une goutte, il n'a pris qu'un sachet.", "Il n'en faut qu'1 goutte, il n'a pris qu'1 sachet."),
+        ("Le vent ne dure qu'un jour, il n'avait qu’une heure.", "Le vent ne dure qu'1 jour, il n'avait qu’1 heure."),
     ])
     for untouched in [
         "d'une part, d'un côté, d'une manière, d'un patient",
@@ -659,6 +663,11 @@ def test_elided_one() -> None:
         "est éclairé d'un jour nouveau, d'un jour meilleur",
         "d'un demi-comprimé",
         "d'un million cinq cent mille unités",
+        # qu'un: same exceptions, a non-unit noun, and no "ne" before (conjunction, relative)
+        "ne prendre qu'une fois par jour, il n'en reste qu'un seul, il n'a qu'un patient",
+        "il ne voit qu'un jour nouveau, ne dure qu'un jour à l'autre",
+        "Espérons qu'un jour il guérira. Si bien qu'un jour ils partent, prévenir qu'une goutte suffit",
+        "Il est venu. Lorsqu'un comprimé manque, jusqu'un mois, puisqu'une heure",
     ]:
         assert normalize_elided_quantities(untouched) == untouched, (untouched, normalize_elided_quantities(untouched))
     # The large-number merge (commit 4128ac2) is unchanged.

@@ -599,20 +599,28 @@ def normalize_quantities(text: str) -> str:
 # never matches since "part" is no unit. Only a single "un"/"une": "d'un million 500000"
 # is ``normalize_numbers``' merge into "de 1500000". Not the idioms "d'un jour à l'autre"
 # and "éclairé d'un jour nouveau" (an adjective after the unit makes it no quantity).
+# The restrictive "qu'un" / "qu'une" likewise (2026-11-02, author's choice): "ne prendre
+# qu'un comprimé" -> "ne prendre qu'1 comprimé", same exceptions. Only after a "ne" / "n'"
+# earlier in the sentence: otherwise "que" is the conjunction or the relative and "un
+# jour" no quantity (Common Voice: "espérons qu'un jour", "si bien qu'un jour",
+# "bas-reliefs qu'un jour lugubre éclaire"). "lorsqu'un", "jusqu'un" never match.
 # Label only (``apply_label_conventions``): the TTS source keeps the "d'un" voxtral reads.
-_ELIDED_ONE_RE = re.compile(r"(?<![\w'’-])[dD]['’](?=une?\b)")
+_ELIDED_ONE_RE = re.compile(r"(?<![\w'’-])(?:[dD]|[qQ]u)['’](?=une?\b)")
 _OTHER_ONE_RE = re.compile(r"\s+(?:(?:à|sur|ou)\s+l['’]autre|nouveau|meilleur)\b")
+_NEGATION_BEFORE_RE = re.compile(r"(?i)(?<![\w'’-])n(?:e\b|['’])[^.!?;]*$")
 
 
 def normalize_elided_quantities(text: str) -> str:
-    """``d'un comprimé`` -> ``d'1 comprimé``, ``d'une heure`` -> ``d'1 heure``;
-    ``d'une part``, ``d'une fois`` stay. Idempotent."""
+    """``d'un comprimé`` -> ``d'1 comprimé``, ``d'une heure`` -> ``d'1 heure``,
+    ``ne prendre qu'un comprimé`` -> ``ne prendre qu'1 comprimé``; ``d'une part``,
+    ``d'une fois``, ``espérons qu'un jour`` stay. Idempotent."""
     out, last = "", 0
     for e in _ELIDED_ONE_RE.finditer(text):
         tail = text[e.end():]
         m = _QUANTITY_RE.match(tail)
         if (m is None or m.group(1).lower() not in ("un", "une") or m.group(3) is not None
-                or _OTHER_ONE_RE.match(tail, m.end())):
+                or _OTHER_ONE_RE.match(tail, m.end())
+                or (e.group(0)[0] in "qQ" and not _NEGATION_BEFORE_RE.search(text, 0, e.start()))):
             continue
         new = _replace_quantity(m, before="de ")
         if new != m.group(0):
