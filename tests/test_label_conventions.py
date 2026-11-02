@@ -230,8 +230,13 @@ def test_single_duration_context() -> None:
         "C'est un an de suivi.",
         "un an et un mois",
         "0,10 gramme pour cent une fois par jour",
+        # 2026-11-02 (author's choice): a lone "un"/"une" before "année(s)" never converts,
+        # whatever precedes it ("une année olympique" is no duration).
+        "pendant une année olympique, dans une année, 2 ans et une année",
+        "une année sur deux",
     ]:
         assert normalize_quantities(untouched) == untouched, (untouched, normalize_quantities(untouched))
+    check(normalize_quantities, [("cinquante années, pendant deux années", "50 années, pendant 2 années")])
     print("test_single_duration_context: OK")
 
 

@@ -428,8 +428,10 @@ _RANGE_HEAD_RE = re.compile(rf"({_QTY_SEQ})(\s+(?:à|ou)\s+\d+(?:,\d+)?\s+{_QTY_
 # unité de soins``, ``en seconde intention``), and the dosage forms whose ``un``/``une``
 # is mostly an article, in anatomy, surgery or procedures (``une capsule de Glisson``,
 # ``une ampoule galactophore``, ``une dose d'irradiation``, ``admis pour une injection
-# sous-conjonctivale``, ``un patch veineux``): only from two up there.
-_COUNT_UNIT_RE = re.compile(r"\s+(?:fois|séances?|degrés?|unités?|secondes?"
+# sous-conjonctivale``, ``un patch veineux``): only from two up there. ``année`` too
+# (author's choice 2026-11-02): ``une année`` is rarely a measure (``pendant une année
+# olympique``), so it stays in any context while ``cinquante années`` -> ``50 années``.
+_COUNT_UNIT_RE = re.compile(r"\s+(?:fois|séances?|degrés?|unités?|secondes?|années?"
                             r"|capsules?|ampoules?|doses?|injections?|patchs?)$")
 # A single ``un``/``une`` before a duration becomes ``1`` only in a quantity context
 # (2026-11-01): ``dans un mois``, ``depuis une semaine``, ``il y a un an``, ``toutes les
