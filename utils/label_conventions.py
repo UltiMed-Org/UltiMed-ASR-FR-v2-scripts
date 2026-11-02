@@ -391,8 +391,9 @@ _QTY_UNITS = (r"(?:(?:milli|micro|nano|kilo)?grammes?|kilos?|(?:milli|micro|cent
               r"|(?:milli|centi|kilo)?mètres?|(?:milli|micro)moles?|unités?|degrés?"
               r"|heures?|minutes?|secondes?|jours?|semaines?|mois|ans?|années?|fois|séances?"
               # Radiology units: 588 labels write "N grays", 11 spelled them; hertz
-              # 356 / 3, teslas 114 / 3.
-              r"|(?:milli|centi)?grays?|(?:kilo|méga)?hertz|teslas?|dioptries?"
+              # 356 / 3, teslas 114 / 3. Also with the eponym's capital ("trois Tesla",
+              # "cinq Gray": 8 labels left spelled on 2026-11-02).
+              r"|(?:milli|centi)?[gG]rays?|(?:kilo|méga)?[hH]ertz|[tT]eslas?|dioptries?"
               rf"|{_DOSAGE_FORMS})")
 # Every word a French number up to 999,999 is spelled with ("et" only inside one).
 _NUMBER_VALUES = {w: i for i, w in enumerate(_UNITS)} | {w: n for n, w in _TENS.items()}
