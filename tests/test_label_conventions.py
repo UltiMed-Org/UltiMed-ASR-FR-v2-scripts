@@ -21,6 +21,7 @@ from label_conventions import (  # noqa: E402
     normalize_accents, normalize_compounds, normalize_dates, normalize_quantities, normalize_spelling, normalize_staging, normalize_roman, normalize_sutures, normalize_thousands, respell_for_tts, restore_tts_accents, strip_generic_labs,
     parse_french_number, normalize_compound_spellings, normalize_official_names, normalize_non, normalize_ordinals,
     lowercase_eponym_nouns, normalize_latin_names, normalize_hgvs, normalize_numbers,
+    normalize_elided_quantities,
 )
 
 
@@ -636,6 +637,32 @@ def test_single_word_percent() -> None:
     print("test_single_word_percent: OK")
 
 
+def test_elided_one() -> None:
+    # 2026-11-02 (author's choice): an elided "d'un"/"d'une" before a unit that takes
+    # "1" becomes "d'1"; the elision is the quantity context a duration needs.
+    check(normalize_elided_quantities, [
+        ("La prise d'un comprimé et d'une gélule.", "La prise d'1 comprimé et d'1 gélule."),
+        ("Un délai d'une heure, d'un mois, D'un an.", "Un délai d'1 heure, d'1 mois, D'1 an."),
+        ("Ajout d'un gramme, d'un jour sur deux.", "Ajout d'1 gramme, d'1 jour sur 2."),
+        ("Le contenu d'une cuillère-mesure.", "Le contenu d'1 cuillère-mesure."),
+    ])
+    for untouched in [
+        "d'une part, d'un côté, d'une manière, d'un patient",
+        # what keeps a lone un spelled keeps it after the elision too
+        "d'une fois par jour, d'une année, d'une séance, d'une ampoule",
+        "d'un jour à l'autre, d'une semaine sur l'autre",
+        "d'un demi-comprimé",
+        "d'un million cinq cent mille unités",
+    ]:
+        assert normalize_elided_quantities(untouched) == untouched, (untouched, normalize_elided_quantities(untouched))
+    # The large-number merge (commit 4128ac2) is unchanged.
+    assert apply_label_conventions("Dose d'un million 500000 unités.") == "Dose de 1500000 unités."
+    assert apply_label_conventions("La prise d'un comprimé.") == "La prise d'1 comprimé."
+    # Label only: the TTS source keeps what voxtral reads.
+    assert apply_label_conventions("La prise d'un comprimé.", tts_source=True) == "La prise d'un comprimé."
+    print("test_elided_one: OK")
+
+
 def test_all() -> None:
     raw = ("M. Dupont prend du DOLIPRANE à 14h30 depuis le quinze mars deux mille vingt, "
            "deux comprimés de cinq cents milligrammes au petit déjeuner.")
@@ -685,5 +712,6 @@ if __name__ == "__main__":
     test_hgvs()
     test_numbers()
     test_single_word_percent()
+    test_elided_one()
     test_all()
     test_generator_parse()

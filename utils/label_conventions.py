@@ -403,7 +403,7 @@ _NUMBER_VALUES |= {"septante": 70, "huitante": 80, "octante": 80, "nonante": 90}
 _SCALES = {"mille": 1000, "mil": 1000, "million": 10**6, "millions": 10**6,
            "milliard": 10**9, "milliards": 10**9}
 _QTY_WORD = rf"(?:{'|'.join(sorted(_NUMBER_VALUES, key=len, reverse=True))}|cents?|mille|mil|et)"
-# Not after an elision: "d'un mois" stays, "d'1 mois" is not written.
+# Not after an elision here: "d'un mois" is ``normalize_elided_quantities``' (label only).
 _QTY_SEQ = rf"(?i:(?<![\w'’-]){_QTY_WORD}(?:[\s-]+{_QTY_WORD})*)"
 # A ratio's second number ("cinq jours sur sept") follows the first, else the label
 # mixes forms ("5 jours sur sept") the corpus never uses (362 all-words, 280 all-digits).
@@ -440,7 +440,7 @@ _COUNT_UNIT_RE = re.compile(r"\s+(?:fois|séances?|degrés?|unités?|secondes?|a
 # ``un jour ou l'autre``. Words before ``1 <duration>`` in UltiMed: dans 28.6k, à 28.2k,
 # pendant 7.3k, depuis 4.0k, a 3.1k (typo for à, and ``il y a``), de 1.0k, en 1.0k, après
 # 0.7k, et 0.5k, sur 0.5k, pour 0.3k, environ 0.3k. ``d'`` needs no entry (``d'un an``
-# never converts, see ``_QTY_SEQ``), nor ``plus de`` / ``moins de`` (``de`` covers them).
+# is ``normalize_elided_quantities``', which counts the elision as context), nor ``plus de`` / ``moins de`` (``de`` covers them).
 _DURATION_UNIT_RE = re.compile(r"\s+(?:heures?|minutes?|jours?|semaines?|mois|ans?|années?)$")
 _DURATION_CONTEXT_RE = re.compile(
     r"(?i)(?:^|[^\w'’])(?:dans|à|a|pendant|depuis|de|en|après|avant|sur|pour|environ|durant"
@@ -588,6 +588,34 @@ def normalize_quantities(text: str) -> str:
                          if parse_french_number(_words(m.group(1))) is not None else m.group(0), text)
     return _DIGIT_VIRGULE_RE.sub(r"\1,\2", text)
 
+
+
+# An elided "d'un" / "d'une" before a unit (2026-11-02, author's choice): "d'un
+# comprimé" -> "d'1 comprimé", "d'une heure" -> "d'1 heure". The elision is itself the
+# quantity context ("de"), and the rest is ``_replace_quantity``'s: a lone one stays
+# before the words of ``_COUNT_UNIT_RE`` ("d'une fois", "d'une année"), and "d'une part"
+# never matches since "part" is no unit. Only a single "un"/"une": "d'un million 500000"
+# is ``normalize_numbers``' merge into "de 1500000". Not the idiom "d'un jour à l'autre".
+# Label only (``apply_label_conventions``): the TTS source keeps the "d'un" voxtral reads.
+_ELIDED_ONE_RE = re.compile(r"(?<![\w'’-])[dD]['’](?=une?\b)")
+_OTHER_ONE_RE = re.compile(r"\s+(?:à|sur|ou)\s+l['’]autre\b")
+
+
+def normalize_elided_quantities(text: str) -> str:
+    """``d'un comprimé`` -> ``d'1 comprimé``, ``d'une heure`` -> ``d'1 heure``;
+    ``d'une part``, ``d'une fois`` stay. Idempotent."""
+    out, last = "", 0
+    for e in _ELIDED_ONE_RE.finditer(text):
+        tail = text[e.end():]
+        m = _QUANTITY_RE.match(tail)
+        if (m is None or m.group(1).lower() not in ("un", "une") or m.group(3) is not None
+                or _OTHER_ONE_RE.match(tail, m.end())):
+            continue
+        new = _replace_quantity(m, before="de ")
+        if new != m.group(0):
+            out += text[last:e.end()] + new
+            last = e.end() + m.end()
+    return out + text[last:]
 
 def _digits_or_keep(m: re.Match, group: int) -> str:
     """Group ``group`` of ``m`` (spelled number words, maybe led by a sentence "et") as
@@ -1483,7 +1511,7 @@ def apply_label_conventions(text: str, tts_source: bool = False) -> str:
     and dates before quantities so a spelled year is read as a year, not as a count.
 
     ``tts_source=True`` is for a text the TTS reads (05 on the v1 sources): it skips
-    ``normalize_sutures``, ``normalize_thousands`` and ``normalize_numbers``, which
+    ``normalize_elided_quantities``, ``normalize_sutures``, ``normalize_thousands`` and ``normalize_numbers``, which
     voxtral may not speak identically, keeps the accents of drug INNs (``restore_tts_accents``) and respells
     the words voxtral misreads (``respell_for_tts``).
     """
@@ -1492,7 +1520,8 @@ def apply_label_conventions(text: str, tts_source: bool = False) -> str:
     if not tts_source:
         # Thousands on both sides: before, so "un million 500 000" merges whole; after,
         # so "cent trente-quatre 500" -> "134 500" is glued now, not on the next pass.
-        text = normalize_thousands(normalize_numbers(normalize_thousands(normalize_sutures(text))))
+        text = normalize_thousands(normalize_numbers(normalize_thousands(normalize_sutures(
+            normalize_elided_quantities(text)))))
     # Accents last: the drug caser restores the ANSM accents an INN choice removes.
     # Eponyms lowercased before the compound table, which keys on lowercase forms but
     # keeps their capitals (``Echo-Doppler`` is looked up as ``echo-doppler``).
