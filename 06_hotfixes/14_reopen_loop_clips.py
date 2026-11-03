@@ -171,6 +171,35 @@ def category_of(audio: str) -> str:
     return parts[-2] if len(parts) >= 2 else "?"
 
 
+def stream_rewrite(state: Path, apply: bool, edit, tmp_suffix: str = ".reopen.tmp") -> None:
+    """Feed every row of `state` to `edit(row, line)` and, under `apply`, rewrite the file.
+
+    `edit` returns the row to keep, written back re-serialised (so it may mutate it), or
+    None to drop it from the file; `line` is the row's raw text, for a caller that has to
+    keep a dropped row verbatim (`20_drop_state_rows.py`). Kept rows go to
+    `<state><tmp_suffix>`, which replaces `state` once the whole file has been read.
+
+    Streamed rather than read_jsonl'd for the same reason `13_refresh_stale_durations.py`
+    streams: `improved/full.stt.jsonl` is ~800 MB, and holding it as parsed JSON costs
+    several GB of RAM.
+    """
+    tmp = state.with_suffix(state.suffix + tmp_suffix)
+    out = tmp.open("w", encoding="utf-8") if apply else None
+    try:
+        with state.open(encoding="utf-8") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                row = edit(json.loads(line), line)
+                if out is not None and row is not None:
+                    out.write(json.dumps(row, ensure_ascii=False) + "\n")
+    finally:
+        if out is not None:
+            out.close()
+    if apply:
+        tmp.replace(state)
+
+
 def process(state: Path, mod, select, apply: bool, counts: Counter, by_voice: Counter,
             by_cat: Counter, mark=None) -> list[str]:
     """One state file: mark every clip `select` picks, stream-rewritten like its siblings.
@@ -179,48 +208,34 @@ def process(state: Path, mod, select, apply: bool, counts: Counter, by_voice: Co
     module docstring on why they must be the flagging judge's), or None to leave the row
     alone; here that is `loops`, and `16_reopen_from_ledger.py` passes its own. `mark(row,
     scores)` writes the marker, `pending_tts` with those scores by default; a caller that
-    also has to pick the redraw's voice passes its own.
-
-    Streamed rather than read_jsonl'd for the same reason `13_refresh_stale_durations.py`
-    streams: `improved/full.stt.jsonl` is ~800 MB, and holding it as parsed JSON costs
-    several GB of RAM.
+    also has to pick the redraw's voice passes its own. The file walk is `stream_rewrite`.
     """
     if mark is None:
         def mark(row, scores):
             mod.set_improvement(row, "pending_tts", scores)
     stems: list[str] = []
-    tmp = state.with_suffix(state.suffix + ".reopen.tmp")
-    out = tmp.open("w", encoding="utf-8") if apply else None
-    try:
-        with state.open(encoding="utf-8") as fh:
-            for line in fh:
-                if not line.strip():
-                    continue
-                row = json.loads(line)
-                counts["rows"] += 1
-                scores = select(row)
-                if scores is not None:
-                    status = (row.get("improvement") or {}).get("status")
-                    if (row.get("improvement") or {}).get(MANUAL_PASS):
-                        counts["left::manual_pass"] += 1
-                    elif status in REOPENABLE:
-                        counts["reopened"] += 1
-                        counts[f"from::{status or 'no marker'}"] += 1
-                        mark(row, scores)
-                        audio = row.get("audio_filepath") or ""
-                        stems.append(Path(audio).stem)
-                        by_voice[row.get("voice") or "?"] += 1
-                        by_cat[category_of(audio)] += 1
-                    else:
-                        counts["already_queued"] += 1
-                        counts[f"left::{status}"] += 1
-                if out is not None:
-                    out.write(json.dumps(row, ensure_ascii=False) + "\n")
-    finally:
-        if out is not None:
-            out.close()
-    if apply:
-        tmp.replace(state)
+
+    def edit(row: dict, _line: str) -> dict:
+        counts["rows"] += 1
+        scores = select(row)
+        if scores is not None:
+            status = (row.get("improvement") or {}).get("status")
+            if (row.get("improvement") or {}).get(MANUAL_PASS):
+                counts["left::manual_pass"] += 1
+            elif status in REOPENABLE:
+                counts["reopened"] += 1
+                counts[f"from::{status or 'no marker'}"] += 1
+                mark(row, scores)
+                audio = row.get("audio_filepath") or ""
+                stems.append(Path(audio).stem)
+                by_voice[row.get("voice") or "?"] += 1
+                by_cat[category_of(audio)] += 1
+            else:
+                counts["already_queued"] += 1
+                counts[f"left::{status}"] += 1
+        return row
+
+    stream_rewrite(state, apply, edit)
     return stems
 
 

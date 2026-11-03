@@ -183,7 +183,13 @@ A voice is retired by re-draw, never by deleting its roster entry (`voice_assign
 
    `--state` is not optional here. Stage 06 rewrites clips in place with another voice and records the reader in its state file, so the hash voice alone is wrong for every re-voiced clip: on 2026-11-03 it would have missed 3,015 clips a retired voice re-read and deleted 3,834 that stage 06 had already moved to a survivor. The audit logs, per stage, how many voices came from the state and both directional counts, and warns when voices are retired but no `--state` was given.
 3. **Regenerate**: `./generate_v2.sh` (in `05_generate_audio/`) resumes, which regenerates exactly the missing stems, now in the survivors' voices.
-4. **Reset stage 06's state for those stems** with `06_hotfixes/20_drop_state_rows.py`, which drops their rows from the state, so the rebuilt manifest brings them in fresh and the driver's stt pass re-judges exactly them. Without it, stage 06 would keep the old take's verdicts and voice for audio that no longer exists.
+4. **Reset stage 06's state for those stems** with `06_hotfixes/20_drop_state_rows.py`, which drops their rows from the state, so the rebuilt manifest brings them in fresh and the driver's stt pass re-judges exactly them. Without it, stage 06 would keep the old take's verdicts and voice for audio that no longer exists. Feed it the audit's report from step 2 (dry run first; `--voice NAME`, repeatable, drops by stored reader instead or as well), and it walks both state files by default (`--state` to pick one). The dropped rows are kept verbatim in `<state>.dropped-<timestamp>.jsonl` beside each state:
+
+   ```bash
+   cd 06_hotfixes
+   uv run 20_drop_state_rows.py --stems-from ../05_generate_audio/retired.jsonl
+   uv run 20_drop_state_rows.py --stems-from ../05_generate_audio/retired.jsonl --apply
+   ```
 5. **Re-run the QC loop**: `RESET_STATE=1 ./driver.sh` (in `06_hotfixes/`), so every step runs again over the new clips.
 
 ## 2. QC loop (stage 06)
