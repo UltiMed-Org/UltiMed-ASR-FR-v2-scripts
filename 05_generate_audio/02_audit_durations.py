@@ -24,10 +24,22 @@ nothing here can know what the replacement will be drawn at, and stage 05 append
 fresh row for any stem that already has one, whatever rung it lands on. Since the
 readers take the LAST row for a stem, the regenerated clip's value always wins.
 
+**Which voice read a clip.** By default a clip is attributed to its hash voice, the
+pre-retirement `voice_for_row(..., retired=())`, which is what stage 05 drew. But stage
+06 rewrites clips IN PLACE with another voice (a swap or a ladder rung) and records the
+reader in the `voice` field of its state file (`06_hotfixes/improved/full.stt.jsonl`).
+Pass that file with `--state` and its voice replaces the hash voice for every clip it
+names, both for the `retired_voice` verdict and for the per-voice duration bounds, since
+it is the voice that produced the audio. Without it, after a retirement, a clip stage 06
+re-voiced to a retired voice is missed and one it re-voiced away from a retired voice is
+deleted for nothing (3,015 and 3,834 clips respectively on 2026-11-03).
+
     uv run 05_generate_audio/02_audit_durations.py                    # dry run, all stages
     uv run 05_generate_audio/02_audit_durations.py --stage 01_dictionnary
     uv run 05_generate_audio/02_audit_durations.py --apply            # actually delete
     uv run 05_generate_audio/02_audit_durations.py --report bad.jsonl # keep the list
+    uv run 05_generate_audio/02_audit_durations.py \
+        --state 06_hotfixes/improved/full.stt.jsonl --report retired.jsonl
 
 Written with Claude Code.
 """
@@ -47,7 +59,7 @@ from loguru import logger
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "utils"))
-from nemo_manifest import probe_duration  # noqa: E402
+from nemo_manifest import clip_key, probe_duration  # noqa: E402
 from frame_budget import (  # noqa: E402
     BUDGET_FIXED_S,
     budget_seconds,
@@ -92,9 +104,54 @@ def _load_generator():
     return mod
 
 
+def _clip_id(path: str | Path) -> tuple[str, str]:
+    """`(audio folder name, stem)` of a clip path, the key shared with stage 06's state.
+
+    Built on `clip_key`, so `../PARHAF/000123_0004_x.flac` from a state row and the
+    resolved `/media/.../v2/PARHAF/000123_0004_x.flac` of a file on disk meet on
+    `("PARHAF", "000123_0004_x")`. The extension is dropped because stage 05 joins on
+    stems too.
+    """
+    key = Path(clip_key(str(path)))
+    return key.parent.name, key.stem
+
+
+def load_state_voices(states: tuple[Path, ...] | list[Path]) -> dict[tuple[str, str], str]:
+    """`{(audio folder name, stem): voice}` recorded by stage 06, streamed.
+
+    Each file is read line by line (the real state is ~800 MB), and a later row or a
+    later file wins, as in `utils/clip_ledger.load_state`. Rows with no `voice` (v1
+    audio) are skipped, so those clips keep their hash voice.
+    """
+    out: dict[tuple[str, str], str] = {}
+    for path in states:
+        n = 0
+        with Path(path).open(encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                voice, audio = row.get("voice"), row.get("audio_filepath")
+                if voice and audio:
+                    out[_clip_id(audio)] = voice
+                    n += 1
+        logger.info("state {}: {} clip voices", path, n)
+    return out
+
+
 def audit_stage(stage: Path, mode: str, normalize_term, *, fixed: float,
-                slow: float | None, fast: float | None, workers: int) -> list[dict]:
+                slow: float | None, fast: float | None, workers: int,
+                stored: dict[tuple[str, str], str] | None = None,
+                retired: tuple[str, ...] | None = None) -> list[dict]:
     """Join every row of one stage to its clip on disk and classify the durations.
+
+    Parameters
+    ----------
+    stored
+        From `load_state_voices`: the voice stage 06 recorded for a clip, which wins
+        over the hash voice when present. None or empty keeps the hash voice for all.
+    retired
+        Voices whose clips are condemned; None means `RETIRED_VOICES_FR_V2`.
 
     Returns
     -------
@@ -102,6 +159,9 @@ def audit_stage(stage: Path, mode: str, normalize_term, *, fixed: float,
         One entry per clip that is NOT ok, each carrying the verdict, the path, the
         duration, the two bounds and the voice, ready to be reported or deleted.
     """
+    retired = RETIRED_VOICES_FR_V2 if retired is None else tuple(retired)
+    stored = stored or {}
+    origin: Counter = Counter()
     jsonl = stage / "generated_dataset.jsonl"
     audio = stage / "generated_audios"
     if not jsonl.exists():
@@ -140,10 +200,26 @@ def audit_stage(stage: Path, mode: str, normalize_term, *, fixed: float,
         # deleted would become invisible.
         voice = voice_for_row(row, field=field, mode=mode, voices=VOICES_FR_V2,
                               retired=())
+        # ...unless stage 06 re-voiced the clip in place, in which case the voice it
+        # recorded is the one that read the audio now on disk.
+        recorded = stored.get(_clip_id(path))
+        if recorded is not None:
+            origin["state"] += 1
+            if recorded != voice:
+                origin["differ"] += 1
+                origin["stored_retired"] += recorded in retired and voice not in retired
+                origin["hash_retired"] += voice in retired and recorded not in retired
+            voice = recorded
         rows.append((voice, row["asr_training_source"], path))
 
     logger.info("{}: {} clips on disk joined to their text, {} not generated yet",
                 stage.name, len(rows), missing)
+    if stored:
+        logger.info("{}: {} clip voice(s) taken from the stage-06 state, {} differing "
+                    "from the hash voice ({} now retired where the hash voice is not, "
+                    "{} spared where only the hash voice is retired)",
+                    stage.name, origin["state"], origin["differ"],
+                    origin["stored_retired"], origin["hash_retired"])
     if not rows:
         return []
 
@@ -174,7 +250,7 @@ def audit_stage(stage: Path, mode: str, normalize_term, *, fixed: float,
         # resume of 01_generate_audio.py re-read it in that voice. Checked before the
         # duration verdict so a retired clip is reported once, under the reason that
         # actually condemns it.
-        if voice in RETIRED_VOICES_FR_V2:
+        if voice in retired:
             verdict = "retired_voice"
         else:
             verdict = classify_duration(text, dur, fixed=fixed,
@@ -207,7 +283,7 @@ def audit_stage(stage: Path, mode: str, normalize_term, *, fixed: float,
                        "run of 01_generate_audio.py refills them",
                        stage.name, verdicts["retired_voice"],
                        100.0 * verdicts["retired_voice"] / max(1, total),
-                       ", ".join(RETIRED_VOICES_FR_V2))
+                       ", ".join(retired))
 
     # Per voice, sorted slowest median first: that is the order in which a voice
     # becomes suspect, and the column that explains an outlier rejection rate.
@@ -261,9 +337,16 @@ def audit_stage(stage: Path, mode: str, normalize_term, *, fixed: float,
                    "uses the per-voice table, 0 disables the floor.")
 @click.option("--workers", default=16, show_default=True,
               help="Threads probing audio headers (pure I/O).")
+@click.option("--state", "states", multiple=True,
+              type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              help="Stage-06 state file (06_hotfixes/improved/full.stt.jsonl), "
+                   "repeatable, later files win. The voice it records for a clip "
+                   "replaces the hash voice, since stage 06 re-voices clips in "
+                   "place. Needed whenever a voice is retired.")
 def main(stages: tuple[str, ...], apply_: bool, report: Path | None,
          budget_fixed_seconds: float, budget_chars_per_second: float,
-         floor_chars_per_second: float, workers: int) -> None:
+         floor_chars_per_second: float, workers: int,
+         states: tuple[Path, ...] = ()) -> None:
     """Audit, and optionally delete, clips whose duration does not match their text."""
     logger.remove()
     logger.add(sys.stderr, format="<level>{message}</level>", level="INFO")
@@ -273,6 +356,13 @@ def main(stages: tuple[str, ...], apply_: bool, report: Path | None,
         raise click.BadParameter(f"unknown stage(s) {unknown}, known: {list(STAGES)}")
 
     generator = _load_generator()
+    if RETIRED_VOICES_FR_V2 and not states:
+        logger.warning("voices are retired ({}) but no --state was given: clips stage "
+                       "06 re-voiced in place are attributed to their hash voice, so "
+                       "some retired readings are missed and some survivors' audio is "
+                       "deleted. Pass --state 06_hotfixes/improved/full.stt.jsonl",
+                       ", ".join(RETIRED_VOICES_FR_V2))
+    stored = load_state_voices(states)
     logger.info("bounds: over if duration >= {:.0f}s + chars/slow, short if duration "
                 "< chars/fast, with (slow, fast) {}",
                 budget_fixed_seconds,
@@ -285,7 +375,8 @@ def main(stages: tuple[str, ...], apply_: bool, report: Path | None,
     for name in names:
         bad += audit_stage(ROOT / name, STAGES[name], generator.normalize_term,
                            fixed=budget_fixed_seconds, slow=budget_chars_per_second,
-                           fast=floor_chars_per_second, workers=workers)
+                           fast=floor_chars_per_second, workers=workers,
+                           stored=stored)
 
     if report:
         report.parent.mkdir(parents=True, exist_ok=True)
