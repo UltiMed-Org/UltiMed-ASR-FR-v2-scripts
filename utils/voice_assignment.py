@@ -108,11 +108,31 @@ def cfg_alpha_floor(voice: str | None, *, hybrid: float = FLOOR_HYBRID,
 #: Voices dropped from the roster after measurement. They stay listed in
 #: `VOICES_FR_V2` on purpose: see `voice_for_key` for why deleting an entry is NOT
 #: how a voice is retired, and what it would cost.
-RETIRED_VOICES_FR_V2: tuple[str, ...] = ()
-#: EMPTY on purpose, and the mechanism below is kept ready rather than used.
+RETIRED_VOICES_FR_V2: tuple[str, ...] = ("h_frf_itm", "h_frm_ptf", "h_frf_ptm",
+                                          "h_itf_arm")
+#: Retired 2026-11-03 on a TRAINING measurement, not a QC one. A per-voice attribution
+#: sweep ran nine 1500-step parakeet fine-tunes, each on one voice's UltiMed slice plus
+#: the same constant non-UltiMed sets, and ranked them on the mean raw WER of the two
+#: REAL-speech validation sets (oli and FLEURS-fr). The ranking split in two with
+#: nothing in between: fr_female 0.0638, h_itf_def 0.0640, fr_male 0.0641, h_frm_nlf
+#: 0.0648, h_frf_esm 0.0648, then a gap to h_frf_itm 0.0667, h_frm_ptf 0.0672,
+#: h_frf_ptm 0.0674 and h_itf_arm 0.0687, the four retired here. Both shipped voices sit
+#: in the good tier, so the gap is damage done by the hybrid surgery, not ordinary
+#: spread between voices. The mixture arms agree: dropping voices took oli from 7.4 to
+#: 4.9 raw WER at 3k steps.
 #:
-#: Empty does not mean no voice ever failed. `h_frm_chf` (heard as cheerful_female)
-#: did, and on 2026-10-15 it was deleted from `VOICES_FR_V2` outright rather than
+#: Why no QC judge saw it: every judge (stage 06's CER gate, the duration audit, the
+#: synthetic val sets dictionary and parhaf) scores how well an ASR model reads the
+#: TTS audio back, and the synthetic val sets are spoken by these same voices. They did
+#: not separate the tiers. What these four teach a model transfers worse to real
+#: speech, which only a fine-tune evaluated on real speech can measure.
+#:
+#: Retired by re-draw (see `voice_for_key`), so the keys whose first draw landed on one
+#: of the four (~44 pct of the corpus, 4 of 9) move uniformly to the five survivors,
+#: and every other key keeps its voice bit-identical.
+#:
+#: Before that, `h_frm_chf` (heard as cheerful_female) failed too, and on 2026-10-15
+#: it was deleted from `VOICES_FR_V2` outright rather than
 #: retired here. That is the move `voice_for_key` warns against, and it was safe
 #: exactly once, for a reason that will not come back: it was decided while the whole
 #: v2 corpus was being deleted anyway (148,303 dictionary clips, so that every clip
@@ -129,10 +149,10 @@ RETIRED_VOICES_FR_V2: tuple[str, ...] = ()
 #: and let the code gate reject its bad takes; the dataset was then held to a higher
 #: bar than "recoverable by retry".
 #:
-#: So this stays wired and tested for the next voice that turns out bad, because once
-#: audio exists retirement is the only safe tool: re-drawing leaves every key that did
-#: not land on the retired voice bit-identical (~89 pct of the corpus at nine voices),
-#: whereas editing the roster means regenerating all of it.
+#: Once audio exists retirement is the only safe tool: re-drawing leaves every key that
+#: did not land on a retired voice bit-identical (~89 pct of the corpus per voice
+#: retired at nine voices, ~56 pct for the four above), whereas editing the roster
+#: means regenerating all of it.
 
 #: How many re-draws `voice_for_key` tries before falling back to a direct draw over
 #: the survivors. Only reachable when most of the roster is retired; see there.
@@ -155,6 +175,10 @@ _RETIRE_MAX_ATTEMPTS = 64
 #: rather than two, so the repair keeps the corpus accent spread as long as it can and
 #: only falls back to the two shipped voices, which are also the two the corpus already
 #: has most of, once h_itf_* has failed too.
+#:
+#: Since 2026-11-03 rung 1 effectively offers only h_itf_def: h_itf_arm is in
+#: `RETIRED_VOICES_FR_V2` and `ladder_voice` skips retired names. The tuple is left as
+#: measured, since it is history.
 VOICE_LADDER_FR_V2: tuple[tuple[str, ...], ...] = (
     ("h_itf_arm", "h_itf_def"),   # rung 1: the two best hybrids
     ("fr_male", "fr_female"),     # rung 2: the shipped bases, last resort
@@ -171,6 +195,10 @@ VOICE_LADDER_FR_V2: tuple[tuple[str, ...], ...] = (
 #: these five 0.34 to 0.69 (5,455-5,925 each), fr_male 0.16 (6,188), fr_female 0.07
 #: (5,974). So the two itf voices carry an accent error, not seed noise, and the
 #: other hybrids sit far closer to the fr pair than to them.
+#:
+#: Since 2026-11-03 this effectively offers only h_frf_esm and h_frm_nlf: the other
+#: three are in `RETIRED_VOICES_FR_V2` and `ladder_voice` skips retired names. The
+#: tuple is left as measured, since it is history.
 NUMBER_LADDER_FR_V2: tuple[tuple[str, ...], ...] = (
     ("h_frf_esm", "h_frf_itm", "h_frf_ptm", "h_frm_nlf", "h_frm_ptf"),
 )
@@ -302,9 +330,10 @@ def voice_for_key(key: str, voices: tuple[str, ...] | list[str] = VOICES_FR_V2,
     retired (at eight of nine retired, a bounded loop alone would leave ~1e-3 of keys
     undecided).
 
-    Done once for real, deliberately, and only because the audio was being deleted in
-    the same operation: see `RETIRED_VOICES_FR_V2` for why dropping `h_frm_chf` from
-    the roster on 2026-10-15 was not an exception to the rule above.
+    Deleting a roster entry was done once for real, deliberately, and only because the
+    audio was being deleted in the same operation: see `RETIRED_VOICES_FR_V2` for why
+    dropping `h_frm_chf` on 2026-10-15 was not an exception to the rule above, and for
+    the four voices retired the proper way on 2026-11-03.
 
     Examples
     --------
@@ -313,8 +342,7 @@ def voice_for_key(key: str, voices: tuple[str, ...] | list[str] = VOICES_FR_V2,
     >>> voice_for_key("42") not in RETIRED_VOICES_FR_V2
     True
     >>> # Retiring a voice leaves the other eight ninths of the keys alone. Passed
-    >>> # explicitly because RETIRED_VOICES_FR_V2 is currently empty: no voice is
-    >>> # retired, so the live mapping and the historical one are the same mapping.
+    >>> # explicitly so the example isolates one voice from the live retirements.
     >>> same = sum(voice_for_key(str(k), retired=("h_frm_ptf",))
     ...            == voice_for_key(str(k), retired=())
     ...            for k in range(10000))
@@ -324,6 +352,11 @@ def voice_for_key(key: str, voices: tuple[str, ...] | list[str] = VOICES_FR_V2,
     >>> any(voice_for_key(str(k), retired=("h_frm_ptf",)) == "h_frm_ptf"
     ...     for k in range(10000))
     False
+    >>> # The live retirement of four voices (2026-11-03) moves ~44 pct of the keys.
+    >>> live = sum(voice_for_key(str(k)) == voice_for_key(str(k), retired=())
+    ...            for k in range(10000))
+    >>> 5100 < live < 6100
+    True
     """
     if not voices:
         raise ValueError("voices is empty")
@@ -429,8 +462,10 @@ def swap_voice(key: str, current: str | None, *,
     'h_frf_esm'
     >>> swap_voice("42", "h_frf_esm")
     'h_frm_nlf'
+    >>> # h_frf_itm and the other retired voices are skipped, so the pick lands on a
+    >>> # survivor (h_frf_itm before the 2026-11-03 retirement).
     >>> swap_voice("42", "h_frf_esm", avoid=("h_frm_nlf",))
-    'h_frf_itm'
+    'fr_female'
     >>> # `avoid` is a preference: asking it to skip the whole roster still answers.
     >>> swap_voice("42", "h_frf_esm", avoid=VOICES_FR_V2)
     'h_frm_nlf'
@@ -497,27 +532,33 @@ def ladder_voice(key: str, rung: int, *,
 
     Examples
     --------
-    >>> ladder_voice("42", 0)
-    'h_itf_arm'
+    >>> # Live roster: h_itf_arm is retired (2026-11-03), so rung 1 only offers
+    >>> # h_itf_def whatever the key.
+    >>> (ladder_voice("42", 0), ladder_voice("13", 0))
+    ('h_itf_def', 'h_itf_def')
     >>> ladder_voice("42", 1)
     'fr_male'
     >>> ladder_voice("42", 2) is None     # past the end of the ladder
     True
+    >>> # The examples below pass `retired=()` to show the mechanism on a full rung.
     >>> # Another key, uniformly, lands on the other voice of each rung.
-    >>> (ladder_voice("13", 0), ladder_voice("13", 1))
-    ('h_itf_def', 'fr_female')
+    >>> (ladder_voice("42", 0, retired=()), ladder_voice("13", 0, retired=()),
+    ...  ladder_voice("13", 1))
+    ('h_itf_arm', 'h_itf_def', 'fr_female')
     >>> # What the clip already failed at is skipped; None entries are ignored.
-    >>> ladder_voice("13", 0, tried=("h_itf_def", None))
+    >>> ladder_voice("13", 0, tried=("h_itf_def", None), retired=())
     'h_itf_arm'
-    >>> ladder_voice("13", 0, tried=("h_itf_arm", "h_itf_def")) is None
+    >>> ladder_voice("13", 0, tried=("h_itf_def", None)) is None   # live: rung empty
+    True
+    >>> ladder_voice("13", 0, tried=("h_itf_arm", "h_itf_def"), retired=()) is None
     True
     >>> # A directory whose roster never had the hybrids skips straight past them.
     >>> ladder_voice("42", 0, roster=("fr_male", "fr_female")) is None
     True
     >>> # `avoid` is a preference, not a rule: it is dropped before giving up.
-    >>> ladder_voice("13", 0, avoid=("h_itf_def",))
+    >>> ladder_voice("13", 0, avoid=("h_itf_def",), retired=())
     'h_itf_arm'
-    >>> ladder_voice("13", 0, avoid=("h_itf_arm", "h_itf_def"))
+    >>> ladder_voice("13", 0, avoid=("h_itf_arm", "h_itf_def"), retired=())
     'h_itf_def'
     """
     if rung < 0 or rung >= len(ladder):

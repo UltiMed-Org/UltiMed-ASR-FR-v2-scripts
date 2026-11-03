@@ -79,10 +79,9 @@ check("historical mapping is pinned to known values",
       local == ["h_frm_nlf", "h_frf_esm", "h_frm_ptf", "h_frf_itm", "h_frf_esm",
                 "h_frm_nlf"],
       str(local))
-# No voice is retired at the moment (RETIRED_VOICES_FR_V2 is empty, see the comment
-# on it), so the mechanism is exercised with an explicit tuple. Testing it against the
-# module default instead would make these checks vanish the moment the default is empty,
-# which is exactly when a future retirement needs them most.
+# The mechanism is exercised with an explicit tuple, independent of the live
+# RETIRED_VOICES_FR_V2 (four voices since 2026-11-03), so these checks neither vanish
+# when the default is empty nor shift whenever the live roster changes.
 RETIRED = ("h_frf_esm",)
 # The live mapping differs from the historical one in exactly the positions that drew
 # the retired voice: of the six keys above, "42" and "PARROT:12" move and the other
@@ -110,8 +109,19 @@ check("the historical mapping still yields the retired voice",
 # is what keeps every clip already on disk correctly labelled, and it is the property
 # that makes a mid-run retirement cheap and a mid-run roster edit impossible.
 check("an empty retirement changes nothing",
-      all(va.voice_for_key(str(i)) == va.voice_for_key(str(i), retired=())
+      all(va.voice_for_key(str(i), retired=()) == va.voice_for_key(str(i), retired=[])
+          == va.voice_for_key(str(i), retired=None) for i in range(5_000)))
+# The live default (2026-11-03: four voices retired after the training attribution
+# sweep) moves exactly the keys whose historical voice is retired, and no other.
+check("the live retirement moves exactly the retired voices' keys",
+      all((va.voice_for_key(str(i)) == va.voice_for_key(str(i), retired=()))
+          == (va.voice_for_key(str(i), retired=()) not in va.RETIRED_VOICES_FR_V2)
           for i in range(5_000)))
+# Pinned live mapping, updated 2026-11-03 when RETIRED_VOICES_FR_V2 gained four voices.
+check("live mapping pinned to known values",
+      [va.voice_for_key(k) for k in KEYS]
+      == ["h_frm_nlf", "h_frf_esm", "h_frf_esm", "fr_female", "h_frf_esm", "h_frm_nlf"],
+      str([va.voice_for_key(k) for k in KEYS]))
 # A roster that is entirely retired is a configuration error, not a silent fallback.
 try:
     va.voice_for_key("1", voices=("a", "b"), retired=("a", "b"))

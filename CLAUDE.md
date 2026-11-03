@@ -571,10 +571,13 @@ A larger QC sample settled it the other way on 2026-10-15: over 2,000 clips it w
 on 14.9% with p90 CER 0.195, against 0.0-4.6% and p90 0.014-0.036 for the other nine. So
 it was **dropped from `VOICES_FR_V2` entirely** rather than retired, and the audio made
 before the gate existed was deleted and is being regenerated; the roster is now nine
-voices, 4F/5M. `utils/voice_assignment.py` keeps the retirement mechanism ready and
-tested with `RETIRED_VOICES_FR_V2` empty, because once a lot of audio exists retirement
-is the only safe tool: it re-draws only the dropped voice's keys (~11% here) and leaves
-the rest bit-identical, where editing the roster re-assigns every key.
+voices, 4F/5M. Since then a voice is retired through `RETIRED_VOICES_FR_V2` in
+`utils/voice_assignment.py`, because once a lot of audio exists retirement is the only
+safe tool: it re-draws only the dropped voices' keys (~11% per voice here) and leaves
+the rest bit-identical, where editing the roster re-assigns every key. On 2026-11-03
+four were retired that way (`h_frf_itm`, `h_frm_ptf`, `h_frf_ptm`, `h_itf_arm`, ~44% of
+the keys) after a per-voice training attribution sweep ranked them clearly worse on
+real-speech validation WER; see the comment on the constant for the numbers.
 
 **Listening to a run while it runs: `05_generate_audio/03_qc_cpu_stt.py`.** The
 duration bounds are the only check the audio gets during generation, and they

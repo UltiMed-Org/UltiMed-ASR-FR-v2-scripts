@@ -247,8 +247,10 @@ def test_the_whole_ladder(mod):
             imp = row["improvement"]
             seen.append((mode, int(imp.get("voice_tier") or 0), imp["status"]))
 
+        # h_itf_def, not h_itf_arm, since 2026-11-03: h_itf_arm is retired, and
+        # ladder_voice skips retired names, leaving h_itf_def alone on rung 1.
         check("the rungs are the measured voices, in order",
-              (rung1, rung2) == ("h_itf_arm", "fr_male"), f"{rung1} then {rung2}")
+              (rung1, rung2) == ("h_itf_def", "fr_male"), f"{rung1} then {rung2}")
         # Three draws per rung (the harness cfg's --n-improv), and the ORDER matters:
         # a rung must be finished before the next is started, or the ladder would be
         # three voices racing rather than an escalation.
