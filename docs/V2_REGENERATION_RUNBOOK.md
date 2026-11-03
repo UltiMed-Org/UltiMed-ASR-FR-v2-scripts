@@ -95,7 +95,7 @@ done
   | h_frf_ptm | 13.03 | 8.84 | 18.72 | **6.6 - 27.1** | 0.31% |
   | **h_frm_chf** (dropped) | **10.75** | **7.00** | 18.22 | **5.3 - 26.4** | **3.05%** |
 
-  ("legit p1" excludes the clips reading below that voice's median/2.5, i.e. its actual runaways, 1.08% for h_frm_chf and under 0.2% everywhere else.) `h_frm_chf` was dropped from the roster on 2026-10-15 on QC evidence, so the roster is the nine other rows; its `VOICE_RATES` entry stays, because the measurement is still true and a re-added voice must not silently fall back to the global band. So the first bound was rejecting the slow voice *for being slow*, three attempts at a time, while barely bounding the fast ones at all.
+  ("legit p1" excludes the clips reading below that voice's median/2.5, i.e. its actual runaways, 1.08% for h_frm_chf and under 0.2% everywhere else.) `h_frm_chf` was dropped from the roster on 2026-10-15 on QC evidence, so the roster is the nine other rows; its `VOICE_RATES` entry stays, because the measurement is still true and a re-added voice must not silently fall back to the global band. On 2026-11-03 four more rows, `h_frf_itm`, `h_frm_ptf`, `h_itf_arm` and `h_frf_ptm`, were retired through `RETIRED_VOICES_FR_V2` (not deleted from the roster) after a training attribution sweep, so five voices now read new clips; their rows and rates stay for the same reason (see "Retiring voices after QC" below). So the first bound was rejecting the slow voice *for being slow*, three attempts at a time, while barely bounding the fast ones at all.
 
   **The bounds are therefore per voice** (`VOICE_RATES` in `utils/frame_budget.py`, resolved by `rates_for_voice`): upper = `0.75 x` that voice's legit p1, the knee where each voice's rejection share stops exceeding its genuine-runaway share; lower = `1.45 x` its fastest observed clip, a wide margin because each voice has only ~3.2k clips here while the 602,813-clip v1 corpus reached 28.5 chars/s against a p99.9 of 20.5. A voice the table does not list falls back to the global `5.0 / 30.0`, the widest band, so an unlisted voice is never rejected for being unlisted; `--budget-chars-per-second` / `--floor-chars-per-second` override the table for every voice.
 
@@ -165,6 +165,26 @@ done
 - **No `--seed`.** Omitted on purpose, so the run matches v1's behaviour. The flat `seed` field cannot reach this model at all, and the nested `voxtral_noise_seed` that can would pin every clip in the corpus to the SAME noise draw, which works against the acoustic variety v2 exists for. The dataset card says so under "On seeds". A per-clip seed derived from the clip key (the way the voice is) would be the way to get reproducibility without that, but it is a code change plus a new column, so it is not part of this run.
 - Each run writes `voice_assignment.json` beside the audio. **Stage 99 labels the `voice` column from that file**, so do not re-order `utils/voice_assignment.py`'s roster afterwards: the file order is part of the mapping and every clip already on disk would become mislabelled.
 
+
+## 1b. Retiring voices after QC (2026-11-03)
+
+Written with Claude Code, for the retirement of `h_frf_itm`, `h_frm_ptf`, `h_frf_ptm` and `h_itf_arm`. The evidence is a per-voice training attribution sweep: nine 1500-step parakeet fine-tunes, each on one voice's UltiMed slice plus the same constant non-UltiMed sets, ranked on the mean raw WER of the two real-speech validation sets (oli and FLEURS-fr). Five voices landed at 0.0638-0.0648 and these four at 0.0667-0.0687, with nothing in between; the synthetic val sets (same TTS voices) did not separate them, which is why no QC judge had. The numbers live in the comment on `RETIRED_VOICES_FR_V2`.
+
+A voice is retired by re-draw, never by deleting its roster entry (`voice_assignment.voice_for_key` explains why): the keys whose first draw landed on a retired voice (~44% of the corpus for these four) move uniformly to the survivors, and every other clip keeps its voice and its audio.
+
+1. **Set `RETIRED_VOICES_FR_V2`** in `utils/voice_assignment.py`. `voice_for_key`, `swap_voice` and `ladder_voice` all honour it from then on, so stage 05 and stage 06 stop drawing those voices.
+2. **Find and delete the clips a retired voice read**, dry run first:
+
+   ```bash
+   cd 05_generate_audio
+   uv run 02_audit_durations.py --state ../06_hotfixes/improved/full.stt.jsonl --report retired.jsonl
+   uv run 02_audit_durations.py --state ../06_hotfixes/improved/full.stt.jsonl --apply
+   ```
+
+   `--state` is not optional here. Stage 06 rewrites clips in place with another voice and records the reader in its state file, so the hash voice alone is wrong for every re-voiced clip: on 2026-11-03 it would have missed 3,015 clips a retired voice re-read and deleted 3,834 that stage 06 had already moved to a survivor. The audit logs, per stage, how many voices came from the state and both directional counts, and warns when voices are retired but no `--state` was given.
+3. **Regenerate**: `./generate_v2.sh` (in `05_generate_audio/`) resumes, which regenerates exactly the missing stems, now in the survivors' voices.
+4. **Reset stage 06's state for those stems** with `06_hotfixes/20_drop_state_rows.py`, which drops their rows from the state, so the rebuilt manifest brings them in fresh and the driver's stt pass re-judges exactly them. Without it, stage 06 would keep the old take's verdicts and voice for audio that no longer exists.
+5. **Re-run the QC loop**: `RESET_STATE=1 ./driver.sh` (in `06_hotfixes/`), so every step runs again over the new clips.
 
 ## 2. QC loop (stage 06)
 
