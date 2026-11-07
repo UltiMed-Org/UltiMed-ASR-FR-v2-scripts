@@ -53,6 +53,7 @@
 {"clip": "PARHAF/009924_0000_chir_ortho_et_traumato_00299_t1_c3.flac", "reason": "asr-flagged", "audio_mtime_ns": 1792527594327098718}
 {"clip": "PARHAF/010138_0000_chir_ortho_et_traumato_00320_t2_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1792527840304213181}
 {"clip": "PARHAF/010431_0000_chir_cardio_vasc_00001_t2_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1792528188534861352}
+{"clip": "PARHAF/010481_0000_chir_cardio_vasc_00002_t2_c15.flac", "reason": "exhausted", "audio_mtime_ns": 1793932249330959719}
 {"clip": "PARHAF/010599_0000_chir_cardio_vasc_00010_t2_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1793387366330137896}
 {"clip": "PARHAF/010706_0000_chir_cardio_vasc_00018_t2_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1793387653573212329}
 {"clip": "PARHAF/010763_0000_chir_cardio_vasc_00023_t2_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1793387552820709313}
@@ -75,7 +76,7 @@
 {"clip": "PARHAF/013163_0000_chirurgie_viscerale_00194_t2_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1793222108644918512}
 {"clip": "PARHAF/013319_0000_chirurgie_viscerale_00223_t2_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1793568878429378334}
 {"clip": "PARHAF/013398_0000_chirurgie_viscerale_00234_t2_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1793387292796796920}
-{"clip": "PARHAF/013623_0000_chirurgie_viscerale_00266_t1_c3.flac", "reason": "exhausted", "audio_mtime_ns": 1792532492771786717}
+{"clip": "PARHAF/013623_0000_chirurgie_viscerale_00266_t1_c3.flac", "reason": "exhausted", "audio_mtime_ns": 1793933531291758112}
 {"clip": "PARHAF/013972_0000_chirurgie_viscerale_00330_t2_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1792532928327260021}
 {"clip": "PARHAF/014300_0000_chirurgie_viscerale_00352_t2_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1793387377398883406}
 {"clip": "PARHAF/014623_0000_chirurgie_viscerale_00385_t2_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1792533796277396267}
@@ -87,6 +88,7 @@
 {"clip": "PARHAF/015161_0000_chirurgie_viscerale_00529_t0_c4.flac", "reason": "asr-flagged", "audio_mtime_ns": 1792534578006979064}
 {"clip": "PARHAF/015466_0000_gynecologie_00024_t2_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1792844795271860654}
 {"clip": "PARHAF/015557_0000_gynecologie_00035_t2_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1793387602577483975}
+{"clip": "PARHAF/015571_0000_gynecologie_00038_t0_c4.flac", "reason": "exhausted", "audio_mtime_ns": 1793934421260147966}
 {"clip": "PARHAF/015688_0000_gynecologie_00045_t2_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1793387635492664924}
 {"clip": "PARHAF/015724_0000_gynecologie_00049_t2_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1793387539389037278}
 {"clip": "PARHAF/016306_0000_gynecologie_00159_t1_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1792536194224755293}
@@ -132,6 +134,7 @@
 {"clip": "PARHAF/020635_0000_maladies_infectieuses_00030_t0_c12.flac", "reason": "exhausted", "audio_mtime_ns": 1793047902756449373}
 {"clip": "PARHAF/020733_0000_maladies_infectieuses_00037_t0_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1792544442232234753}
 {"clip": "PARHAF/020798_0000_maladies_infectieuses_00043_t0_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1793387288836884608}
+{"clip": "PARHAF/020803_0000_maladies_infectieuses_00043_t0_c5.flac", "reason": "exhausted", "audio_mtime_ns": 1794036358173997549}
 {"clip": "PARHAF/020821_0000_maladies_infectieuses_00047_t0_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1793387565967387123}
 {"clip": "PARHAF/020906_0000_maladies_infectieuses_00055_t0_c2.flac", "reason": "exhausted", "audio_mtime_ns": 1793106988759713593}
 {"clip": "PARHAF/021019_0000_maladies_infectieuses_00066_t0_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1793387370480042621}
@@ -165,7 +168,7 @@
 {"clip": "PARHAF/024597_0000_maladies_infectieuses_00858_t0_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1793387370082051766}
 {"clip": "PARHAF/024624_0000_medecine_geriatrique_00002_t0_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1792550519150786977}
 {"clip": "PARHAF/024636_0000_medecine_geriatrique_00002_t0_c12.flac", "reason": "exhausted", "audio_mtime_ns": 1793216523416065124}
-{"clip": "PARHAF/024695_0000_medecine_geriatrique_00005_t0_c7.flac", "reason": "exhausted", "audio_mtime_ns": 1792896805167233282}
+{"clip": "PARHAF/024695_0000_medecine_geriatrique_00005_t0_c7.flac", "reason": "exhausted", "audio_mtime_ns": 1794034255406947163}
 {"clip": "PARHAF/024868_0000_medecine_geriatrique_00017_t0_c5.flac", "reason": "exhausted", "audio_mtime_ns": 1792550896815587034}
 {"clip": "PARHAF/024895_0000_medecine_geriatrique_00019_t0_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1793387345872605085}
 {"clip": "PARHAF/025314_0000_medecine_geriatrique_00045_t0_c2.flac", "reason": "asr-flagged", "audio_mtime_ns": 1793261004451709862}
@@ -301,9 +304,10 @@
 {"clip": "PARHAF/042354_0000_urologie_00070_t2_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1793568958205236178}
 {"clip": "PARHAF/042554_0000_urologie_00102_t2_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1793387286824929092}
 {"clip": "PARHAF/042564_0000_urologie_00104_t2_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1792579742854269603}
-{"clip": "PARHAF/042737_0000_urologie_00129_t1_c7.flac", "reason": "exhausted", "audio_mtime_ns": 1792910628294090045}
+{"clip": "PARHAF/042737_0000_urologie_00129_t1_c7.flac", "reason": "exhausted", "audio_mtime_ns": 1793948559044659103}
 {"clip": "PARHAF/042974_0000_urologie_00166_t2_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1793387449403200429}
 {"clip": "PARHAF/043016_0000_urologie_00172_t2_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1792856033322757637}
+{"clip": "PARHAF/043020_0000_urologie_00172_t2_c4.flac", "reason": "exhausted", "audio_mtime_ns": 1793948658690919188}
 {"clip": "PARHAF/043118_0000_urologie_00191_t2_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1793387389505603711}
 {"clip": "PARHAF/043188_0000_urologie_00203_t2_c0.flac", "reason": "asr-flagged", "audio_mtime_ns": 1793387768964283548}
 {"clip": "PARHAF/043218_0000_urologie_00208_t0_c3.flac", "reason": "asr-flagged", "audio_mtime_ns": 1792580605101882585}
@@ -313,16 +317,18 @@
 {"clip": "PARROT/001109_0000_parrot_2559_c0.flac", "reason": "exhausted", "audio_mtime_ns": 1793225320716752711}
 {"clip": "PARROT/001116_0000_parrot_2561_c0.flac", "reason": "cfg-off", "audio_mtime_ns": 1792582366398975340}
 {"clip": "PARROT/001130_0000_parrot_2565_c0.flac", "reason": "cfg-off", "audio_mtime_ns": 1792582397855209589}
+{"clip": "PARROT/001134_0000_parrot_2566_c0.flac", "reason": "exhausted", "audio_mtime_ns": 1793949347828043103}
 {"clip": "PARROT/001499_0000_parrot_2724_c1.flac", "reason": "asr-flagged", "audio_mtime_ns": 1792856485155819509}
 {"clip": "acronyms/000173_0000_diii.flac", "reason": "cfg-off", "audio_mtime_ns": 1792511535693359969}
 {"clip": "acronyms/000258_0001_hbo2.flac", "reason": "cfg-off", "audio_mtime_ns": 1792511655946495389}
-{"clip": "acronyms/000514_0000_vm.flac", "reason": "exhausted", "audio_mtime_ns": 1792511986836277124}
+{"clip": "acronyms/000514_0000_vm.flac", "reason": "exhausted", "audio_mtime_ns": 1793927248551135521}
 {"clip": "dictionary/000002_0002_a_beta_40.flac", "reason": "exhausted", "audio_mtime_ns": 1793218344551880076}
 {"clip": "dictionary/000002_0009_a_beta_40.flac", "reason": "exhausted", "audio_mtime_ns": 1793220154521229935}
 {"clip": "dictionary/000025_0007_abaque_de_charge_d_un_tube_radiologique.flac", "reason": "cfg-off", "audio_mtime_ns": 1792050767507627499}
 {"clip": "dictionary/000339_0003_accouchement_au_minimum_de_puissance.flac", "reason": "exhausted", "audio_mtime_ns": 1792052616360311629}
 {"clip": "dictionary/000624_0003_acide_gras_marque.flac", "reason": "exhausted", "audio_mtime_ns": 1792054572547343929}
 {"clip": "dictionary/000753_0002_acide_pteroique.flac", "reason": "cfg-off", "audio_mtime_ns": 1792055531132227959}
+{"clip": "dictionary/001086_0010_activite_lineique.flac", "reason": "exhausted", "audio_mtime_ns": 1793780932375575172}
 {"clip": "dictionary/002046_0002_aldosterone.flac", "reason": "exhausted", "audio_mtime_ns": 1792063487410322692}
 {"clip": "dictionary/002095_0002_alignement_d_une_lentille_de_contact.flac", "reason": "asr-flagged", "audio_mtime_ns": 1792063844332909114}
 {"clip": "dictionary/002363_0000_amazie.flac", "reason": "asr-flagged", "audio_mtime_ns": 1792065268292598204}
@@ -350,7 +356,7 @@
 {"clip": "dictionary/008689_0006_bradyphemie.flac", "reason": "exhausted", "audio_mtime_ns": 1792109478437831419}
 {"clip": "dictionary/009253_0000_cachexie_myxdemateuse.flac", "reason": "exhausted", "audio_mtime_ns": 1792113284940948151}
 {"clip": "dictionary/009253_0006_cachexie_myxdemateuse.flac", "reason": "exhausted", "audio_mtime_ns": 1792113286554910419}
-{"clip": "dictionary/009449_0003_calorie.flac", "reason": "exhausted", "audio_mtime_ns": 1793220711237287405}
+{"clip": "dictionary/009449_0003_calorie.flac", "reason": "exhausted", "audio_mtime_ns": 1793799566078389068}
 {"clip": "dictionary/009456_0005_calpaine_3.flac", "reason": "asr-flagged", "audio_mtime_ns": 1792114489015849682}
 {"clip": "dictionary/009776_0010_cancer_du_nasopharynx.flac", "reason": "exhausted", "audio_mtime_ns": 1792116870743847207}
 {"clip": "dictionary/010681_0001_cavite_cranienne.flac", "reason": "asr-flagged", "audio_mtime_ns": 1792123033562454483}
@@ -423,6 +429,7 @@
 {"clip": "dictionary/033889_0009_capsule_de_malpighi.flac", "reason": "cfg-off", "audio_mtime_ns": 1792289164793930079}
 {"clip": "dictionary/034842_0003_indices_de_mengert.flac", "reason": "exhausted", "audio_mtime_ns": 1793546108048479892}
 {"clip": "dictionary/035617_0005_minimal_erythemal_dosis.flac", "reason": "cfg-off", "audio_mtime_ns": 1792300887283571054}
+{"clip": "dictionary/035952_0002_monosomie_1pter.flac", "reason": "exhausted", "audio_mtime_ns": 1794036735879861306}
 {"clip": "dictionary/036480_0002_muscle_court_flechisseur_du_petit_doigt_de_la_main.flac", "reason": "cfg-off", "audio_mtime_ns": 1792305824590214253}
 {"clip": "dictionary/036579_0010_muscle_epineux_de_la_tete.flac", "reason": "cfg-off", "audio_mtime_ns": 1792306959213281007}
 {"clip": "dictionary/037201_0003_myd88.flac", "reason": "cfg-off", "audio_mtime_ns": 1792311106850386698}
@@ -443,14 +450,16 @@
 {"clip": "dictionary/043269_0002_phylogenomique.flac", "reason": "asr-flagged", "audio_mtime_ns": 1793220178589651275}
 {"clip": "dictionary/043551_0009_gene_pkd1.flac", "reason": "asr-flagged", "audio_mtime_ns": 1793387632891729878}
 {"clip": "dictionary/043572_0003_placenta_de_lobstein.flac", "reason": "cfg-off", "audio_mtime_ns": 1792356379998939479}
+{"clip": "dictionary/043582_0004_placenta_lateral.flac", "reason": "exhausted", "audio_mtime_ns": 1793876186611959488}
 {"clip": "dictionary/044235_0010_pneumopathie_a_cholesterol.flac", "reason": "asr-flagged", "audio_mtime_ns": 1792843027881976153}
 {"clip": "dictionary/044407_0000_poiseuille.flac", "reason": "exhausted", "audio_mtime_ns": 1793048869934868143}
 {"clip": "dictionary/045046_0002_pouls_trigemine.flac", "reason": "cfg-off", "audio_mtime_ns": 1792365951312739013}
 {"clip": "dictionary/045487_0008_proaccelerine.flac", "reason": "asr-flagged", "audio_mtime_ns": 1792368406220078059}
+{"clip": "dictionary/045810_0002_virus_prospect_hill.flac", "reason": "exhausted", "audio_mtime_ns": 1794037825829365946}
 {"clip": "dictionary/046224_0006_pseudofolliculite_de_la_barbe.flac", "reason": "asr-flagged", "audio_mtime_ns": 1792373362037480335}
 {"clip": "dictionary/047079_0006_radiometrie.flac", "reason": "exhausted", "audio_mtime_ns": 1793342616506113709}
 {"clip": "dictionary/047485_0000_rameau_thyro_hyoidien_de_l_anse_cervicale.flac", "reason": "asr-flagged", "audio_mtime_ns": 1792382132376111143}
-{"clip": "dictionary/048016_0003_recepteurs_chimeriques_de_cellules_t.flac", "reason": "exhausted", "audio_mtime_ns": 1792385555750654143}
+{"clip": "dictionary/048016_0003_recepteurs_chimeriques_de_cellules_t.flac", "reason": "exhausted", "audio_mtime_ns": 1793886305064048281}
 {"clip": "dictionary/048860_0002_resistance_nasale.flac", "reason": "cfg-off", "audio_mtime_ns": 1792390256111038965}
 {"clip": "dictionary/048882_0002_resonance_paramagnetique_electronique.flac", "reason": "exhausted", "audio_mtime_ns": 1792390461493179822}
 {"clip": "dictionary/050575_0002_sd.flac", "reason": "asr-flagged", "audio_mtime_ns": 1792411352330338347}
@@ -483,6 +492,7 @@
 {"clip": "dictionary/058008_0000_unite_lapine.flac", "reason": "exhausted", "audio_mtime_ns": 1792461304261376611}
 {"clip": "dictionary/058172_0006_uricosurique.flac", "reason": "asr-flagged", "audio_mtime_ns": 1792462536677091068}
 {"clip": "dictionary/058186_0010_uridine_monophosphate.flac", "reason": "exhausted", "audio_mtime_ns": 1792462607928436539}
+{"clip": "dictionary/058322_0009_utrophine.flac", "reason": "exhausted", "audio_mtime_ns": 1793912230328801409}
 {"clip": "dictionary/060160_0007_vipome.flac", "reason": "asr-flagged", "audio_mtime_ns": 1792475659758931386}
 {"clip": "dictionary/060220_0002_virus_delta.flac", "reason": "exhausted", "audio_mtime_ns": 1792914016808381981}
 {"clip": "dictionary/060910_0000_effet_wolff_chaikoff.flac", "reason": "exhausted", "audio_mtime_ns": 1792480278409817585}
