@@ -221,8 +221,10 @@
 #   SYNC_RESULTS=1      (default) after every dataset has converged, carry stage 06's QC
 #                       columns (and a swapped clip's voice) back into the release
 #                       manifests (99_hf_release/03_sync_hotfix_results.py --apply
-#                       --stt-key $STT_MODEL --stt-model $STT_MODEL). Without it the
-#                       manifests still describe the audio as it was before this run.
+#                       --stt-key $STT_MODEL --stt-model $STT_MODEL), then drop the rows
+#                       that status rules out (99_hf_release/04_drop_bad_rows.py --apply).
+#                       Without it the manifests still describe the audio as it was
+#                       before this run.
 #   STEMS_FROM space-separated list of files naming the only CLIPS to work on, each
 #             either a QC sidecar jsonl (its flagged rows) or a plain list of stems,
 #             one per line. Same pass-through and convergence semantics as CATEGORY,
@@ -800,7 +802,7 @@ fi
 # (it cannot be built here: the manifest rebuild below is what CREATES those files on a
 # first run).
 DATASET_COUNT="$(set -- ${INPUT}; echo $#)"
-STEP_TOTAL=$(( REFRESH_MANIFESTS + ACOUSTIC_SCAN + DATASET_COUNT + SYNC_RESULTS ))
+STEP_TOTAL=$(( REFRESH_MANIFESTS + ACOUSTIC_SCAN + DATASET_COUNT + 2 * SYNC_RESULTS ))  # sync, then drop
 STEP_NOW=0
 step_header() {   # $* = what this step is
   STEP_NOW=$(( STEP_NOW + 1 ))
@@ -1224,8 +1226,29 @@ elif (( SYNC_RESULTS )); then
     step_log "done sync"
   else
     echo "driver: the manifest sync failed; the audio is fine, re-run" \
-         "99_hf_release/03_sync_hotfix_results.py --apply by hand" >&2
+         "99_hf_release/03_sync_hotfix_results.py --apply, then 04_drop_bad_rows.py" \
+         "--apply, by hand" >&2
   fi
+fi
+
+# The sync writes qc_status into the manifests but leaves the rows it marks bad
+# (exhausted clips, eval texts that also sit in train, ...) in place; dropping them is
+# 04's job, and it must follow every sync, or the next training run eats those rows and
+# dies on its data-leak check (2026-11-07: two PARHAF test texts found in train). Its own
+# step, so a resumed run skips it like the others, gated on the sync having finished,
+# since it reads the status the sync wrote.
+if (( SYNC_RESULTS )) && step_done drop; then
+  step_skip drop "the bad-row drop"
+elif (( SYNC_RESULTS )) && step_done sync; then
+  step_header "post-step: dropping the rows that must not ship"
+  if as_user "${UV_BIN}" run "${ROOT}/99_hf_release/04_drop_bad_rows.py" --apply; then
+    step_log "done drop"
+  else
+    echo "driver: the drop failed; the manifests carry stage 06's status but still hold" \
+         "the bad rows, re-run 99_hf_release/04_drop_bad_rows.py --apply by hand" >&2
+  fi
+elif (( SYNC_RESULTS )); then
+  step_header "post-step: NOT dropping the bad rows, the sync above did not finish"
 fi
 
 echo "=== $(date '+%F %T') every dataset converged. Done. ==="

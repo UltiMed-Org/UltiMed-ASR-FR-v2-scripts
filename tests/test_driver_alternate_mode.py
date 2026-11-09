@@ -478,8 +478,8 @@ def test_the_steps_are_on_by_default(tmp: Path) -> None:
     assert rc == 0, f"driver exited {rc}\n{out}"
     assert modes == ["stt"], f"passes ran: {modes}\n{out}"
     scripts = [line.split("|", 1)[0] for line in steps]
-    assert scripts == ["04_qc_acoustic_loops.py",
-                       "13_refresh_stale_durations.py", "03_sync_hotfix_results.py"], \
+    assert scripts == ["04_qc_acoustic_loops.py", "13_refresh_stale_durations.py",
+                       "03_sync_hotfix_results.py", "04_drop_bad_rows.py"], \
         f"steps ran: {scripts}\n{out}"
     assert "Skipping the manifest refresh" in out, out
     # The scan's worker count is the driver's business, not the script's: its own default
@@ -540,10 +540,13 @@ def test_the_whole_phase_in_one_command(tmp: Path) -> None:
     assert rc == 0, f"driver exited {rc}\n{out}"
     assert modes == ["stt"], f"passes ran: {modes}\n{out}"
     scripts = [line.split("|", 1)[0] for line in steps]
+    # The drop comes last because it reads the qc_status the sync has just written: a
+    # sync without it leaves the bad rows in train (how 2.4.s2-6k died on 2026-11-07).
     assert scripts == ["01_build_nemo_manifest.py", "02_combine_nemo_manifests.py",
                        "04_qc_acoustic_loops.py", "13_refresh_stale_durations.py",
-                       "03_sync_hotfix_results.py"], \
+                       "03_sync_hotfix_results.py", "04_drop_bad_rows.py"], \
         f"steps ran: {scripts}\n{out}"
+    assert "--apply" in steps[5], steps[5]
     assert f"--pin-splits-from {pinned}" in steps[0], steps[0]
     assert f"--pin-splits-from {pinned}" in steps[1], steps[1]
     assert "--workers 3" in steps[2], steps[2]
@@ -578,13 +581,15 @@ def test_the_duration_refresh_runs_before_the_sync(tmp: Path) -> None:
         steps=steps)
     assert rc == 0, f"driver exited {rc}\n{out}"
     scripts = [line.split("|", 1)[0] for line in steps]
-    assert scripts == ["13_refresh_stale_durations.py", "03_sync_hotfix_results.py"], \
+    assert scripts == ["13_refresh_stale_durations.py", "03_sync_hotfix_results.py",
+                       "04_drop_bad_rows.py"], \
         f"steps ran: {scripts}\n{out}"
     # --apply, or it reports what it would do and the sync still pushes stale durations.
     assert "--apply" in steps[0], steps[0]
     # Two scripts, ONE step, like the manifest rebuild: the pair is numbered as the single
-    # post-step it is (one dataset + the sync = 2), so the ledger resumes both or neither.
-    assert "[step 2/2]" in out and "[step 3/" not in out, out
+    # post-step it is (one dataset + the sync + the drop = 3), so the ledger resumes both
+    # or neither; the drop is its own step, gated on the sync's ledger line.
+    assert "[step 2/3]" in out and "[step 3/3]" in out and "[step 4/" not in out, out
     print("test_the_duration_refresh_runs_before_the_sync: OK")
 
 
@@ -636,8 +641,9 @@ def test_the_launch_line_beats_the_env_file(tmp: Path) -> None:
     assert "comes from the launch line" in out, out
     # The readings and the sync have to agree on the key, or T2 lands somewhere nothing
     # reads it back.
-    assert "--stt-key whisper.cpp/ggml-large-v3 " in steps[-1] + " ", steps[-1]
-    assert "turbo" not in steps[-1], steps[-1]
+    sync = next(s for s in steps if s.startswith("03_sync_hotfix_results.py|"))
+    assert "--stt-key whisper.cpp/ggml-large-v3 " in sync + " ", sync
+    assert "turbo" not in sync, sync
 
     # A bare launch keeps the .env pin: that line is what protects the judge from the
     # inherited WDOC_WHISPER_MODEL, so it must still be the default.
@@ -687,12 +693,12 @@ def test_a_stopped_run_picks_up_where_it_was(tmp: Path) -> None:
     scripts = [line.split("|", 1)[0] for line in steps]
     assert scripts == ["01_build_nemo_manifest.py", "02_combine_nemo_manifests.py",
                        "04_qc_acoustic_loops.py", "13_refresh_stale_durations.py",
-                       "03_sync_hotfix_results.py"], \
+                       "03_sync_hotfix_results.py", "04_drop_bad_rows.py"], \
         f"run 1 steps: {scripts}\n{out}"
     assert modes == ["stt"], f"run 1 passes: {modes}\n{out}"
-    # Four steps here: refresh + scan + one dataset + sync, numbered so the log says
-    # where the run is without counting lines.
-    assert "[step 1/4]" in out and "[step 4/4]" in out, out
+    # Five steps here: refresh + scan + one dataset + sync + drop, numbered so the log
+    # says where the run is without counting lines.
+    assert "[step 1/5]" in out and "[step 5/5]" in out, out
 
     # Run 2: the plan would converge again if it were asked, so anything it runs is
     # work the first run had already finished.
@@ -701,7 +707,7 @@ def test_a_stopped_run_picks_up_where_it_was(tmp: Path) -> None:
     assert rc == 0, f"run 2 exited {rc}\n{out2}"
     assert steps2 == [], f"run 2 redid pre/post-steps: {steps2}\n{out2}"
     assert modes == [], f"run 2 re-ran passes: {modes}\n{out2}"
-    assert out2.count("skipping") == 4, out2
+    assert out2.count("skipping") == 5, out2
     assert "finished 2" in out2, "a skip should say WHEN it was done\n" + out2
 
     # And the escape hatch.

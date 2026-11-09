@@ -187,7 +187,9 @@ default **the host's cores minus 2** (floor 2), restrict with
 `ACOUSTIC_STAGES="01_dictionnary 04_PARROT"`), run the
 alternation to convergence for every dataset, then carry stage 06's QC columns back into
 the release manifests (`99_hf_release/03_sync_hotfix_results.py --apply --stt-key
-$STT_MODEL --stt-model $STT_MODEL`). Set any of `REFRESH_MANIFESTS`, `ACOUSTIC_SCAN`,
+$STT_MODEL --stt-model $STT_MODEL`) and drop the rows that status rules out
+(`99_hf_release/04_drop_bad_rows.py --apply`; without it the bad rows stay in train and
+the next training run dies on its data-leak check). Set any of `REFRESH_MANIFESTS`, `ACOUSTIC_SCAN`,
 `SYNC_RESULTS` to 0 to skip that one, e.g. `sudo -E REFRESH_MANIFESTS=0 ./driver.sh` when
 the manifests are already current.
 
