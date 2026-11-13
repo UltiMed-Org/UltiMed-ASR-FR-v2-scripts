@@ -339,21 +339,28 @@ def lexicon_options(f):
 @click.argument("manifests", nargs=-1, required=True, type=click.Path(exists=True, path_type=Path))
 @click.option("--out", default=str(DEFAULT_OUT), show_default="08_drug_asr_rules/drug_asr_errors.json",
               type=click.Path(path_type=Path))
+@click.option("--hyps-out", type=click.Path(path_type=Path), default=None,
+              help="also write the hypotheses of the MANIFESTS' clips here (same format as HYPS): "
+                   "the hyps file 02 needs when HYPS holds more clips than the manifests, e.g. a "
+                   "whole-corpus transcription restricted to one subset's train split")
 @lexicon_options
-def main(hyps: Path, manifests: tuple[Path, ...], out: Path, lexicons: tuple[Path, ...], max_term_zipf: float) -> None:
+def main(hyps: Path, manifests: tuple[Path, ...], out: Path, hyps_out: Path | None, lexicons: tuple[Path, ...],
+         max_term_zipf: float) -> None:
     """Write the per-drug misspelling report from a hypotheses file."""
-    hyp_by_key = {}
+    hyp_by_key, rows_by_key = {}, {}
     for line in hyps.open():
         r = json.loads(line)
         hyp_by_key[clip_key(r["audio"])] = r["hyp"]
+        if hyps_out:
+            rows_by_key[clip_key(r["audio"])] = line if line.endswith("\n") else line + "\n"
     lex = load_lexicon(lexicons, max_term_zipf)
     logger.info(f"lexicon: {len(lex)} words")
-    pairs, seen_keys = [], set()
+    pairs, seen_keys = [], {}  # dict: insertion-ordered set
     for m in manifests:
         for row in read_jsonl(m):
             key = clip_key(resolve_audio(m.parent, row["audio_filepath"]))
             if key in hyp_by_key and key not in seen_keys:
-                seen_keys.add(key)
+                seen_keys[key] = None
                 pairs.append((row["text"], hyp_by_key[key]))
     report = collect(pairs, lex)
     n_err = sum(sum(v["errors"].values()) for v in report.values())
@@ -363,6 +370,9 @@ def main(hyps: Path, manifests: tuple[Path, ...], out: Path, lexicons: tuple[Pat
                 f"{sum(v['n_deleted'] for v in report.values())} dropped")
     out.write_text(json.dumps(report, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     logger.info(f"wrote {out}")
+    if hyps_out:
+        hyps_out.write_text("".join(rows_by_key[k] for k in seen_keys), encoding="utf-8")
+        logger.info(f"wrote {len(seen_keys)} hypotheses to {hyps_out}")
 
 
 if __name__ == "__main__":

@@ -33,6 +33,33 @@ def test_extract_drug_errors() -> None:
     _run_doctests("01_extract_drug_errors.py")
 
 
+def test_extract_hyps_out() -> None:
+    """``01 --hyps-out`` keeps only the hypotheses of the manifests' clips, in manifest
+    order: how the v2 build restricts the whole-corpus transcription to one subset's
+    splits before 02 reads it."""
+    import json
+    import tempfile
+
+    from click.testing import CliRunner
+
+    spec = importlib.util.spec_from_file_location("extract", STAGE / "01_extract_drug_errors.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    with tempfile.TemporaryDirectory() as d:
+        d = Path(d)
+        hyps = [{"audio": str(d / "drugs" / f"{n}.flac"), "hyp": f"hyp {n}"} for n in ("a", "b", "c")]
+        (d / "hyps.jsonl").write_text("".join(json.dumps(h) + "\n" for h in hyps))
+        (d / "drugs").mkdir()
+        rows = [{"audio_filepath": f"{n}.flac", "text": f"label {n}"} for n in ("c", "a", "z")]
+        (d / "drugs" / "train.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+        res = CliRunner().invoke(mod.main, [str(d / "hyps.jsonl"), str(d / "drugs" / "train.jsonl"),
+                                            "--out", str(d / "err.json"), "--hyps-out", str(d / "sub.jsonl")])
+        assert res.exit_code == 0, res.output
+        got = [json.loads(line)["hyp"] for line in (d / "sub.jsonl").open()]
+        assert got == ["hyp c", "hyp a"], got
+    print("01 --hyps-out: OK")
+
+
 def test_build_fix_rules() -> None:
     _run_doctests("02_build_fix_rules.py")
 
@@ -55,6 +82,7 @@ def test_build_convention_fixes() -> None:
 
 if __name__ == "__main__":
     test_extract_drug_errors()
+    test_extract_hyps_out()
     test_build_fix_rules()
     test_merge_rules()
     test_drop_unk_variants()
