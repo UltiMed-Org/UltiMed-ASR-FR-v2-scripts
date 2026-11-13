@@ -36,6 +36,65 @@ This writes `08_drug_asr_rules/drug_fix_rules.jsonl` (one rule per line, apply t
 
 Apply the rules with `fix = compile_rules(rules)` then `fix(text)` from `02_build_fix_rules.py` (`load_rules(path)` reads the JSONL). `compile_rules` indexes each rule by its anchor, the longest accent-folded word of its variant, so a text only runs the few rules whose anchor it contains: same output as `apply_rules(text, rules)` (every rule in order, the reference implementation) but about 150x faster (0.11 ms against 16.9 ms per text, measured with 1.6k rules). You can also copy the patterns into any regex engine that supports lookbehind. Each pattern is case-insensitive: compile it with the `i` flag, plus `u` in JavaScript (`new RegExp(pattern, 'giu')`), and when the matched text starts with a capital and the replacement does not, capitalise the replacement (`Myrtazapine` -> `Mirtazapine`). The word bounds spell out their letter class instead of using `\w`, so the patterns behave the same in Python and JavaScript. `scripts/bench/regex-rescore.mjs` in the [parakeet-tdt-0.6b-v3-ultra-onnx](https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-ultra-onnx) repo is a JavaScript port, anchor index included (0 mismatches against Python on 41,743 transcripts).
 
+## v2 rules (`v2/`, 2026-11-13, one list per subset)
+
+Rebuilt with Claude Code for the v2 release, from the v2 model alone (mix7, fp32 ONNX) transcribing all 602,776 clips of the v2 corpus, and split by subset: `v2/drugs_fix_rules.jsonl`, `v2/dictionary_fix_rules.jsonl`, `v2/parhaf_fix_rules.jsonl`, `v2/parrot_fix_rules.jsonl`, `v2/acronyms_fix_rules.jsonl`, each with its `*.rejected.jsonl` (plus `v2/drugs_asr_errors.json`). Same JSONL format as the v1 files, so they are drop-in. The v1 files above are unchanged. `manual_fix_rules.jsonl` is dataset-agnostic and is not rebuilt: apply it first, as before.
+
+Every replacement comes from the v2 labels (02 copies the label text a rule was learned from), so the v1 caveat about old spellings no longer applies. Note the v2 labels themselves carry both spellings of some drugs (`bevacizumab` 363 vs `bévacizumab` 151, `perindopril` 1,055 vs `périndopril` 1,672 in `full.jsonl`), so the accent a rule writes depends on the clip it was learned from.
+
+`07_build_dataset_rules.sh <hyps.jsonl> <out dir> <subset> <split>...` runs the whole chain on one subset: 01 `--hyps-out` keeps the hyps of that subset's clips, 02 (real-text labels = the release-wide manifests of the same splits, the 1M French Wikipedia sentences, `--names`), 03 merge when `MERGE_TEXTS` is set, 04 (`<unk>` cleanup, plus `--guard` when `NEWS_GUARD` is set). The drug list uses no lexicon; the four term lists use `LEXICON=01_dictionnary/original_dictionnary.jsonl` and `NEWS_GUARD` = Leipzig `fr-news-2024-1M.txt`, as v1's `term_fix_rules.jsonl`. The merge (release build only) is checked on the full v2 hyps, `full.jsonl`, French and English Wikipedia and the held-out 2023 news.
+
+```bash
+D=99_hf_release/data/NeMO_files GUARDS=.../fr-wikipedia-1M.txt NAMES=.../fr-names.txt \
+  MERGE_TEXTS="full.mix7-onnx-fp32.hyp.jsonl $D/full.jsonl .../fr-wikipedia-1M.txt .../en-wikipedia-1M.txt .../fr-news-2023-100K.txt" \
+  08_drug_asr_rules/07_build_dataset_rules.sh full.mix7-onnx-fp32.hyp.jsonl out/A/drugs drugs train val test
+```
+
+Two builds per subset, as in v1:
+
+- **A, release (committed)**: all splits. Its test numbers show coverage, not generalization: the test clips were in the build.
+- **B, held-out (not committed)**: train + val only, with the real-text labels limited to train + val too, and no merge. Its test numbers estimate how the rules do on unseen clips. PARROT is test-only in v2, so it has no B build and no held-out number. For drugs a train-only build (T) was also made.
+
+Build counts (02 then 03 merge then 04; candidate errors = misspelled occurrences found by 01):
+
+| subset | clips | misspelled | 02 rules (errors covered) | merged | final | rejected |
+|---|---|---|---|---|---|---|
+| drugs A | 21,900 | 9,782 | 4,854 (8,604) | 2,388 | 2,388 | 622: real_text 240, short 117, far 105, common_words 86, imprecise 42, other_term 21, ambiguous 10, trailing_a 1 |
+| drugs B | 19,841 | 8,852 | 4,534 (7,791) | | 4,534 | 571 |
+| drugs T | 17,822 | 7,944 | 4,236 (6,995) | | 4,236 | 519 |
+| dictionary A | 534,349 | 180,728 | 43,032 (107,931) | 18,241 | 18,137 | 14,526: real_text 5,497, other_term 2,298, common_words 1,897, imprecise 1,649, short 1,600, far 1,012, ambiguous 436, contains_target 130, trailing_a 5, french_word 2 |
+| dictionary B | 484,458 | 163,873 | 40,442 (97,939) | | 40,244 | 13,762 |
+| PARHAF A | 43,384 | 16,518 | 3,979 (9,006) | 2,110 | 2,103 | 2,132: real_text 896, other_term 643, short 199, common_words 135, far 111, imprecise 106, ambiguous 28, contains_target 11, trailing_a 2, french_word 1 |
+| PARHAF B | 37,895 | 14,419 | 3,589 (7,805) | | 3,572 | 1,958 |
+| PARROT A | 1,548 | 682 | 154 (221) | 121 | 121 | 221: real_text 98, other_term 97, common_words 9, short 8, far 7, imprecise 2 |
+| acronyms A | 1,595 | 87 | 43 (43) | 43 | 43 | 40: other_term 19, real_text 14, common_words 4, short 2, imprecise 1 |
+| acronyms B | 1,444 | 77 | 38 (38) | | 38 | 35 |
+
+For comparison v1 (five models, all splits, so not like for like): `drug_fix_rules.jsonl` 3,963 rules, 2,732 rejected; `term_fix_rules.jsonl` (dictionary + PARHAF + PARROT in one list) 35,876 rules, 25,466 rejected.
+
+Check with the ultra repo's `evalrules.py` (unchanged): the v2 model's hyps on each subset's test split, WER without rules then with each rule set (clips better / worse), and the lines each set rewrites among the 602,776 correct v2 labels, 100k held-out French news (2023), 1M English Wikipedia sentences and the 1,662 VoxPopuli fr references. v1 = the committed `drug_fix_rules.jsonl` for drugs, `term_fix_rules.jsonl` for the others.
+
+| test split | no rules | v1 | A (coverage) | B (held-out) | T (train only) |
+|---|---|---|---|---|---|
+| drugs (2,059 clips) | 3.14 % | 2.40 % (428 / 1) | 1.77 % (767 / 0) | 2.37 % (455 / 0) | 2.38 % (444 / 0) |
+| dictionary (49,891) | 2.39 % | 2.11 % (5,653 / 693) | 1.89 % (8,693 / 3) | 2.04 % (6,418 / 18) | |
+| PARHAF (5,489) | 2.76 % | 2.60 % (545 / 6) | 2.47 % (894 / 0) | 2.58 % (600 / 1) | |
+| PARROT (1,548) | 3.68 % | 3.56 % (86 / 10) | 3.37 % (190 / 0) | none (test-only) | |
+| acronyms (151) | 2.90 % | 2.75 % (4 / 0) | 2.72 % (5 / 0) | 2.90 % (0 / 0) | |
+
+| rewritten lines | v2 labels | fr news 2023 | en Wikipedia | VoxPopuli fr |
+|---|---|---|---|---|
+| v1 drug rules | 28 | 2 | 1,097 | 0 |
+| drugs A / B / T | 0 / 1 / 4 | 1 / 1 / 1 | 195 / 130 / 127 | 0 / 0 / 0 |
+| v1 term rules | 9,496 | 24 | 9,413 | 1 |
+| dictionary A / B | 0 / 33 | 10 / 10 | 3,359 / 3,361 | 0 / 0 |
+| PARHAF A / B | 0 / 4 | 2 / 2 | 116 / 108 | 0 / 0 |
+| acronyms A / B | 0 / 0 | 0 / 0 | 1 / 1 | 0 / 0 |
+
+The v1 term rules rewrite 9,496 correct v2 labels: they carry v1 spellings onto v2 text (`acétoacétate` -> `acéto-acétate`), which is why they had to be rebuilt. English Wikipedia is still rewritten by the drug rules (`tomato` -> `stomato`, `insulator` -> `Insulatard`, `invents` -> `Invanz`): the rules are for French. Held-out fixes look like `Vinclixto` -> `Venclyxto`, `Pegasis` -> `Pegasys`, `céfadroxyl` -> `céfadroxil`, `Rifina` -> `Rifinah`.
+
+Real speech: no v2 transcripts of FLEURS or Common Voice exist yet (that needs the GPU), so the drug rules were only run on the v1 models' hyps (UltiMed and ultra-w4a8, `local/realspeech-ignore_backups/`). v1, A and B change 0 of 1,665 FLEURS-fr clips and 0 of 5,000 unseen CV-fr clips. On the author's 211 own-voice clips they only improve (UltiMed 10.07 % -> v1 9.06 %, A 9.31 %, B 9.34 %, 0 worse); v1 does better there because it was learned from those same v1 models' errors. TODO: rerun this check on v2 hyps of FLEURS-fr / CV-fr / own-voice once the GPU is free.
+
 ## Committed rules (2026-10-01, all splits)
 
 The committed `drug_fix_rules.jsonl` (14,377 rules) is learned from ALL splits of the drugs subset (train, val AND test) and from four models: `drug_asr_errors.json` is the released UltiMed model (run 1.7.0, steps 13255 and 14255 averaged), `drug_asr_errors.ultra.json` the base parakeet-ultra (fp32 ONNX), `drug_asr_errors.ultra-int8.json` / `drug_asr_errors.ultra-w4a8.json` its int8 and w4a8 ONNX builds (transcribed on CUDA with onnx-asr; the w4a8 encoder runs with the int8 decoder).
