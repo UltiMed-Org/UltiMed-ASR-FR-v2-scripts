@@ -347,7 +347,7 @@ def _voice_sections(cells: dict, groups: dict, voices: list[str],
     approximate" is the only thing a reader needs to decide whether a model trained on
     this will favour a speaker. The overall table answers it for the corpus, the
     per-dataset one is where imbalance actually lives (a dataset with a few hundred
-    groups cannot spread evenly over nine voices, while the big ones are within a few
+    groups cannot spread evenly over five voices, while the big ones are within a few
     percent), and the per-split one catches the case that would quietly bias
     evaluation: a voice over-represented in val/test.
     """
@@ -379,7 +379,7 @@ def _voice_sections(cells: dict, groups: dict, voices: list[str],
     out.append("")
     out.append("`Groups` counts the distinct `group_id`s the dataset was hashed on, "
                "which is the number the assignment actually divides: a dataset with a "
-               "few hundred groups cannot land evenly on nine voices, so a wide spread "
+               "few hundred groups cannot land evenly on five voices, so a wide spread "
                "there is arithmetic, not a bug, while a wide spread on a dataset with "
                "tens of thousands of groups would mean the hash is not uniform. "
                "`Clips per voice` inherits that plus the variation in group size.")

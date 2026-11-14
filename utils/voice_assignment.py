@@ -1,11 +1,12 @@
-"""Which of the nine French voices reads a given row, decided once and re-derivable.
+"""Which of the five French voices reads a given row, decided once and re-derivable.
 
 v1 is single-voice (`fr_female` throughout), which makes a speaker-independent ASR
-model learn one speaker's articulation. v2 spreads the same corpus over nine voices,
-and two stages need to agree on which voice read which clip: `05_generate_audio`
-sends it at synthesis time, and `99_hf_release` records it in the manifest and the
-Parquet long after the audio was written. This module is the single place that
-decides, so neither side can drift from the other (the repo rule: anything used by
+model learn one speaker's articulation. v2 spreads the same corpus over five voices
+(a nine-name roster with four retired, see `RETIRED_VOICES_FR_V2`), and two stages
+need to agree on which voice read which clip: `05_generate_audio` sends it at
+synthesis time, and `99_hf_release` records it in the manifest and the Parquet long
+after the audio was written. This module is the single place that decides, so neither
+side can drift from the other (the repo rule: anything used by
 more than one stage lives in `utils/`).
 
 **The assignment is a hash of the row's group key, not a counter.** That is the whole
@@ -41,15 +42,16 @@ import hashlib
 import json
 from pathlib import Path
 
-# The nine French voices cleared for v2, in roster order. Chosen by ear over two
-# audition rounds, the second on medical text: FLEURS-clean prose did not predict
-# behaviour on drug names and dosages and disagreed about 6 of 16 candidates. They are
-# nine DISTINCT acoustic identities (four female, five male), not nine variants of
-# three. That audition cleared TEN, five female and five male; `h_frm_chf` (heard as
-# cheerful_female) was dropped on 2026-10-15 after the QC sample measured it derailing
-# far more than the rest, which is why the roster is 4F/5M rather than even. See
-# RETIRED_VOICES_FR_V2 below for those numbers and for why it was dropped outright
-# instead of retired.
+# The nine French voices cleared for v2, in roster order. Only five ship: the four in
+# RETIRED_VOICES_FR_V2 stay listed because the hash draws over this tuple's length.
+# Chosen by ear over two audition rounds, the second on medical text: FLEURS-clean
+# prose did not predict behaviour on drug names and dosages and disagreed about 6 of
+# 16 candidates. They are nine DISTINCT acoustic identities (four female, five male),
+# not nine variants of three. That audition cleared TEN, five female and five male;
+# `h_frm_chf` (heard as cheerful_female) was dropped on 2026-10-15 after the QC sample
+# measured it derailing far more than the rest, which is why the roster is 4F/5M
+# rather than even (the five that ship are 3F/2M). See RETIRED_VOICES_FR_V2 below for
+# those numbers and for why it was dropped outright instead of retired.
 # Deliberate copy, like VOXTRAL_VOICES in 05_generate_audio/01_generate_audio.py: the
 # roster is decided in the CrispASR harness repo (voxtral/cloning/voices_fr_production.txt,
 # plan stages A9 and A10 there) and this repo must stay self-contained, so if that
@@ -73,15 +75,15 @@ VOICES_FR_V2 = (
 #: hybrids**, which need more guidance to hold their articulation.
 #:
 #: This matters because the repair pass walks the guidance DOWN from 2.0 looking for a
-#: draw that scores better, and seven of the nine v2 voices are hybrids. A single global
-#: floor is wrong either way: 1.2 lets a hybrid clip be "repaired" by a draw two rungs
-#: below its own floor (a better CER from audio the audition rejected), while 1.5 throws
-#: away two usable rungs for the `fr_*` voices.
+#: draw that scores better, and three of the five shipped v2 voices are hybrids. A
+#: single global floor is wrong either way: 1.2 lets a hybrid clip be "repaired" by
+#: a draw two rungs below its own floor (a better CER from audio the audition
+#: rejected), while 1.5 throws away two usable rungs for the `fr_*` voices.
 FLOOR_HYBRID, FLOOR_BASE = 1.5, 1.2
 
 
 def is_hybrid(voice: str | None) -> bool:
-    """True for the seven hybrid voices, which are named for it (`h_<source><target>`).
+    """True for the hybrid voices, which are named for it (`h_<source><target>`).
 
     >>> is_hybrid("h_frf_itm"), is_hybrid("fr_male"), is_hybrid(None)
     (True, False, False)

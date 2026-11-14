@@ -13,7 +13,7 @@
 """
 Build the FULL corpus as sharded Parquet with embedded FLAC, one subset per source.
 
-This is the primary HF distribution format. The whole 564k-clip corpus ships as
+This is the primary HF distribution format. The whole ~603k-clip corpus ships as
 Parquet: each row is the original FLAC bytes (embedded via the `datasets` Audio
 feature, no re-encode) plus its transcript and provenance. So the HF Data Viewer
 and `load_dataset(...)` work on the ENTIRE dataset, not a sample, and there is no
@@ -21,7 +21,7 @@ separate manifest to pair (the text lives in the same row as the audio). A small
 companion script (scripts/parquet_to_nemo.py) turns these Parquets back into the
 loose-flac / tarred layout NeMo trains on. Written with Claude Code.
 
-Provenance includes a flat `voice` column (v2): which of the ten French voices read
+Provenance includes a flat `voice` column (v2): which of the five French voices read
 the clip, so the Data Viewer can filter on it and a model finetuned on this corpus
 can be scored per voice. It is an empty string on v1-era manifests, which were
 single-voice and carry no such field.
@@ -178,7 +178,7 @@ def write_shard(out: Path, manifest: Path, chunk: list[dict]) -> None:
 
     audio, text, source, duration, category = [], [], [], [], []
     group_id, group_mode, item_index, filename = [], [], [], []
-    # Which of the ten v2 voices read the clip (01_build_nemo_manifest re-derives it
+    # Which of the five v2 voices read the clip (01_build_nemo_manifest re-derives it
     # from the roster recorded beside the audio). Always a column, even for v1-era
     # single-voice manifests that carry no `voice` field: Parquet columns cannot be
     # per-row optional, and an empty string reads as "not recorded" rather than
