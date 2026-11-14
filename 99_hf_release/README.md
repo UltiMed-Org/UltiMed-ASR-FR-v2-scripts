@@ -10,7 +10,7 @@ language:
   - fr
 task_categories:
   - automatic-speech-recognition
-pretty_name: "UltiMed-ASR-FR-v1"
+pretty_name: "UltiMed-ASR-FR-v2"
 size_categories:
   - 100K<n<1M
 source_datasets:
@@ -88,7 +88,7 @@ configs:
         path: parrot/test-*.parquet
 ---
 
-# UltiMed-ASR-FR-v1
+# UltiMed-ASR-FR-v2
 
 > [!IMPORTANT]
 > **Want faster improvements?** This project is entirely self-funded on my minimum-wage salary, and every training run competes for a single consumer GPU. If you or your organisation can donate an **RTX 5090**, or the money to buy one second-hand, it would directly speed up the next versions of the dataset and the fine-tuned models. Reach out via [olicorne.org](https://olicorne.org) or open a discussion on this page.
@@ -98,7 +98,7 @@ configs:
 
 > [!NOTE]
 > **The UltiMed effort has three parts:**
-> - the **dataset** (this repository): [Olicorne/UltiMed-ASR-FR-v1](https://huggingface.co/datasets/Olicorne/UltiMed-ASR-FR-v1): 3,300+ hours of French medical dictation, to train or evaluate ASR models;
+> - the **dataset** (this repository): [Olicorne/UltiMed-ASR-FR-v2](https://huggingface.co/datasets/Olicorne/UltiMed-ASR-FR-v2): 3,300+ hours of French medical dictation, to train or evaluate ASR models;
 > - the **finetuned model**: [Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-onnx](https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-onnx): parakeet-ultra finetuned on that dataset;
 > - the **regex fixes**: [regex-fixes/](https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-onnx/tree/main/regex-fixes) in the finetune's repository: drug-name and medical-term fix rules that should catch many of the remaining errors at almost no cost (text substitution after decoding), and also help models that were not finetuned.
 
@@ -132,7 +132,7 @@ configs:
   - [Main corpus: CC BY 4.0](#main-corpus-cc-by-40)
   - [PARROT subset: CC BY-NC-SA 4.0](#parrot-subset-cc-by-nc-sa-40)
 - [Citations](#citations)
-  - [UltiMed-ASR-FR-v1](#ultimed-asr-fr-v1)
+  - [UltiMed-ASR-FR-v2](#ultimed-asr-fr-v2)
   - [PARHAF (source, please cite)](#parhaf-source-please-cite)
   - [PARROT (source, please cite)](#parrot-source-please-cite)
 - [Acknowledgements](#acknowledgements)
@@ -140,7 +140,7 @@ configs:
 
 ## Changelog
 
-- **v2** (TODO: release date): **all the audio is new**, read by **five French voices** instead of one (two shipped Voxtral voices plus three accented hybrids, 3 female and 2 male, see [the five voices](#the-five-voices-and-what-synthetic-audio-still-costs)). New `voice` column saying which of the five read each clip. The splits follow v1.3's group by group, but **the labels moved on too**, so WER on v2 `test` is **not** directly comparable with v1.3 numbers: on top of v1.3, numbers said as words are written in digits (`deux mille vingt-quatre` -> `2024`, `18 000` glued to `18000`, Roman numerals to digits outside staging words), HGVS variants read `c.1163C vers T` instead of `c.1163C>T` (`>` is not in the Parakeet vocabulary; 446 labels), drug INNs follow one accent convention, compounds are glued (`postopératoire`), generic lab boilerplate was stripped and redrawn, and PARHAF/PARROT surnames and ages were diversified. The authoritative list of every label convention is the docstring of [`utils/label_conventions.py`](https://github.com/thiswillbeyourgithub/UltiMed-ASR-FR-v1-scripts/blob/main/utils/label_conventions.py) in the scripts repo. Synthesis moved to `cfg_alpha` **2.0** (measured band 1.2 to 2.0, see [Audio synthesis](#audio-synthesis-tts)) partway through the run, so the first-pass clips drawn earlier sit at 1.3. Every quality-control column was recomputed on the v2 audio, and two more ASR judges were added (see [Row format](#row-format-and-the-two-text-fields)). The quality pass replaced **16,593** clips (16,458 in the main corpus, 135 in PARROT), and 512 clips that no redraw could fix were dropped (295 flagged by ASR, 163 exhausted, 54 drawn with guidance off). 72 clips v1 had dropped for bad **audio** (their text was fine) are back. Main corpus now **601,228 clips / 3,347.6 h / 266.02 GB** (train 485,946, val 57,692, test 57,590), PARROT **1,548 clips / 11.1 h / 900.1 MB**. v1's single-voice audio is **not** kept anywhere: this release replaces it under the same repo id.
+- **v2** (TODO: release date): **all the audio is new**, read by **five French voices** instead of one (two shipped Voxtral voices plus three accented hybrids, 3 female and 2 male, see [the five voices](#the-five-voices-and-what-synthetic-audio-still-costs)). New `voice` column saying which of the five read each clip. The splits follow v1.3's group by group, but **the labels moved on too**, so WER on v2 `test` is **not** directly comparable with v1.3 numbers: on top of v1.3, numbers said as words are written in digits (`deux mille vingt-quatre` -> `2024`, `18 000` glued to `18000`, Roman numerals to digits outside staging words), HGVS variants read `c.1163C vers T` instead of `c.1163C>T` (`>` is not in the Parakeet vocabulary; 446 labels), drug INNs follow one accent convention, compounds are glued (`postopératoire`), generic lab boilerplate was stripped and redrawn, and PARHAF/PARROT surnames and ages were diversified. The authoritative list of every label convention is the docstring of [`utils/label_conventions.py`](https://github.com/thiswillbeyourgithub/UltiMed-ASR-FR-v1-scripts/blob/main/utils/label_conventions.py) in the scripts repo. Synthesis moved to `cfg_alpha` **2.0** (measured band 1.2 to 2.0, see [Audio synthesis](#audio-synthesis-tts)) partway through the run, so the first-pass clips drawn earlier sit at 1.3. Every quality-control column was recomputed on the v2 audio, and two more ASR judges were added (see [Row format](#row-format-and-the-two-text-fields)). The quality pass replaced **16,593** clips (16,458 in the main corpus, 135 in PARROT), and 512 clips that no redraw could fix were dropped (295 flagged by ASR, 163 exhausted, 54 drawn with guidance off). 72 clips v1 had dropped for bad **audio** (their text was fine) are back. Main corpus now **601,228 clips / 3,347.6 h / 266.02 GB** (train 485,946, val 57,692, test 57,590), PARROT **1,548 clips / 11.1 h / 900.1 MB**. v1's single-voice audio is **not** part of this release, which is published as `Olicorne/UltiMed-ASR-FR-v2` (TODO: say whether `Olicorne/UltiMed-ASR-FR-v1` is renamed to this id or stays up as the v1 repo).
 - **v1.3** (2026-09-28): more label conventions, no new audio, 64 clips dropped (63,219 then 48,041 clip labels changed). A spelled number before a unit of measure or a duration is now written in digits, as the corpus majority already did (62k `milligrammes` after digits vs 1.9k after words): `quatre milligrammes` -> `4 milligrammes`, `zéro virgule vingt-cinq milligramme` -> `0,25 milligramme`, `deux cent cinquante millilitres` -> `250 millilitres`, `cinq jours sur sept` -> `5 jours sur 7`. Most counts stay spelled (`deux comprimés`), and so does a lone `un` / `une` (`une heure`, `une fois par jour`). `petit déjeuner` is hyphenated (`petit-déjeuner`, 213 vs 35). Words spelled two ways that sound the same now have one spelling, found by transcribing val/test with a fine-tuned Parakeet and ranking the diffs: the `œ` ligature is written `oe` everywhere (`coeur`, `oedème`, `oeil`, `oesophage`; `oeil` was already the majority, 10.7k vs 1.5k), `aiguë` (28.4k) over `aigüe` (1.4k), `compte rendu` (81k) over `compte-rendu` (2k), `bétabloquant` over `bêtabloquant` / `bêta-bloquant`. Suture gauges read `Vicryl 3-0` (was also `Vicryl trois zéro` and `Vicryl 3 zéro`), in the label only: the TTS source keeps the words the voice said. A decimal half in digits becomes a decimal (`3 virgule 5 mégahertz` -> `3,5 mégahertz`), and `grays`, `hertz` and `teslas` join the units written after digits. A second pass (48,041 clip labels changed), from a Parakeet sweep of val/test/PARROT and half of train, ranking the diffs where Parakeet and the stage-06 Whisper transcript agree against the label: `fois` and `séances` counts, the head of a range and a score out of 10 are written in digits (`deux fois par jour` -> `2 fois par jour`, 31.7k labels spelled it and 8.9k did not; `deux à trois jours` -> `2 à 3 jours`; `deux sur dix` -> `2 sur 10`); a staging number is written in digits after `stade`, `grade`, `type`, `classe`, `palier`, `niveau` and `NYHA` (`stade IIIb` -> `stade 3b`, `palier deux` -> `palier 2`; the corpus mixed Roman numerals, digits and words), while Roman numerals elsewhere stay (`angiotensine II`); `anévrisme` (2.7k) over `anévrysme` (1.0k), `urètre` / `urétral` over `urèthre` / `uréthral`; a split prefix is glued (`extra hépatiques` -> `extra-hépatiques`, `multi lithiasique` -> `multilithiasique`); and a sentence-initial `A` before an infinitive gets its accent (`A surveiller` -> `À surveiller`, 8.9k labels already wrote `À`). The pipeline also learnt to repair cp1252 mojibake (a C1 control character such as U+009C standing for `œ`), found in a hand-made evaluation set but in no UltiMed clip. Dropped 63 clips whose audio does not say their label, found by that Parakeet sweep (it covered val, test, PARROT and a third of train) and invisible to the stage-06 Whisper QC: 49 where the voice babbles a few invented words BEFORE the sentence (`John Ritteny Dudd, transmission IDE...`), which Whisper silently skips, and 14 where it skipped a phrase (mostly inside long lab-value lists), confirmed by the Whisper transcript missing it too; the list ships in the GitHub repo history as `99_hf_release/asr_flagged_clips.jsonl` (the file now holds v2's own, shorter list). One more test clip was dropped because its relabelled text became identical to a training text. Main corpus now 601,264 clips / 3,104.4 h / 254.61 GB (train 485,962, val 57,700, test 57,602). val/test labels changed, so WER on v1.3 is not directly comparable to v1.2 numbers.
 - **v1.2** (2026-09-27): label conventions, no new audio. Every `text` label and its `asr_training_source` now follow one written form per spoken thing, chosen as the corpus majority, applied to both so audio and label still say the same words (18,777 clips changed). Drug names get one spelling each: the ALLCAPS copies of the drug database are recased (`DOLIPRANE` -> `Doliprane`, `PARACETAMOL` -> `paracétamol`, `UVEDOSE` -> `Uvedose`) and accent variants harmonized (`Primperan` -> `Primpéran`); substances take the ANSM accents, brands the spelling the corpus uses most (a brand never written other than ALLCAPS gets Title case with no accent, since nothing tells its accents), and acronyms stay ALLCAPS (`LP`, `AINS`). Titles before a name are written out (`M.` -> `Monsieur`, `Mme` -> `Madame`, `Mlle` -> `Mademoiselle`, `Dr` / `Pr` -> `docteur` / `professeur`, capitalized at a sentence start), with `Monsieur` / `Madame` capitalized before a name and left lowercase otherwise (`le monsieur du lit 4`). Dates use digits (`le quinze mars deux mille vingt` -> `le 15 mars 2020`, `premier janvier` -> `1er janvier`), and clock times read `14 heures 30` (v1.1 mixed `14h30`, `14 h 30` and the spoken form). Dropped the 2 clips whose label held an ellipsis (truncated or anonymized text). Main corpus now 601,328 clips / 3,105.0 h / 254.65 GB. The per-source `<source>/{train,val,test}` NeMo manifests now match the release-wide split (the Parquet always used the release-wide one). val/test labels changed, so WER on v1.2 is not directly comparable to v1.1 numbers.
 - **v1.1** (2026-09-25): data fixes, no new audio. Dropped the 6 `qc_status: exhausted` clips (they failed QC and no redraw fixed them, so their audio does not match their label; v1.0 shipped them by mistake) and 2 PARHAF val/test clips whose sentence also appears in a training clip. Main corpus is now 601,330 clips / 3,105.0 h / 254.65 GB. Normalized the `text` labels: every percentage is written `%` (v1.0 mixed `pour cent`, `pourcent` and `%`; a "per hundred X" such as `pour cent millilitres` is kept), whitespace runs including 6 raw newlines collapse to one space, and the 4 characters the Parakeet tokenizer cannot represent as written are replaced by their NFKC form (`CO₂` -> `CO2`) or dropped (`™`). `asr_training_source` uses the one-word `pourcent` everywhere (those clips were read from `pour cent` or `%`, spoken identically). The pipeline's generators now write `%` in the label directly, so a rebuild reproduces this. The val/test labels changed with it, so WER on v1.1 is not directly comparable with v1.0 numbers.
@@ -181,7 +181,7 @@ A finetuned release of [nvidia/parakeet-tdt-0.6b-v3](https://huggingface.co/nvid
 
 Made entirely by **Olivier Cornelis** ([olicorne.org](https://olicorne.org), Hugging Face [@Olicorne](https://huggingface.co/Olicorne)), French resident psychiatrist and developer. Fully self-funded, no conflicts of interest to declare.
 
-- Version: **v2** (v1.3's splits, further label normalization, every clip re-synthesized with five French voices). It is published **over** v1 under this repo id, so the single-voice v1 audio is no longer downloadable here; the repo id still says `v1` for the moment, the [Changelog](#changelog) is what tells you which audio you are getting.
+- Version: **v2** (v1.3's splits, further label normalization, every clip re-synthesized with five French voices). The single-voice v1 audio is not part of it; the [Changelog](#changelog) lists what changed since v1.3.
 - Fine-tuned model: [Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-onnx](https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-onnx) (a [nvidia/parakeet-tdt-0.6b-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) fine-tune, released separately, trained with NeMo)
 - Multilingual baseline it was fine-tuned from: [Olicorne/parakeet-tdt-0.6b-v3-optimized-onnx](https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-optimized-onnx) (the upstream ONNX rebuilt for int8 accuracy and browser speed; use it when you do not need French medical vocabulary)
 - In-browser app that runs either model: [Parakeet Web](https://github.com/thiswillbeyourgithub/parakeet_web)
@@ -198,7 +198,7 @@ If you just want the data and an opinion on whether it fits, this is the whole t
 from datasets import load_dataset
 
 # main corpus (dictionary + drugs + PARHAF + acronyms), CC BY 4.0
-ds = load_dataset("Olicorne/UltiMed-ASR-FR-v1", "dictionary_CC_BY_4.0", split="train")
+ds = load_dataset("Olicorne/UltiMed-ASR-FR-v2", "dictionary_CC_BY_4.0", split="train")
 row = ds[0]
 row["audio"]  # 24 kHz mono waveform, decoded from the embedded FLAC
 row["text"]   # the transcript, and the field you train an ASR model on
@@ -373,7 +373,7 @@ v1 (~3,115 hours of single-voice audio) was generated on **a single NVIDIA RTX 3
 The whole corpus ships as **sharded Parquet with the original FLAC bytes embedded** (one subset per source), so the HF Data Viewer and `load_dataset(...)` work on the **entire** dataset with no manifest to pair, and it is a few hundred Parquet files instead of ~603k loose FLACs (which would throttle any transfer to a crawl):
 
 ```
-UltiMed-ASR-FR-v1/
+UltiMed-ASR-FR-v2/
   README.md
   NOTICE.md                                                                       # per-source attributions the licences require
   dictionary/  train-00000-of-00174.parquet .. val-*.parquet .. test-*.parquet   # config "dictionary_CC_BY_4.0"
@@ -452,7 +452,7 @@ Only `grade I` became `grade un`; `16 milligrammes` and `4 semaines` stayed as w
 
 ```python
 from datasets import load_dataset
-ds = load_dataset("Olicorne/UltiMed-ASR-FR-v1", "dictionary_CC_BY_4.0", split="train")
+ds = load_dataset("Olicorne/UltiMed-ASR-FR-v2", "dictionary_CC_BY_4.0", split="train")
 ds[0]["audio"]  # {'array': ..., 'sampling_rate': 24000}, decoded from the embedded FLAC
 ds[0]["text"]   # the transcript label
 ```
@@ -533,7 +533,7 @@ def normalize(s: str) -> str:
     s = re.sub(r"[^\w\s]", " ", s)                        # strip punctuation
     return re.sub(r"\s+", " ", s).strip()                 # collapse whitespace
 
-ds = load_dataset("Olicorne/UltiMed-ASR-FR-v1", "dictionary_CC_BY_4.0", split="test")
+ds = load_dataset("Olicorne/UltiMed-ASR-FR-v2", "dictionary_CC_BY_4.0", split="test")
 refs = [normalize(r["text"]) for r in ds]
 hyps = [normalize(transcribe(r["audio"])) for r in ds]   # plug in your ASR model
 
@@ -659,15 +659,15 @@ The PARROT clips are **LLM-based rewrites** of PARROT's fictional radiology repo
 
 ## Citations
 
-### UltiMed-ASR-FR-v1
+### UltiMed-ASR-FR-v2
 
 ```bibtex
 @misc{cornelis_ultimed_asr_fr_2026,
-  title        = {UltiMed-ASR-FR-v1: a large synthetic French medical speech dataset for ASR},
+  title        = {UltiMed-ASR-FR-v2: a large synthetic French medical speech dataset for ASR},
   author       = {Cornelis, Olivier},
   year         = {2026},
   howpublished = {Hugging Face},
-  url          = {https://huggingface.co/datasets/Olicorne/UltiMed-ASR-FR-v1}
+  url          = {https://huggingface.co/datasets/Olicorne/UltiMed-ASR-FR-v2}
 }
 ```
 

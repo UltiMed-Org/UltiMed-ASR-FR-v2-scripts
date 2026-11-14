@@ -36,7 +36,7 @@ from huggingface_hub import HfApi
 
 # Same repo the release scripts target. This is the public HF handle, not a
 # machine/user path, so it is safe to hardcode (see sibling upload_to_hf.py).
-REPO_ID = "Olicorne/UltiMed-ASR-FR-v1"
+REPO_ID = "Olicorne/UltiMed-ASR-FR-v2"
 REPO_TYPE = "dataset"
 README = Path(__file__).resolve().parent.parent / "README.md"
 

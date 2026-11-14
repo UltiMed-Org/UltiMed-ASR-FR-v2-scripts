@@ -14,7 +14,7 @@ dictation-style French sentences rich in medical vocabulary, paired with audio
 synthesized from them by a local text-to-speech model. It was built by
 Olivier Cornelis.
 
-- Derived dataset page: <https://huggingface.co/datasets/Olicorne/UltiMed-ASR-FR-v1>
+- Derived dataset page: <https://huggingface.co/datasets/Olicorne/UltiMed-ASR-FR-v2>
 - Derived dataset license: CC BY 4.0 for the main corpus (dictionary, drugs,
   PARHAF, acronyms subsets); the separate test-only PARROT subset is
   CC BY-NC-SA 4.0 (see its block below).

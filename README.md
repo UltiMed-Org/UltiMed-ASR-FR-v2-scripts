@@ -99,7 +99,7 @@ Top-level numbered folders are ordered pipeline stages. Files numbered inside a 
 
 ### `99_hf_release/` is the dataset repo
 
-Everything on [Olicorne/UltiMed-ASR-FR-v1](https://huggingface.co/datasets/Olicorne/UltiMed-ASR-FR-v1) that is not audio is written and kept here, then pushed by `scripts/upload_to_hf.py`. The dataset card is edited in this repository, not in the Hub's web editor.
+Everything on [Olicorne/UltiMed-ASR-FR-v2](https://huggingface.co/datasets/Olicorne/UltiMed-ASR-FR-v2) that is not audio is written and kept here, then pushed by `scripts/upload_to_hf.py`. The dataset card is edited in this repository, not in the Hub's web editor.
 
 | Local file | Where it lands on the Hub |
 |---|---|
