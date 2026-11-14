@@ -107,7 +107,9 @@ from loguru import logger
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE.parent / "utils"))
 from hotfix_states import STATE_AUDIO_BASES  # noqa: E402
-from nemo_manifest import MANIFEST_GLOBS, read_jsonl, resolve_audio, write_jsonl  # noqa: E402
+from nemo_manifest import (  # noqa: E402
+    JUDGE_COLUMNS, JUDGE_FIELDS, JUDGES, MANIFEST_GLOBS, read_jsonl, resolve_audio, write_jsonl,
+)
 
 # The STT side of the corpus, named as it actually is rather than as the OpenAI-compatible
 # alias the client sends (`whisper-1`). Confirmed against the serving endpoint itself,
@@ -128,28 +130,6 @@ STT_KEY = "whisper-1"
 # hotfix_states.STATE_AUDIO_BASES), spelled relative to this directory.
 HOTFIX_SOURCES = tuple((f"../06_hotfixes/{state}", base)
                        for state, base in STATE_AUDIO_BASES.items())
-
-# Every judge whose reading reaches a released row, and the column prefix it gets.
-# Adding a judge is one line here plus its sweep; nothing else in this file knows a
-# model name. The keys are `transcriptions` keys, which `12_merge_judge_sidecars.py`
-# normalizes (stage 05's sidecars spell the same two fields `window_cer` / `tail_cer`),
-# so every judge's reading uses the stage-06 names by the time it arrives here.
-#
-# `whisper-1` is deliberately NOT here. It is the v1-era OpenAI alias the client used
-# before the real model name was recorded, and its readings describe v1 AUDIO: shipping
-# them as a judge column would put a stale number next to a v2 clip with nothing on the
-# row to say so. It still exists on old rows, hence `--stt-key`'s default.
-JUDGES = (
-    ("whisper.cpp/ggml-large-v3-turbo", "whisper"),
-    ("whisper.cpp/ggml-large-v3", "whisper_v3"),
-    ("onnx-asr/parakeet-tdt-0.6b-v3-ultra", "parakeet"),
-)
-# reading key -> column suffix. `text` is renamed because `whisper_text` would read like
-# a label; everything else keeps its name so a column and the reading it came from are
-# searchable by the same word.
-JUDGE_FIELDS = (("text", "stt"), ("cer", "cer"), ("cer_window", "cer_window"),
-                ("repeat_excess", "repeat_excess"))
-JUDGE_COLUMNS = tuple(f"{prefix}_{col}" for _, prefix in JUDGES for _, col in JUDGE_FIELDS)
 
 QC_FIELDS = (("cer", "cer_tail", "stt_transcript", "n_stt_check", "stt_model",
               "cfg_alpha", "regenerated", "qc_status")

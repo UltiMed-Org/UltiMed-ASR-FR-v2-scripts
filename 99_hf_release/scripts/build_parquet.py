@@ -74,6 +74,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent          # .../99_hf_release/scripts
 RELEASE_DIR = HERE.parent                        # .../99_hf_release
+sys.path.insert(0, str(RELEASE_DIR.parent / "utils"))
+from nemo_manifest import JUDGE_COLUMNS  # noqa: E402  (stdlib-only at import)
+
 DATA_DIR = RELEASE_DIR / "data"                  # symlink -> SSD audio_datasets
 NEMO_DIR = DATA_DIR / "NeMO_files"               # committed split manifests
 OUT_DIR = DATA_DIR / "hf_parquet"                # uploaded to HF at the repo root
@@ -113,6 +116,29 @@ QC_COLUMNS = {
     "regenerated": "bool",
     "qc_status": "string",
 }
+# One flat column group per ASR judge (`whisper_*`, `whisper_v3_*`, `parakeet_*`), named
+# by nemo_manifest.JUDGE_COLUMNS so this list cannot drift from what 03 writes; only the
+# dtype is decided here, by column suffix. Null wherever a judge did not read the clip
+# (whisper_v3 only read what turbo flagged, parakeet about half the corpus). Both
+# `whisper_repeat_excess` and `whisper_v3_repeat_excess` are null on every row (the
+# whisper scorer does not compute it, see 03's docstring) and are kept anyway: the card
+# documents four columns per judge, and a column that is null by construction says so
+# more plainly than one that is missing.
+JUDGE_DTYPES = {"stt": "string", "cer": "float32", "cer_window": "float32",
+                "repeat_excess": "int32"}
+
+
+def judge_dtype(column: str) -> str:
+    """Dtype of one judge column, from its suffix (`x_cer_window` does not end in `_cer`)."""
+    for suffix in JUDGE_DTYPES:
+        if column.endswith(f"_{suffix}"):
+            return JUDGE_DTYPES[suffix]
+    raise ValueError(f"no dtype for judge column {column!r}")
+
+
+QC_COLUMNS.update({col: judge_dtype(col) for col in JUDGE_COLUMNS})
+# Worst reading any judge gave the clip; null only when no judge scored it.
+QC_COLUMNS.update({"cer_max": "float32", "cer_window_max": "float32"})
 
 DEFAULT_SHARD_CLIPS = 2500  # ~1 GB/shard at the corpus' ~408 KB mean FLAC size
 

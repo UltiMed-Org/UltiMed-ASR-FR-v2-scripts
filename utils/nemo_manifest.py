@@ -56,6 +56,30 @@ NEMO_CORE = ("audio_filepath", "duration", "text")
 # and per dataset, relative to the stage root.
 MANIFEST_GLOBS = ("data/NeMO_files/*.jsonl", "data/NeMO_files/*/*.jsonl")
 
+# Every judge whose reading reaches a released row, and the column prefix it gets.
+# Adding a judge is one line here plus its sweep; nothing else in the release stage
+# knows a model name. Lives here rather than in 03_sync_hotfix_results.py (which fills
+# the columns) so scripts/build_parquet.py (which exports them) reads the same list.
+# The keys are `transcriptions` keys, which `12_merge_judge_sidecars.py` normalizes
+# (stage 05's sidecars spell the same two fields `window_cer` / `tail_cer`), so every
+# judge's reading uses the stage-06 names by the time it arrives here.
+#
+# `whisper-1` is deliberately NOT here. It is the v1-era OpenAI alias the client used
+# before the real model name was recorded, and its readings describe v1 AUDIO: shipping
+# them as a judge column would put a stale number next to a v2 clip with nothing on the
+# row to say so. It still exists on old rows, hence 03's `--stt-key` default.
+JUDGES = (
+    ("whisper.cpp/ggml-large-v3-turbo", "whisper"),
+    ("whisper.cpp/ggml-large-v3", "whisper_v3"),
+    ("onnx-asr/parakeet-tdt-0.6b-v3-ultra", "parakeet"),
+)
+# reading key -> column suffix. `text` is renamed because `whisper_text` would read like
+# a label; everything else keeps its name so a column and the reading it came from are
+# searchable by the same word.
+JUDGE_FIELDS = (("text", "stt"), ("cer", "cer"), ("cer_window", "cer_window"),
+                ("repeat_excess", "repeat_excess"))
+JUDGE_COLUMNS = tuple(f"{prefix}_{col}" for _, prefix in JUDGES for _, col in JUDGE_FIELDS)
+
 
 # --------------------------------------------------------------------------- #
 # split-spec parsing
