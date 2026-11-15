@@ -174,6 +174,12 @@ def aggregate_open_medic(
                 continue
 
             atc5 = (row.get("ATC5") or "").strip()
+            # TODO: the CNAM L_ATC5 labels carry misspellings (NALBUFINE, DIPHTERIE-
+            # POLYOMIELITE-TETANOS, TIOGUANINE) that went into the generated sentences.
+            # The labels are fixed downstream (utils/accent_spellings.json,
+            # SOURCE_SHEET_FIXES in 06_hotfixes/07_build_accent_spellings.py, 2026-11-15);
+            # correcting them here, against the ANSM substance names, would fix the
+            # TTS text of a future regeneration too.
             label = (row.get("L_ATC5") or "").strip()
             if atc5:
                 by_atc[atc5]["boxes"] += boxes
