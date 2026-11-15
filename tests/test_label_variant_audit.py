@@ -56,7 +56,8 @@ def test_hand_rewrites_committed() -> None:
     missing = {k: v for k, v in hand.items() if table.get(k) != v}
     assert not missing, ("HAND_REWRITES not synced into accent_spellings.json", missing)
     assert all(k == k.lower() for k in hand), "keys are looked up lowercased"
-    chained = {k: v for k, v in table.items() if v.lower() in table}
+    # An identity entry (``tymoferol``) only recases all-caps words, it is not a chain.
+    chained = {k: v for k, v in table.items() if v.lower() in table and v.lower() != k}
     assert not chained, ("canonical form is itself rewritten", chained)
     print(f"test_hand_rewrites_committed: OK ({len(hand)} entries)")
 

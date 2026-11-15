@@ -460,6 +460,25 @@ def test_cefalexine_follows_inn_convention() -> None:
     print("test_cefalexine_follows_inn_convention: OK")
 
 
+def test_owner_review_rewrites() -> None:
+    """The owner's hand review of leftover variants (2026-11-15): brands keep the drug
+    caser's capitals, all-caps follows the table casing, ``mésalamine`` keeps the accent
+    it gains (the INN accent stripping must not undo it), two words stay as they are."""
+    for text, want in [("Sous Patidexaméthasone.", "Sous Patidexamethasone."),
+                       ("Il prend du TYMOFEROL.", "Il prend du tymoferol."),
+                       ("Du laxilix 40 mg.", "Du Lasilix 40 mg."),
+                       ("Le thiorphan.", "Le Tiorfan."),
+                       ("L'acide cromoglycique.", "L'acide cromoglicique."),
+                       ("De l'oxyconazole, d'oxyconazole, Oxyconazole.",
+                        "De l'oxiconazole, d'oxiconazole, Oxiconazole."),
+                       ("La mesalamine et la mésalamine.", "La mésalamine et la mésalamine."),
+                       ("La gonadotropine et l'homatropine.", "La gonadotropine et l'homatropine.")]:
+        got = apply_label_conventions(text)
+        assert got == want, (text, got)
+        assert apply_label_conventions(got) == got, got
+    print("test_owner_review_rewrites: OK")
+
+
 def test_spelling_fixes_never_reach_tts_source() -> None:
     """Spelling fixes are LABEL-only: the TTS source is the text the audio was read from,
     so a typo, accent or spelling-winner fix there would make it lie about the audio.
@@ -790,6 +809,7 @@ if __name__ == "__main__":
     test_drug_caser()
     test_accents()
     test_cefalexine_follows_inn_convention()
+    test_owner_review_rewrites()
     test_spelling_fixes_never_reach_tts_source()
     test_compound_spellings()
     test_official_names()

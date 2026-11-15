@@ -184,7 +184,16 @@ INN_LEFTOVERS_MAJORITY = {
     "méticilline-sensible": "meticilline-sensible", "méticilline-résistant": "meticilline-résistant",
     "budésonide-formotérol": "budesonide-formotérol", "céfuroxime-axétil": "cefuroxime-axétil",
     "ténofovir-emtricitabine": "tenofovir-emtricitabine"}
-HAND_REWRITES = SOURCE_SHEET_FIXES | TYPOS | SPELLING_WINNERS | INN_LEFTOVERS | INN_LEFTOVERS_MAJORITY
+# Owner's hand review of the leftover variants (2026-11-15). Brands take the drug caser's
+# capitals (``utils/drug_casing.json``), else a second pass would recase them. ``tymoferol``
+# maps to itself so an all-caps ``TYMOFEROL`` gets the table casing. ``mesalamine`` GAINS
+# its accent (French spelling). Reviewed and kept as they are: gonadotropine, homatropine.
+OWNER_REVIEW = {"patidexaméthasone": "patidexamethasone", "tymoferol": "tymoferol",
+                "laxilix": "Lasilix", "cestradiol": "estradiol", "thiorphan": "Tiorfan",
+                "cromoglycique": "cromoglicique", "oxyconazole": "oxiconazole",
+                "mesalamine": "mésalamine"}
+HAND_REWRITES = (SOURCE_SHEET_FIXES | TYPOS | SPELLING_WINNERS | INN_LEFTOVERS
+                 | INN_LEFTOVERS_MAJORITY | OWNER_REVIEW)
 
 
 def canonical(forms: list[tuple[str, int]]) -> str | None:
