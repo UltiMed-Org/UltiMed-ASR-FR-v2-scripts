@@ -166,7 +166,25 @@ INN_LEFTOVERS = {"ertapénem": "ertapenem", "ertapénème": "ertapenem", "lanad�
                  "alitrétinoïne": "alitretinoine", "alitretinoïne": "alitretinoine",
                  "bempédoïque": "bempedoique", "bempédoique": "bempedoique", "époétine": "epoetine",
                  "epoétine": "epoetine", "vélaglucérase": "velaglucerase", "velaglucérase": "velaglucerase"}
-HAND_REWRITES = SOURCE_SHEET_FIXES | TYPOS | SPELLING_WINNERS | INN_LEFTOVERS
+# Same convention where the ACCENTED form still had the majority: a larger rewrite (``lévétiracétam``
+# 1068 labels), kept apart so it can be dropped on its own. The TTS text keeps the accents.
+INN_LEFTOVERS_MAJORITY = {
+    "alafénamide": "alafenamide", "béclométasone": "beclometasone", "bélatacept": "belatacept",
+    "bétahistine": "betahistine", "bétaméthasone": "betamethasone", "betaméthasone": "betamethasone",
+    "budésonide": "budesonide", "céfoxitine": "cefoxitine", "céfuroxime": "cefuroxime",
+    "duloxétine": "duloxetine", "érythromycine": "erythromycine", "étanercept": "etanercept",
+    "éthosuximide": "ethosuximide", "fluoxétine": "fluoxetine", "indacatérol": "indacaterol",
+    "irinotécan": "irinotecan", "lévétiracétam": "levetiracetam", "lévothyroxine": "levothyroxine",
+    "lopéramide": "loperamide", "mépolizumab": "mepolizumab", "méropénem": "meropenem",
+    "méthylprednisolone": "methylprednisolone", "méthylprédnisolone": "methylprednisolone",
+    "méticilline": "meticilline", "nébivolol": "nebivolol", "nomégestrol": "nomegestrol",
+    "pinavérium": "pinaverium", "pipéracilline": "piperacilline", "saproptérine": "sapropterine",
+    "ténofovir": "tenofovir", "topotécan": "topotecan", "tréprostinil": "treprostinil",
+    "varénicline": "varenicline", "vérapamil": "verapamil",
+    "méticilline-sensible": "meticilline-sensible", "méticilline-résistant": "meticilline-résistant",
+    "budésonide-formotérol": "budesonide-formotérol", "céfuroxime-axétil": "cefuroxime-axétil",
+    "ténofovir-emtricitabine": "tenofovir-emtricitabine"}
+HAND_REWRITES = SOURCE_SHEET_FIXES | TYPOS | SPELLING_WINNERS | INN_LEFTOVERS | INN_LEFTOVERS_MAJORITY
 
 
 def canonical(forms: list[tuple[str, int]]) -> str | None:

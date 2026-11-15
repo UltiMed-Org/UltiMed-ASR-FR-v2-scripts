@@ -436,7 +436,7 @@ def test_accents() -> None:
                       ("Sous PERINDIPRIL et ENTREESTO, puis acyclovir et valaciclovir, kyste à Cyclospora.",
                        "Sous perindopril et Entresto, puis aciclovir et valaciclovir, kyste à Cyclospora."),
                       ("La ciclosporine, l'ertapénème, du lévétiracétam, un staphylocoque méticilline-sensible.",
-                       "La cyclosporine, l'ertapenem, du lévétiracétam, un staphylocoque méticilline-sensible."),
+                       "La cyclosporine, l'ertapenem, du levetiracetam, un staphylocoque meticilline-sensible."),
                       ("Vaccin diphtérie-polyomielite-tétanos, nalbufine, glycopirronium, amitryptiline.",
                        "Vaccin diphtérie-poliomyélite-tétanos, nalbuphine, glycopyrronium, amitriptyline."),
                       ("Aktiskenan 10 mg, Gentamycine, céphalexine, paracétamol, méthotrexate.",
