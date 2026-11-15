@@ -62,8 +62,19 @@ def test_hand_rewrites_committed() -> None:
     print(f"test_hand_rewrites_committed: OK ({len(hand)} entries)")
 
 
+
+def test_resynth_typos_held_back() -> None:
+    """The typos whose clips still say them stay out of the committed table until those
+    clips are re-synthesized, else the next export puts a label on audio that never said it."""
+    held = _load("07_build_accent_spellings.py").RESYNTH_TYPOS
+    table = json.loads((HOTFIXES.parent / "utils" / "accent_spellings.json").read_text(encoding="utf-8"))["rewrites"]
+    assert not set(held) & set(table), set(held) & set(table)
+    print("test_resynth_typos_held_back: OK")
+
+
 if __name__ == "__main__":
     test_label_variant_audit()
     test_asr_residuals()
     test_build_accent_spellings()
     test_hand_rewrites_committed()
+    test_resynth_typos_held_back()

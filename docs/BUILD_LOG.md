@@ -270,7 +270,31 @@ The rewrites are `HAND_REWRITES` in `06_hotfixes/07_build_accent_spellings.py`, 
 | INN accents, unaccented majority | 187 | 185 |
 | INN accents, accented majority | 5,220 | 5,150 |
 
-Some typo rewrites change the sound, not only the spelling (`perindipril`, `cetriaxone`, `bisorolol`, `actisenan`, `karegic`, ...): the audio was read from the typo, so the fixed label is a near-miss of what was said. They are a handful of clips (part of the 116).
+These counts predate the owner's hand review (`OWNER_REVIEW`, about 30 more clips) and the five held-back typos below (5 fewer clips); not re-run.
+
+Every one of these fixes rewrites the label (`text`) only. The `asr_training_source`, which `07_write_back_texts.py` later feeds back to the TTS stage, keeps what voxtral actually read: `apply_label_conventions(..., tts_source=True)` skips the spelling fixes, and `tests/test_label_conventions.py::test_spelling_fixes_never_reach_tts_source` sweeps the whole table to pin it (before that fix, 326 of the 630 entries leaked into the source).
+
+Some typo rewrites change the sound, not only the spelling, so the fixed label is a near-miss of what the audio says. Five of them, each in exactly one clip (all PARHAF, none in PARROT), are held back in `RESYNTH_TYPOS` (`06_hotfixes/07_build_accent_spellings.py`), outside `HAND_REWRITES` and the JSON, until their clips are re-synthesized (`tests/test_label_variant_audit.py::test_resynth_typos_held_back` keeps them out):
+
+| Typo | Fix | Clip (`PARHAF/`) |
+|---|---|---|
+| `PERINDIPRIL` | perindopril | `028064_0000_medecine_inter_specialites_00014_t0_c1` |
+| `Bisorolol` | bisoprolol | `028405_0000_medecine_inter_specialites_00158_t0_c7` |
+| `KAREGIC` | Kardégic | `028507_0000_medecine_inter_specialites_00209_t0_c2` |
+| `Cetriaxone` | ceftriaxone | `031867_0000_nephrologie_00012_t0_c4` |
+| `Actisénan` | Actiskenan | `003372_0000_cancero_adulte_00155_t0_c1` |
+
+Found with `grep -iE "actis[ée]nan|karegic|cetriaxone|bisorolol|perindipril" 99_hf_release/data/NeMO_files/full.jsonl` (one clip per word; they also sit in the split files, e.g. 3 in `train.jsonl` and 1 in `test.jsonl`). The `Actisénan` clip is accented, so the old `actisenan` key never matched it anyway. The "TTS typo guard" (`_tts_accent_table`) only stops a typo entry from being inverted into a TTS respelling; it does not protect these clips, which is why they are held back.
+
+To re-synthesize them with the existing TTS stage (not done yet):
+
+1. Rewrite the clip's text to the fixed word in `03_PARHAF/generated_dataset.jsonl` (`asr_training_target` and `asr_training_source`), in the release manifests the rounds read (the `HOTFIX_SOURCES` targets' `full.jsonl`, see `99_hf_release/03_sync_hotfix_results.py`) and in the stage-06 state file, marking the row `pending_tts`. `06_hotfixes/17_reopen_hgvs.py` does exactly this chain for HGVS; TODO: generalize it to take the rewrite (e.g. `RESYNTH_TYPOS`) rather than copying it.
+2. Queue the five stems: `uv run 06_hotfixes/19_queue_stems.py STEMS.txt --apply`.
+3. Redraw them: `sudo -E STEMS_FROM=STEMS.txt ./driver.sh` (from `06_hotfixes/`).
+4. Merge `RESYNTH_TYPOS` into `HAND_REWRITES`, add the entries to `utils/accent_spellings.json`, and drop the hold-back test.
+5. Export as below.
+
+Other typo fixes also change the sound and were not held back (owner's list kept to the five above): e.g. `cefriaxone`, `hydrochlorothéiazide`, `imbrutinib`, `métrondiazole`, `eczétimibe`, `lévifloxacine`, `bacrim`, `ferinjec`, `theralithe`, and from the owner's hand review `laxilix` -> Lasilix and `cestradiol` -> estradiol, each 1 clip.
 
 To apply, from `99_hf_release/`: `uv run 05_normalize_text.py` (dry run), then `uv run 05_normalize_text.py --apply`, then `uv run scripts/build_parquet.py`.
 

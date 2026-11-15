@@ -436,7 +436,7 @@ def test_accents() -> None:
                       ("inhibiteur de protease", "inhibiteur de protéase"),
                       # Hand rewrites (2026-11-15): typos, source-sheet misspellings, the
                       # spelling winners, INN leftovers; longer words and other words untouched.
-                      ("Sous PERINDIPRIL et ENTREESTO, puis acyclovir et valaciclovir, kyste à Cyclospora.",
+                      ("Sous PERINDOPRILL et ENTREESTO, puis acyclovir et valaciclovir, kyste à Cyclospora.",
                        "Sous perindopril et Entresto, puis aciclovir et valaciclovir, kyste à Cyclospora."),
                       ("La ciclosporine, l'ertapénème, du lévétiracétam, un staphylocoque méticilline-sensible.",
                        "La cyclosporine, l'ertapenem, du levetiracetam, un staphylocoque meticilline-sensible."),

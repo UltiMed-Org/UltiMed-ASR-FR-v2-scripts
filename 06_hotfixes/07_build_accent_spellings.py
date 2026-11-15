@@ -118,15 +118,15 @@ SOURCE_SHEET_FIXES = {"nalbufine": "nalbuphine", "polyomielite": "poliomyélite"
                       "diphtérie-polyomielite-tétanos": "diphtérie-poliomyélite-tétanos",
                       "glycopirronium": "glycopyrronium"}
 # Typos in the labels, the owner's list then a systematic search; brands keep their capital.
-TYPOS = {"perindoprill": "perindopril", "perindipril": "perindopril", "azythromycine": "azithromycine",
+TYPOS = {"perindoprill": "perindopril", "azythromycine": "azithromycine",
          "gentamycine": "gentamicine", "cloxaciline": "cloxacilline", "entreesto": "Entresto",
          "luspathercept": "luspatercept", "affinitor": "Afinitor", "ellebrato": "Elebrato",
          "clotafact": "Clottafact", "hydrochlorotiazide": "hydrochlorothiazide",
          "hydrochlorothéiazide": "hydrochlorothiazide", "tazociline": "Tazocilline",
          "aktiskenan": "Actiskenan", "ackiskenan": "Actiskenan", "actikskenan": "Actiskenan",
-         "actiksenan": "Actiskenan", "actisenan": "Actiskenan", "actikenan": "Actiskenan",
-         "doxycyline": "doxycycline", "cefriaxone": "ceftriaxone", "cetriaxone": "ceftriaxone",
-         "bisorolol": "bisoprolol", "amplodipine": "amlodipine", "pantopazole": "pantoprazole",
+         "actiksenan": "Actiskenan", "actikenan": "Actiskenan",
+         "doxycyline": "doxycycline", "cefriaxone": "ceftriaxone",
+         "amplodipine": "amlodipine", "pantopazole": "pantoprazole",
          "desmoprésine": "desmopressine", "candersartan": "candesartan", "aprazolam": "alprazolam",
          "irbersartan": "irbésartan", "adalmumab": "adalimumab", "zolendronique": "zolédronique",
          "formeterol": "formotérol", "formétérol": "formotérol", "imbrutinib": "ibrutinib",
@@ -140,7 +140,7 @@ TYPOS = {"perindoprill": "perindopril", "perindipril": "perindopril", "azythromy
          "isétionate": "iséthionate", "syncitial": "syncytial",
          "natyspray": "Natispray", "flamazine": "Flammazine", "immovane": "Imovane",
          "zythromax": "Zithromax", "théralite": "Téralithe", "theralithe": "Téralithe",
-         "karegic": "Kardégic", "bacrim": "Bactrim", "ferrinject": "Ferinject", "ferinjec": "Ferinject",
+         "bacrim": "Bactrim", "ferrinject": "Ferinject", "ferinjec": "Ferinject",
          "vycril": "Vicryl", "bêtadine": "bétadine", "betadine": "bétadine",
          # English INN forms in a French label
          "empagliflozin": "empagliflozine", "midostaurin": "midostaurine", "darbepoetin": "darbepoetine"}
@@ -184,6 +184,15 @@ INN_LEFTOVERS_MAJORITY = {
     "méticilline-sensible": "meticilline-sensible", "méticilline-résistant": "meticilline-résistant",
     "budésonide-formotérol": "budesonide-formotérol", "céfuroxime-axétil": "cefuroxime-axétil",
     "ténofovir-emtricitabine": "tenofovir-emtricitabine"}
+# Typos whose fix changes the SOUND and that each sit in exactly one existing clip (all
+# PARHAF), whose audio says the typo: fixing the label alone would make it disagree with
+# its audio. Held out of HAND_REWRITES (and the JSON) until those clips are re-synthesized
+# from the fixed text; docs/BUILD_LOG.md ("Label spelling fixes after the v2 model") has
+# the clip ids and the steps. ``actisénan`` is how that clip actually spells it.
+RESYNTH_TYPOS = {"perindipril": "perindopril", "cetriaxone": "ceftriaxone",
+                 "bisorolol": "bisoprolol", "actisenan": "Actiskenan", "actisénan": "Actiskenan",
+                 "karegic": "Kardégic"}
+
 # Owner's hand review of the leftover variants (2026-11-15). Brands take the drug caser's
 # capitals (``utils/drug_casing.json``), else a second pass would recase them. ``tymoferol``
 # maps to itself so an all-caps ``TYMOFEROL`` gets the table casing. ``mesalamine`` GAINS
