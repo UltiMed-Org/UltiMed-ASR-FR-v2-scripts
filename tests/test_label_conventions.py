@@ -443,9 +443,21 @@ def test_accents() -> None:
                       ("Vaccin diphtérie-polyomielite-tétanos, nalbufine, glycopirronium, amitryptiline.",
                        "Vaccin diphtérie-poliomyélite-tétanos, nalbuphine, glycopyrronium, amitriptyline."),
                       ("Aktiskenan 10 mg, Gentamycine, céphalexine, paracétamol, méthotrexate.",
-                       "Actiskenan 10 mg, Gentamicine, céfalexine, paracétamol, méthotrexate.")]:
+                       "Actiskenan 10 mg, Gentamicine, cefalexine, paracétamol, méthotrexate.")]:
         assert apply_label_conventions(raw) == want, (raw, apply_label_conventions(raw))
     print("test_accents: OK")
+
+
+def test_cefalexine_follows_inn_convention() -> None:
+    """No accent exception any more (was ``céfalexine``, 2026-11-15); every spelling
+    in the labels folds to it, and the TTS still hears the accent on a fresh generation."""
+    for text, want in [("Céfalexine monohydratée 500 mg.", "Cefalexine monohydratée 500 mg."),
+                       ("La céfalexine et la céphalexine.", "La cefalexine et la cefalexine."),
+                       ("CÉFALEXINE ce jour, Cephalexine hier.", "Cefalexine ce jour, Cefalexine hier."),
+                       ("de la cefalexine.", "de la cefalexine.")]:
+        assert apply_label_conventions(text) == want, (text, apply_label_conventions(text))
+    assert restore_tts_accents("la cefalexine") == "la céfalexine"
+    print("test_cefalexine_follows_inn_convention: OK")
 
 
 def test_spelling_fixes_never_reach_tts_source() -> None:
@@ -777,6 +789,7 @@ if __name__ == "__main__":
     test_roman()
     test_drug_caser()
     test_accents()
+    test_cefalexine_follows_inn_convention()
     test_spelling_fixes_never_reach_tts_source()
     test_compound_spellings()
     test_official_names()

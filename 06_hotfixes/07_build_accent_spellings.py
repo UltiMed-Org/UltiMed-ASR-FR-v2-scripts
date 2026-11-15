@@ -144,11 +144,11 @@ TYPOS = {"perindoprill": "perindopril", "perindipril": "perindopril", "azythromy
          "vycril": "Vicryl", "bêtadine": "bétadine", "betadine": "bétadine",
          # English INN forms in a French label
          "empagliflozin": "empagliflozine", "midostaurin": "midostaurine", "darbepoetin": "darbepoetine"}
-# Two right spellings, one taught (owner's choice): céfalexine keeps its accent although
-# the INN convention would drop it.
+# Two right spellings, one taught (owner's choice). ``cefalexine`` follows the INN
+# convention, no accent (2026-11-15: it used to keep it as an exception).
 SPELLING_WINNERS = {"acyclovir": "aciclovir", "ciclosporine": "cyclosporine",
                     "ciclosporinémie": "cyclosporinémie", "tioguanine": "thioguanine",
-                    "céphalexine": "céfalexine", "cefalexine": "céfalexine",
+                    "céphalexine": "cefalexine", "cephalexine": "cefalexine", "céfalexine": "cefalexine",
                     "alphacalcidol": "alfacalcidol", "alfacalcidiol": "alfacalcidol"}
 # INNs still accented in the labels, below ``--min-cost`` or missed by ``is_drug``, where
 # the unaccented form already had the majority (``ertapénème`` is the French INN, kept to
