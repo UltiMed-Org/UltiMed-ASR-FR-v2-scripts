@@ -115,41 +115,29 @@ FIXED = {"hexokinase": "hexokinase", "chondroitinase": "chondroïtinase", "subar
 # keeps them out of the TTS respellings (``_tts_accent_table`` requires the same letters).
 # Misspellings inherited from a source sheet (``02_drugs`` CNAM L_ATC5 labels, one LLM typo).
 SOURCE_SHEET_FIXES = {"nalbufine": "nalbuphine", "polyomielite": "poliomyélite",
-                      "diphtérie-polyomielite-tétanos": "diphtérie-poliomyélite-tétanos",
                       "glycopirronium": "glycopyrronium"}
 # Typos in the labels, the owner's list then a systematic search; brands keep their capital.
-TYPOS = {"perindoprill": "perindopril", "azythromycine": "azithromycine",
-         "gentamycine": "gentamicine", "cloxaciline": "cloxacilline", "entreesto": "Entresto",
+# Only fixes that keep the sound (the sound-changing ones are in RESYNTH_TYPOS below).
+TYPOS = {"azythromycine": "azithromycine", "gentamycine": "gentamicine", "cloxaciline": "cloxacilline",
          "luspathercept": "luspatercept", "affinitor": "Afinitor", "ellebrato": "Elebrato",
          "clotafact": "Clottafact", "hydrochlorotiazide": "hydrochlorothiazide",
-         "hydrochlorothéiazide": "hydrochlorothiazide", "tazociline": "Tazocilline",
-         "aktiskenan": "Actiskenan", "ackiskenan": "Actiskenan", "actikskenan": "Actiskenan",
-         "actiksenan": "Actiskenan", "actikenan": "Actiskenan",
-         "doxycyline": "doxycycline", "cefriaxone": "ceftriaxone",
-         "amplodipine": "amlodipine", "pantopazole": "pantoprazole",
-         "desmoprésine": "desmopressine", "candersartan": "candesartan", "aprazolam": "alprazolam",
-         "irbersartan": "irbésartan", "adalmumab": "adalimumab", "zolendronique": "zolédronique",
-         "formeterol": "formotérol", "formétérol": "formotérol", "imbrutinib": "ibrutinib",
-         "glicazide": "gliclazide", "lanceotide": "lanréotide", "selpercatnib": "selpercatinib",
-         "tezepilumab": "tezepelumab", "rilmenildine": "rilmenidine", "teimocilline": "temocilline",
+         "tazociline": "Tazocilline", "aktiskenan": "Actiskenan",
          "amitryptiline": "amitriptyline", "amitryptyline": "amitriptyline", "oxybutinine": "oxybutynine",
-         "néphopam": "nefopam", "bénzatine": "benzathine", "béclométhasone": "beclometasone",
-         "métrondiazole": "métronidazole", "lévifloxacine": "levofloxacine", "acétrétine": "acitrétine",
-         "bétaméthazone": "betamethasone", "eczétimibe": "ézétimibe", "clomiphène": "clomifène",
-         "arthéméter": "artéméther", "fénothérol": "fénotérol", "tocoferol": "tocophérol",
+         "néphopam": "nefopam", "béclométhasone": "beclometasone",
+         "bétaméthazone": "betamethasone", "clomiphène": "clomifène",
+         "arthéméter": "artéméther", "fénothérol": "fénotérol",
          "isétionate": "iséthionate", "syncitial": "syncytial",
          "natyspray": "Natispray", "flamazine": "Flammazine", "immovane": "Imovane",
-         "zythromax": "Zithromax", "théralite": "Téralithe", "theralithe": "Téralithe",
-         "bacrim": "Bactrim", "ferrinject": "Ferinject", "ferinjec": "Ferinject",
+         "zythromax": "Zithromax", "théralite": "Téralithe", "ferrinject": "Ferinject",
          "vycril": "Vicryl", "bêtadine": "bétadine", "betadine": "bétadine",
-         # English INN forms in a French label
-         "empagliflozin": "empagliflozine", "midostaurin": "midostaurine", "darbepoetin": "darbepoetine"}
+         # Sound-changing, but no clip in the release carries it, so nothing to re-synthesize.
+         "actiksenan": "Actiskenan"}
 # Two right spellings, one taught (owner's choice). ``cefalexine`` follows the INN
 # convention, no accent (2026-11-15: it used to keep it as an exception).
 SPELLING_WINNERS = {"acyclovir": "aciclovir", "ciclosporine": "cyclosporine",
                     "ciclosporinémie": "cyclosporinémie", "tioguanine": "thioguanine",
                     "céphalexine": "cefalexine", "cephalexine": "cefalexine", "céfalexine": "cefalexine",
-                    "alphacalcidol": "alfacalcidol", "alfacalcidiol": "alfacalcidol"}
+                    "alphacalcidol": "alfacalcidol"}
 # INNs still accented in the labels, below ``--min-cost`` or missed by ``is_drug``, where
 # the unaccented form already had the majority (``ertapénème`` is the French INN, kept to
 # one spelling with the others). Compounds are keys of their own: the lookup is per word.
@@ -184,21 +172,44 @@ INN_LEFTOVERS_MAJORITY = {
     "méticilline-sensible": "meticilline-sensible", "méticilline-résistant": "meticilline-résistant",
     "budésonide-formotérol": "budesonide-formotérol", "céfuroxime-axétil": "cefuroxime-axétil",
     "ténofovir-emtricitabine": "tenofovir-emtricitabine"}
-# Typos whose fix changes the SOUND and that each sit in exactly one existing clip (all
-# PARHAF), whose audio says the typo: fixing the label alone would make it disagree with
-# its audio. Held out of HAND_REWRITES (and the JSON) until those clips are re-synthesized
-# from the fixed text; docs/BUILD_LOG.md ("Label spelling fixes after the v2 model") has
-# the clip ids and the steps. ``actisénan`` is how that clip actually spells it.
-RESYNTH_TYPOS = {"perindipril": "perindopril", "cetriaxone": "ceftriaxone",
-                 "bisorolol": "bisoprolol", "actisenan": "Actiskenan", "actisénan": "Actiskenan",
-                 "karegic": "Kardégic"}
+# Typos whose fix changes the SOUND, so every existing clip that carries one has audio
+# saying the typo: fixing the label alone would make it disagree with its audio. Held out
+# of HAND_REWRITES (and the JSON) until those clips are re-synthesized from the fixed text;
+# docs/BUILD_LOG.md ("Label spelling fixes after the v2 model") has the clip ids and the
+# steps. Owner's rule (2026-11-16): every sound-changing fix is held back, and when in doubt
+# it is held (pure accent, case, hyphen or silent-letter fixes are not). The re-synthesis
+# rewrite is ``label_conventions.normalize_accents(text, RESYNTH_TYPOS)``, which also elides
+# the article (``le cestradiol`` -> ``l'estradiol``). ``actisénan`` is how its clip spells it.
+RESYNTH_TYPOS = {
+    # First five (2026-11-16), one PARHAF clip each.
+    "perindipril": "perindopril", "cetriaxone": "ceftriaxone", "bisorolol": "bisoprolol",
+    "actisenan": "Actiskenan", "actisénan": "Actiskenan", "karegic": "Kardégic",
+    # Owner's typo list and the systematic search.
+    "perindoprill": "perindopril", "entreesto": "Entresto",
+    "hydrochlorothéiazide": "hydrochlorothiazide", "ackiskenan": "Actiskenan",
+    "actikskenan": "Actiskenan", "actikenan": "Actiskenan", "doxycyline": "doxycycline",
+    "cefriaxone": "ceftriaxone", "amplodipine": "amlodipine", "pantopazole": "pantoprazole",
+    "desmoprésine": "desmopressine", "candersartan": "candesartan", "aprazolam": "alprazolam",
+    "irbersartan": "irbésartan", "adalmumab": "adalimumab", "zolendronique": "zolédronique",
+    "formeterol": "formotérol", "formétérol": "formotérol", "imbrutinib": "ibrutinib",
+    "glicazide": "gliclazide", "lanceotide": "lanréotide", "selpercatnib": "selpercatinib",
+    "tezepilumab": "tezepelumab", "rilmenildine": "rilmenidine", "teimocilline": "temocilline",
+    "bénzatine": "benzathine", "métrondiazole": "métronidazole", "lévifloxacine": "levofloxacine",
+    "acétrétine": "acitrétine", "eczétimibe": "ézétimibe", "tocoferol": "tocophérol",
+    "theralithe": "Téralithe", "bacrim": "Bactrim", "ferinjec": "Ferinject",
+    # English INN forms in a French label (voxtral may read the final ``-in`` as a nasal).
+    "empagliflozin": "empagliflozine", "midostaurin": "midostaurine", "darbepoetin": "darbepoetine",
+    # Source sheet (``02_drugs`` CNAM label), spoken ``polyo-mi-lite``.
+    "diphtérie-polyomielite-tétanos": "diphtérie-poliomyélite-tétanos",
+    # Spelling winner and owner's hand review.
+    "alfacalcidiol": "alfacalcidol", "laxilix": "Lasilix", "cestradiol": "estradiol"}
 
 # Owner's hand review of the leftover variants (2026-11-15). Brands take the drug caser's
 # capitals (``utils/drug_casing.json``), else a second pass would recase them. ``tymoferol``
 # maps to itself so an all-caps ``TYMOFEROL`` gets the table casing. ``mesalamine`` GAINS
 # its accent (French spelling). Reviewed and kept as they are: gonadotropine, homatropine.
 OWNER_REVIEW = {"patidexaméthasone": "patidexamethasone", "tymoferol": "tymoferol",
-                "laxilix": "Lasilix", "cestradiol": "estradiol", "thiorphan": "Tiorfan",
+                "thiorphan": "Tiorfan",
                 "cromoglycique": "cromoglicique", "oxyconazole": "oxiconazole",
                 "mesalamine": "mésalamine"}
 HAND_REWRITES = (SOURCE_SHEET_FIXES | TYPOS | SPELLING_WINNERS | INN_LEFTOVERS

@@ -436,12 +436,12 @@ def test_accents() -> None:
                       ("inhibiteur de protease", "inhibiteur de protéase"),
                       # Hand rewrites (2026-11-15): typos, source-sheet misspellings, the
                       # spelling winners, INN leftovers; longer words and other words untouched.
-                      ("Sous PERINDOPRILL et ENTREESTO, puis acyclovir et valaciclovir, kyste à Cyclospora.",
-                       "Sous perindopril et Entresto, puis aciclovir et valaciclovir, kyste à Cyclospora."),
+                      ("Sous AZYTHROMYCINE et TAZOCILINE, puis acyclovir et valaciclovir, kyste à Cyclospora.",
+                       "Sous azithromycine et Tazocilline, puis aciclovir et valaciclovir, kyste à Cyclospora."),
                       ("La ciclosporine, l'ertapénème, du lévétiracétam, un staphylocoque méticilline-sensible.",
                        "La cyclosporine, l'ertapenem, du levetiracetam, un staphylocoque meticilline-sensible."),
-                      ("Vaccin diphtérie-polyomielite-tétanos, nalbufine, glycopirronium, amitryptiline.",
-                       "Vaccin diphtérie-poliomyélite-tétanos, nalbuphine, glycopyrronium, amitriptyline."),
+                      ("Vaccin polyomielite, nalbufine, glycopirronium, amitryptiline.",
+                       "Vaccin poliomyélite, nalbuphine, glycopyrronium, amitriptyline."),
                       ("Aktiskenan 10 mg, Gentamycine, céphalexine, paracétamol, méthotrexate.",
                        "Actiskenan 10 mg, Gentamicine, cefalexine, paracétamol, méthotrexate.")]:
         assert apply_label_conventions(raw) == want, (raw, apply_label_conventions(raw))
@@ -480,7 +480,6 @@ def test_owner_review_rewrites() -> None:
     it gains (the INN accent stripping must not undo it), two words stay as they are."""
     for text, want in [("Sous Patidexaméthasone.", "Sous Patidexamethasone."),
                        ("Il prend du TYMOFEROL.", "Il prend du tymoferol."),
-                       ("Du laxilix 40 mg.", "Du Lasilix 40 mg."),
                        ("Le thiorphan.", "Le Tiorfan."),
                        ("L'acide cromoglycique.", "L'acide cromoglicique."),
                        ("De l'oxyconazole, d'oxyconazole, Oxyconazole.",
