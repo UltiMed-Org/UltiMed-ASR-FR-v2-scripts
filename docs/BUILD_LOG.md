@@ -336,6 +336,8 @@ To re-synthesize them with the existing TTS stage (not done yet):
 4. Merge `RESYNTH_TYPOS` into `HAND_REWRITES`, add the entries to `utils/accent_spellings.json`, and drop the hold-back test.
 5. Export as below.
 
+Generic lab names (`strip_generic_labs`, 2026-11-16 check): **0 clips** have audio saying a lab name that the export would drop from the label. `strip_generic_labs(x) != x` holds for no `text` or `asr_training_source` in `99_hf_release/data/NeMO_files/full.jsonl`, nor for any `asr_training_target` or `asr_training_source` in the `01_dictionnary`, `02_drugs` and `03_PARHAF` `generated_dataset.jsonl` (`04_PARROT` and `07_acronyms` carry no lab string), most likely because those sources were redrawn after the lab rule. Query: `grep -E "Arrow|Biogaran|Cristers|Evolugen|Mylan|Sandoz|Substipharm|Teva|Viatris|Zentiva|Zydus|Almus|Ratiopharm|Qualimed|Krka|Ranbaxy" full.jsonl` gives 27 lines, then keep those where `strip_generic_labs` changes the text: none. The 27 are person names (`Mylan X`, `Monsieur Teva`, `Mylane`), the `Tevagrastim` brand, and one edge case, `PARHAF/011560_0000_chirurgie_viscerale_00018_t0_c1`, whose text and source both say `Simvastatine Téva`: the accented `Téva` is not in `_LAB_RE`, so label and audio still agree, but the rule would miss that spelling in a new source.
+
 To apply, from `99_hf_release/`: `uv run 05_normalize_text.py` (dry run), then `uv run 05_normalize_text.py --apply`, then `uv run scripts/build_parquet.py`.
 
 ---
