@@ -249,6 +249,31 @@ the paper, state both licenses in a NOTICE, mark the data as modified, no
 endorsement, research-use-only disclaimer, do **not** redistribute the PARHAF
 test set). PARROT's source link and license note are done, see `99_hf_release/NOTICE.md`.
 
+## Label spelling fixes after the v2 model (2026-11-15)
+
+The v2 model was trained **before** these fixes: its training labels still carry the old spellings. They live in the convention code and tables only, so the next `05_normalize_text.py` export applies them to `text` and `asr_training_source`; no exported file was rewritten when they were made. Made with Claude Code.
+
+- **Source-sheet misspellings**: `nalbufine` -> `nalbuphine`, `polyomielite` -> `poliomyélite` (and the DTP compound), `glycopirronium` -> `glycopyrronium`. The first two (and `TIOGUANINE`) come from the CNAM Open Medic `L_ATC5` column read by `02_drugs/sources/drugs_frequency/02_combine_datasets.py` (a TODO there says to fix them at the source); `glycopirronium` is an LLM typo.
+- **Typos**: the owner's list (`perindoprill`, `azythromycine`, `gentamycine`, `cloxaciline`, `entreesto`, `luspathercept`, `affinitor`, `ellebrato`, `clotafact`, `hydrochlorotiazide`, `tazociline`, `aktiskenan` and its variants) plus a systematic search of the drug names in the labels (`amitryptiline`, `doxycyline`, `néphopam`, `ferrinject`, `vycril`, English INN forms such as `empagliflozin`, ...).
+- **Spelling winners**, two right spellings and one taught: `aciclovir`, `cyclosporine`, `thioguanine`, `céfalexine`, `alfacalcidol`, and `estr-` over `oestr-` (`estrogènes`, `estradiol`, `phytoestrogènes`, `diéthylstilbestrol`; `oestrus`, `oestral` and the `Oestrogel` brand keep the `oe`).
+- **INN accents**: the INN-without-accents convention now also covers the accented INNs the audit skipped (`ertapenem`, `lanadelumab`, `olodaterol`, `dexamethasone`), including the ones whose accented form still had the majority (`levetiracetam`, `levothyroxine`, `methylprednisolone`, `meticilline`, ...), kept in their own dict and commit. `protéase`, `paracétamol` and `méthotrexate` stay accented. The TTS text keeps the accents voxtral needs.
+- An all-caps word now hits the accent table too (`PERINDIPRIL` -> `perindopril`), and a typo entry can never be inverted into the TTS respellings.
+
+The rewrites are `HAND_REWRITES` in `06_hotfixes/07_build_accent_spellings.py`, synced by hand into `utils/accent_spellings.json` (the audit TSV the builder reads is not committed; `tests/test_label_variant_audit.py` checks the two match); the `estr-` rule is in `_SPELLING_RULES` of `utils/label_conventions.py`. Dry run of the new conventions against the exported labels (602,776 clips, all splits, token changes / clips touched):
+
+| Fix | Tokens | Clips |
+|---|---:|---:|
+| Source-sheet misspellings | 15 | 15 |
+| Typos | 117 | 116 |
+| Spelling winners | 584 | 564 |
+| `oestr-` -> `estr-` | 1,190 | 1,093 |
+| INN accents, unaccented majority | 187 | 185 |
+| INN accents, accented majority | 5,220 | 5,150 |
+
+Some typo rewrites change the sound, not only the spelling (`perindipril`, `cetriaxone`, `bisorolol`, `actisenan`, `karegic`, ...): the audio was read from the typo, so the fixed label is a near-miss of what was said. They are a handful of clips (part of the 116).
+
+To apply, from `99_hf_release/`: `uv run 05_normalize_text.py` (dry run), then `uv run 05_normalize_text.py --apply`, then `uv run scripts/build_parquet.py`.
+
 ---
 
 # 07_acronyms
