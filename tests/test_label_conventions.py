@@ -430,8 +430,21 @@ def test_accents() -> None:
                        "Perindopril et enoxaparine, un artefact, le canal de Wirsung."),
                       ("paracétamol", "paracétamol"),
                       # An enzyme, not an INN: keeps its French accent.
-                      ("inhibiteur de protease", "inhibiteur de protéase")]:
+                      ("inhibiteur de protease", "inhibiteur de protéase"),
+                      # Hand rewrites (2026-11-15): typos, source-sheet misspellings, the
+                      # spelling winners, INN leftovers; longer words and other words untouched.
+                      ("Sous PERINDIPRIL et ENTREESTO, puis acyclovir et valaciclovir, kyste à Cyclospora.",
+                       "Sous perindopril et Entresto, puis aciclovir et valaciclovir, kyste à Cyclospora."),
+                      ("La ciclosporine, l'ertapénème, du lévétiracétam, un staphylocoque méticilline-sensible.",
+                       "La cyclosporine, l'ertapenem, du lévétiracétam, un staphylocoque méticilline-sensible."),
+                      ("Vaccin diphtérie-polyomielite-tétanos, nalbufine, glycopirronium, amitryptiline.",
+                       "Vaccin diphtérie-poliomyélite-tétanos, nalbuphine, glycopyrronium, amitriptyline."),
+                      ("Aktiskenan 10 mg, Gentamycine, céphalexine, paracétamol, méthotrexate.",
+                       "Actiskenan 10 mg, Gentamicine, céfalexine, paracétamol, méthotrexate.")]:
         assert apply_label_conventions(raw) == want, (raw, apply_label_conventions(raw))
+    # The TTS text takes the fixes too but keeps the accents voxtral needs.
+    tts = apply_label_conventions("La ciclosporine, du lévétiracétam, PERINDIPRIL.", tts_source=True)
+    assert tts == "La cyclosporine, du lévétiracétam, périndopril.", tts
     print("test_accents: OK")
 
 

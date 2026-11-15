@@ -15,15 +15,21 @@ This file was written by Claude Code.
 """
 import doctest
 import importlib.util
+import json
 from pathlib import Path
 
 HOTFIXES = Path(__file__).resolve().parent.parent / "06_hotfixes"
 
 
-def _doctest(script: str) -> None:
+def _load(script: str):
     spec = importlib.util.spec_from_file_location(Path(script).stem, HOTFIXES / script)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    return mod
+
+
+def _doctest(script: str) -> None:
+    mod = _load(script)
     failed, attempted = doctest.testmod(mod)
     assert attempted and not failed, (script, failed, attempted)
     print(f"{script}: OK ({attempted} cases)")
@@ -41,7 +47,22 @@ def test_build_accent_spellings() -> None:
     _doctest("07_build_accent_spellings.py")
 
 
+def test_hand_rewrites_committed() -> None:
+    """The committed table carries every ``HAND_REWRITES`` entry (the TSV is not in the
+    repo, so the JSON is synced by hand), and every canonical form is final: a value that
+    is also a key would make ``normalize_accents`` need two passes (2026-11-15)."""
+    hand = _load("07_build_accent_spellings.py").HAND_REWRITES
+    table = json.loads((HOTFIXES.parent / "utils" / "accent_spellings.json").read_text(encoding="utf-8"))["rewrites"]
+    missing = {k: v for k, v in hand.items() if table.get(k) != v}
+    assert not missing, ("HAND_REWRITES not synced into accent_spellings.json", missing)
+    assert all(k == k.lower() for k in hand), "keys are looked up lowercased"
+    chained = {k: v for k, v in table.items() if v.lower() in table}
+    assert not chained, ("canonical form is itself rewritten", chained)
+    print(f"test_hand_rewrites_committed: OK ({len(hand)} entries)")
+
+
 if __name__ == "__main__":
     test_label_variant_audit()
     test_asr_residuals()
     test_build_accent_spellings()
+    test_hand_rewrites_committed()

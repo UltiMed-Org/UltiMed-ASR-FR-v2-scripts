@@ -30,6 +30,11 @@ against its past participle (``débordé`` / ``déborde``), a word wordfreq know
 (``isolément`` / ``isolement``), or a family in ``KEEP`` (``môle`` / ``mole``, ``gènes`` /
 ``gênes``, Latin binomials ``pyogenes`` / ``Strongyloides`` / ``Anopheles``).
 
+``HAND_REWRITES`` (2026-11-15) then adds what the audit cannot see: typos, source-sheet
+misspellings, two right spellings settled by the owner, and accented INNs below
+``--min-cost``. The TSV is not committed, so after editing those dicts without it, merge
+them into the committed JSON by hand (``tests/test_label_variant_audit.py`` checks they match).
+
 Run from the repo root on the audit TSV:
 
     uv run 06_hotfixes/07_build_accent_spellings.py path/to/variants.tsv
@@ -103,6 +108,66 @@ FIXED = {"hexokinase": "hexokinase", "chondroitinase": "chondroïtinase", "subar
          "eflornithine": "eflornithine", "lynestrenol": "lynestrenol", "vericiguat": "vericiguat",
          "irinotecan": "irinotecan", "sebelipase": "sebelipase"}
 
+# Hand-checked rewrites the audit cannot find, merged over the computed table (2026-11-15).
+# Each key was looked up in the labels and the canonical form checked against the ANSM
+# drug database, the Vidal or the INN list; each value is final (never a key itself).
+# Unlike the families above they are not all accent variants, so ``label_conventions``
+# keeps them out of the TTS respellings (``_tts_accent_table`` requires the same letters).
+# Misspellings inherited from a source sheet (``02_drugs`` CNAM L_ATC5 labels, one LLM typo).
+SOURCE_SHEET_FIXES = {"nalbufine": "nalbuphine", "polyomielite": "poliomyélite",
+                      "diphtérie-polyomielite-tétanos": "diphtérie-poliomyélite-tétanos",
+                      "glycopirronium": "glycopyrronium"}
+# Typos in the labels, the owner's list then a systematic search; brands keep their capital.
+TYPOS = {"perindoprill": "perindopril", "perindipril": "perindopril", "azythromycine": "azithromycine",
+         "gentamycine": "gentamicine", "cloxaciline": "cloxacilline", "entreesto": "Entresto",
+         "luspathercept": "luspatercept", "affinitor": "Afinitor", "ellebrato": "Elebrato",
+         "clotafact": "Clottafact", "hydrochlorotiazide": "hydrochlorothiazide",
+         "hydrochlorothéiazide": "hydrochlorothiazide", "tazociline": "Tazocilline",
+         "aktiskenan": "Actiskenan", "ackiskenan": "Actiskenan", "actikskenan": "Actiskenan",
+         "actiksenan": "Actiskenan", "actisenan": "Actiskenan", "actikenan": "Actiskenan",
+         "doxycyline": "doxycycline", "cefriaxone": "ceftriaxone", "cetriaxone": "ceftriaxone",
+         "bisorolol": "bisoprolol", "amplodipine": "amlodipine", "pantopazole": "pantoprazole",
+         "desmoprésine": "desmopressine", "candersartan": "candesartan", "aprazolam": "alprazolam",
+         "irbersartan": "irbésartan", "adalmumab": "adalimumab", "zolendronique": "zolédronique",
+         "formeterol": "formotérol", "formétérol": "formotérol", "imbrutinib": "ibrutinib",
+         "glicazide": "gliclazide", "lanceotide": "lanréotide", "selpercatnib": "selpercatinib",
+         "tezepilumab": "tezepelumab", "rilmenildine": "rilmenidine", "teimocilline": "temocilline",
+         "amitryptiline": "amitriptyline", "amitryptyline": "amitriptyline", "oxybutinine": "oxybutynine",
+         "néphopam": "nefopam", "bénzatine": "benzathine", "béclométhasone": "beclometasone",
+         "métrondiazole": "métronidazole", "lévifloxacine": "levofloxacine", "acétrétine": "acitrétine",
+         "bétaméthazone": "betamethasone", "eczétimibe": "ézétimibe", "clomiphène": "clomifène",
+         "arthéméter": "artéméther", "fénothérol": "fénotérol", "tocoferol": "tocophérol",
+         "isétionate": "iséthionate", "syncitial": "syncytial",
+         "natyspray": "Natispray", "flamazine": "Flammazine", "immovane": "Imovane",
+         "zythromax": "Zithromax", "théralite": "Téralithe", "theralithe": "Téralithe",
+         "karegic": "Kardégic", "bacrim": "Bactrim", "ferrinject": "Ferinject", "ferinjec": "Ferinject",
+         "vycril": "Vicryl", "bêtadine": "bétadine", "betadine": "bétadine",
+         # English INN forms in a French label
+         "empagliflozin": "empagliflozine", "midostaurin": "midostaurine", "darbepoetin": "darbepoetine"}
+# Two right spellings, one taught (owner's choice): céfalexine keeps its accent although
+# the INN convention would drop it.
+SPELLING_WINNERS = {"acyclovir": "aciclovir", "ciclosporine": "cyclosporine",
+                    "ciclosporinémie": "cyclosporinémie", "tioguanine": "thioguanine",
+                    "céphalexine": "céfalexine", "cefalexine": "céfalexine",
+                    "alphacalcidol": "alfacalcidol", "alfacalcidiol": "alfacalcidol"}
+# INNs still accented in the labels, below ``--min-cost`` or missed by ``is_drug``, where
+# the unaccented form already had the majority (``ertapénème`` is the French INN, kept to
+# one spelling with the others). Compounds are keys of their own: the lookup is per word.
+INN_LEFTOVERS = {"ertapénem": "ertapenem", "ertapénème": "ertapenem", "lanadélumab": "lanadelumab",
+                 "olodatérol": "olodaterol", "dexaméthasone-néomycine": "dexamethasone-néomycine",
+                 "céftazidime": "ceftazidime", "émicizumab": "emicizumab", "énfortumab": "enfortumab",
+                 "eptinézumab": "eptinezumab", "eskétamine": "esketamine", "fédratinib": "fedratinib",
+                 "fénfluramine": "fenfluramine", "ganirélix": "ganirelix", "nirsévimab": "nirsevimab",
+                 "ocrélizumab": "ocrelizumab", "pégfilgrastim": "pegfilgrastim", "pégol": "pegol",
+                 "prédnisolone": "prednisolone", "sonidégib": "sonidegib", "télmisartan": "telmisartan",
+                 "volanésorsen": "volanesorsen", "grazoprévir": "grazoprevir",
+                 "atézolizumab-bévacizumab": "atezolizumab-bevacizumab", "dégarélix": "degarelix",
+                 "dégarelix": "degarelix", "setmélanotide": "setmelanotide", "sétmélanotide": "setmelanotide",
+                 "alitrétinoïne": "alitretinoine", "alitretinoïne": "alitretinoine",
+                 "bempédoïque": "bempedoique", "bempédoique": "bempedoique", "époétine": "epoetine",
+                 "epoétine": "epoetine", "vélaglucérase": "velaglucerase", "velaglucérase": "velaglucerase"}
+HAND_REWRITES = SOURCE_SHEET_FIXES | TYPOS | SPELLING_WINNERS | INN_LEFTOVERS
+
 
 def canonical(forms: list[tuple[str, int]]) -> str | None:
     """The form a family is written in, or None to leave the family alone.
@@ -162,6 +227,7 @@ def main(variants_tsv, min_cost, out):
         # keyed after normalize_spelling, which writes ``æ`` as ``ae`` first
         forms = [(f.rsplit(" (", 1)[0].replace("æ", "ae"), int(f.rsplit(" (", 1)[1][:-1])) for f in shown.split(" | ")]
         table.update(rewrites(forms))
+    table.update(HAND_REWRITES)
     doc = "Built by 06_hotfixes/07_build_accent_spellings.py: lowercase minority spelling -> canonical form."
     Path(out).write_text(json.dumps({"_doc": doc, "rewrites": dict(sorted(table.items()))}, ensure_ascii=False, indent=0) + "\n",
                          encoding="utf-8")
