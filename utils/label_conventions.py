@@ -1553,8 +1553,11 @@ def apply_label_conventions(text: str, tts_source: bool = False) -> str:
 
     ``tts_source=True`` is for a text the TTS reads (05 on the v1 sources): it skips
     ``normalize_elided_quantities``, ``normalize_sutures``, ``normalize_thousands`` and ``normalize_numbers``, which
-    voxtral may not speak identically, keeps the accents of drug INNs (``restore_tts_accents``) and respells
-    the words voxtral misreads (``respell_for_tts``).
+    voxtral may not speak identically, skips every spelling fix (``normalize_spelling``, ``normalize_accents``:
+    a typo, accent or spelling-winner fix is LABEL-only, since the source is what the audio was read from, so
+    ``PERINDIPRIL`` stays as voxtral read it; owner's rule, 2026-11-15) and respells the words voxtral misreads
+    (``respell_for_tts``). A fresh generation still speaks the corrected word: the generator derives the TTS
+    text from the already fixed label (``text_generation_engine.py``, via ``restore_tts_accents``).
     """
     text = normalize_roman(normalize_staging(normalize_quantities(normalize_clock(normalize_dates(
         expand_titles(normalize_hgvs(text)))))))
@@ -1565,5 +1568,7 @@ def apply_label_conventions(text: str, tts_source: bool = False) -> str:
     # keeps their capitals (``Echo-Doppler`` is looked up as ``echo-doppler``).
     text = normalize_compound_spellings(lowercase_eponym_nouns(normalize_compounds(text)))
     text = normalize_latin_names(normalize_ordinals(normalize_non(normalize_official_names(strip_generic_labs(text)))))
-    text = normalize_accents(default_drug_caser()(normalize_spelling(text)))
-    return respell_for_tts(restore_tts_accents(text)) if tts_source else text
+    if tts_source:
+        # Casing only, silent: no spelling fix reaches the text the audio was read from.
+        return respell_for_tts(default_drug_caser()(text))
+    return normalize_accents(default_drug_caser()(normalize_spelling(text)))

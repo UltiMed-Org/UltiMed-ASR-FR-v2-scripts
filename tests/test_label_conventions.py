@@ -317,8 +317,8 @@ def test_tts_source_pipeline_idempotent() -> None:
     tts = lambda t: apply_label_conventions(t, tts_source=True)
     for text, want in [
         ("Anticorps de type IgM, classe IgA, grade IgE.", "Anticorps de type I-gé-M, classe I-gé-A, grade I-gé-E."),
-        # the oe-less spelling won in the labels (2026-11-15), the TTS source follows it
-        ("Phyto-oestrogènes et xéno-oestrogènes.", "Phytoestrogènes et xénoestrogènes."),
+        # the label's oe-less spelling (2026-11-15) is label-only: the TTS source keeps it
+        ("Phyto-oestrogènes et xéno-oestrogènes.",) * 2,
         ("Stade I-II, type II.", "Stade 1-2, type 2."),
     ]:
         once = tts(text)
@@ -445,10 +445,31 @@ def test_accents() -> None:
                       ("Aktiskenan 10 mg, Gentamycine, céphalexine, paracétamol, méthotrexate.",
                        "Actiskenan 10 mg, Gentamicine, céfalexine, paracétamol, méthotrexate.")]:
         assert apply_label_conventions(raw) == want, (raw, apply_label_conventions(raw))
-    # The TTS text takes the fixes too but keeps the accents voxtral needs.
-    tts = apply_label_conventions("La ciclosporine, du lévétiracétam, PERINDIPRIL.", tts_source=True)
-    assert tts == "La cyclosporine, du lévétiracétam, périndopril.", tts
     print("test_accents: OK")
+
+
+def test_spelling_fixes_never_reach_tts_source() -> None:
+    """Spelling fixes are LABEL-only: the TTS source is the text the audio was read from,
+    so a typo, accent or spelling-winner fix there would make it lie about the audio.
+    Was ``La cyclosporine, du lévétiracétam, périndopril.`` and ``Phytoestrogènes``
+    (2026-11-15, the owner's rule: only the label changes)."""
+    tts = lambda t: apply_label_conventions(t, tts_source=True)
+    for text in ["La ciclosporine, du lévétiracétam, betaméthasone, céphalexine, acyclovir.",
+                 "Phyto-oestrogènes et xéno-oestrogènes.",
+                 "Sous Patidexaméthasone, cestradiol, thiorphan et cromoglycique."]:
+        assert tts(text) == text, (text, tts(text))
+    # Every word of the accent table, in a neutral sentence: the TTS source keeps its
+    # letters, up to what ran on the source before these fixes existed and is spoken
+    # identically (drug casing, TTS respellings, compound hyphen joins).
+    table = __import__("label_conventions")._accent_table()
+    letters = lambda t: t.replace("-", "").replace(" ", "").lower()
+    changed = {}
+    for form in table:
+        text = f"Il dit {form} ce matin."
+        if letters(tts(text)) != letters(respell_for_tts(default_drug_caser()(text))):
+            changed[form] = tts(text)
+    assert not changed, ("a label spelling fix reached the TTS source", changed)
+    print("test_spelling_fixes_never_reach_tts_source: OK")
 
 
 def test_drug_caser() -> None:
@@ -756,6 +777,7 @@ if __name__ == "__main__":
     test_roman()
     test_drug_caser()
     test_accents()
+    test_spelling_fixes_never_reach_tts_source()
     test_compound_spellings()
     test_official_names()
     test_generic_labs()

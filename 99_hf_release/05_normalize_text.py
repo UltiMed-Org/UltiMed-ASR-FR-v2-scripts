@@ -53,6 +53,10 @@ tard`` kept), compounds
 exactly like the original (``M.`` was read ``monsieur``, casing is silent), so the
 shipped source keeps matching both the audio and what ``voxtral_normalize`` derives
 from the new label. The generators apply the same rewrites at parse time.
+The spelling fixes are the exception, applied to ``text`` ONLY: typos (``PERINDIPRIL`` ->
+``périndopril``), INN accents (``bétaméthasone`` -> ``betamethasone``) and spelling winners
+(``ciclosporine`` -> ``cyclosporine``) change what a word looks like, and for a typo what it
+sounds like, so the source keeps what voxtral actually read (``tts_source=True`` skips them).
 
 The hand-made NeMo-repo sets (``perso/drug_sentence_dataset/*.json``, the private
 ``perso/oli_spoken_dataset`` manifests) are normalized by passing them explicitly:
