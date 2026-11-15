@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "utils"))
 from percent_normalize import percent_to_symbol  # noqa: E402
 from label_conventions import (  # noqa: E402
     DrugCaser, apply_label_conventions, default_drug_caser, expand_titles, normalize_clock,
-    normalize_accents, normalize_compounds, normalize_dates, normalize_quantities, normalize_spelling, normalize_staging, normalize_roman, normalize_sutures, normalize_thousands, respell_for_tts, restore_tts_accents, strip_generic_labs,
+    normalize_accents, normalize_compounds, normalize_dates, normalize_quantities, normalize_spelling, normalize_staging, normalize_roman, normalize_sutures, normalize_thousands, respell_for_tts, restore_tts_accents, strip_generic_labs, _tts_accent_table,
     parse_french_number, normalize_compound_spellings, normalize_official_names, normalize_non, normalize_ordinals,
     lowercase_eponym_nouns, normalize_latin_names, normalize_hgvs, normalize_numbers,
     normalize_elided_quantities, normalize_label_numbers,
@@ -314,7 +314,8 @@ def test_tts_source_pipeline_idempotent() -> None:
     tts = lambda t: apply_label_conventions(t, tts_source=True)
     for text, want in [
         ("Anticorps de type IgM, classe IgA, grade IgE.", "Anticorps de type I-gé-M, classe I-gé-A, grade I-gé-E."),
-        ("Phyto-oestrogènes et xéno-oestrogènes.", "Phyto-oestrogènes et xéno-oestrogènes."),
+        # the oe-less spelling won in the labels (2026-11-15), the TTS source follows it
+        ("Phyto-oestrogènes et xéno-oestrogènes.", "Phytoestrogènes et xénoestrogènes."),
         ("Stade I-II, type II.", "Stade 1-2, type 2."),
     ]:
         once = tts(text)
@@ -385,7 +386,16 @@ def test_spelling() -> None:
         ("Du Ketoprofen, sous cisplatin, par Céfépim, le CEFEPIM, aspirin, ASPIRIN Protect, la Fucidin, BisoC, myopathie statin-induite, une penicillin binding protein.",
          "Du Kétoprofène, sous cisplatine, par Céfépime, le céfépime, aspirine, Aspirine Protect, la Fucidine, Bisoce, myopathie statino-induite, une penicillin binding protein."),
         ("Nævus du cæcum, placenta prævia, Æ.", "Naevus du caecum, placenta praevia, Ae."),
+        # oestr- lost to estr- in the labels (2026-11-15), prefix hyphen and all; the
+        # parasite, the cycle phase and the Oestrogel brand keep theirs.
+        ("Oestradiol, oestrogènes, phyto-oestrogènes, xéno-oestrogènes, hypo-oestrogénie, éthinyl-oestradiol.",
+         "Estradiol, estrogènes, phytoestrogènes, xénoestrogènes, hypoestrogénie, éthinylestradiol."),
+        ("Diéthyl-stilboestrol, hexoestrol, hyperoestrogénie, bêta-oestradiol, traitement oestro progestatif.",
+         "Diéthylstilbestrol, hexestrol, hyperestrogénie, bêta-estradiol, traitement estro progestatif."),
+        ("Oestrus ovis, anoestrus, métaoestrus, cycle oestral, gel d'Oestrogel.",) * 2,
     ])
+    once = normalize_spelling("Phyto-oestrogènes et Oestradiol.")
+    assert normalize_spelling(once) == once, once
     print("test_spelling: OK")
 
 
@@ -403,8 +413,18 @@ def test_accents() -> None:
     check(lambda t: restore_tts_accents(t, tts), [
         ("Perindopril puis l'perindopril, défect.", "Périndopril puis l'périndopril, défect."),
     ])
+    # A typo entry is no accent variant: it must not be inverted into the TTS text, or
+    # ``nefopam`` would be respelled ``néphopam`` (2026-11-15).
+    assert _tts_accent_table()["nefopam"] == "néfopam", "a typo leaked into the TTS respellings"
+    assert restore_tts_accents("Nefopam et perindopril.") == "Néfopam et périndopril."
     # Part of a longer word or a hyphenated compound: untouched.
     assert normalize_accents("antidefect, defect-like", table) == "antidefect, defect-like"
+    # All caps (PARHAF drug lists) takes the table's casing, capitalised at a sentence start
+    # only: was ``Il prend aussi Perindopril`` (2026-11-15).
+    check(lambda t: normalize_accents(t, {"perindipril": "perindopril", "affinitor": "Afinitor"}), [
+        ("Il prend aussi PERINDIPRIL 4 mg. PERINDIPRIL le soir, AFFINITOR.",
+         "Il prend aussi perindopril 4 mg. Perindopril le soir, Afinitor."),
+    ])
     # The committed table, after the drug caser that would put the ANSM accents back.
     for raw, want in [("PERINDOPRIL et énoxaparine, un artéfact, le canal de Wirsüng.",
                        "Perindopril et enoxaparine, un artefact, le canal de Wirsung."),

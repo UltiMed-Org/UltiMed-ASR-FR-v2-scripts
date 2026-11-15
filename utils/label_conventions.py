@@ -1032,6 +1032,9 @@ def normalize_compounds(text: str) -> str:
 # - ``urètre`` / ``urétral`` without the h, everywhere (2.8k against 2.3k over the
 #   noun and its derivatives together; the noun alone preferred ``urèthre``, 741 / 274,
 #   but one rule for the family beats a noun and adjective spelled differently).
+# The ``o`` of a prefix, not of ``oestr``: ``phytoestrogènes`` is phyto + estrogènes.
+_NOT_PREFIX_O = r"(?<![Pp]hyt)(?<![Xx]én)(?<![Hh]yp)(?<![Mm]yc)"
+
 _SPELLING_RULES = (
     (re.compile("œ"), "oe"),
     (re.compile("Œ"), "Oe"),
@@ -1074,6 +1077,17 @@ _SPELLING_RULES = (
     (re.compile(r"\b([Ff])ucidin\b"), r"\1ucidine"),
     (re.compile(r"\bBisoC\b"), "Bisoce"),
     (re.compile(r"\b([Ss])tatin-induit"), r"\1tatino-induit"),
+    # 2026-11-15, author's choice (after the v2 model was trained): the ``estr-`` spelling
+    # (INN ``estradiol``, ``estrogène``) over ``oestr-`` (oestrogènes 242 / estrogènes 101,
+    # oestradiol 196 / estradiol 352). The hyphen ``phyto-oestrogènes`` only split the
+    # o-oe hiatus, so it goes too (``phytoestrogènes``, ``éthinylestradiol``,
+    # ``diéthylstilbestrol``). Untouched: the cycle stage ``oestrus`` (``anoestrus``,
+    # ``métaoestrus``, ``cycle oestral``), the parasite ``Oestrus ovis`` and the brand
+    # ``Oestrogel``.
+    (re.compile(r"\b([Pp]hyto|[Xx]éno|[Mm]yco|[Hh]ypo|[Aa]nti|[ÉéEe]thinyl)-oestr"), r"\1estr"),
+    (re.compile(r"\b([Dd]iéthyl)-(stilb)oestr"), r"\1\2estr"),
+    (re.compile(_NOT_PREFIX_O + r"oestr(?!us|al\b|ogel)"), "estr"),
+    (re.compile(r"\bOestr(?!us|al\b|ogel)"), "Estr"),
 )
 
 
@@ -1431,6 +1445,10 @@ def normalize_accents(text: str, table: dict[str, str] | None = None) -> str:
         w = m.group(0)
         canon = table.get(w.lower())
         if canon is not None:
+            # An all-caps word (``PERINDIPRIL``, PARHAF drug lists) takes the table's own
+            # casing, as the drug caser does: capitalised only at a sentence start.
+            if len(w) > 1 and w.isupper():
+                return _cap(canon) if at_sentence_start(m.string, m.start()) else canon
             return _cap(canon) if w[0].isupper() else canon
         # Elided word missing as a whole (``l'énoxaparine``): look up the bare word.
         elision = re.match(r"[^\W\d_]+['’]", w)
@@ -1447,10 +1465,12 @@ def _n_accents(word: str) -> int:
 
 @lru_cache(maxsize=1)
 def _tts_accent_table() -> dict[str, str]:
-    """``canonical -> accented spelling`` for the accent rewrites that REMOVE accents."""
+    """``canonical -> accented spelling`` for the accent rewrites that REMOVE accents.
+    Only pure accent rewrites: a typo entry (``néphopam`` -> ``nefopam``) must not make
+    the TTS read every correct ``nefopam`` as the typo."""
     out: dict[str, str] = {}
     for form, canon in _accent_table().items():
-        if _n_accents(form) > _n_accents(canon) and _n_accents(form) > _n_accents(out.get(canon, canon)):
+        if fold_key(form) == fold_key(canon) and _n_accents(form) > _n_accents(canon) and _n_accents(form) > _n_accents(out.get(canon, canon)):
             out[canon] = form
     return out
 
@@ -1482,8 +1502,7 @@ _TTS_RESPELLINGS = (
     (re.compile(r"\b([Aa])eruginosa\b"), r"\1éruginosa"),
     (re.compile(r"([Ff])oet"), r"\1ét"),
     (re.compile(r"([Cc])oeli"), r"\1éli"),
-    # not the o of a prefix: ``phytoestrogènes`` is phyto + estrogènes
-    (re.compile(r"(?<![Pp]hyt)(?<![Xx]én)(?<![Hh]yp)(?<![Mm]yc)(?<!o-)oestr"), "éstr"),
+    (re.compile(_NOT_PREFIX_O + r"(?<!o-)oestr"), "éstr"),
     (re.compile(r"\bOestr"), "Éstr"),
     (re.compile(r"(?<=[Ll]ymph)oed"), "éd"),
     (re.compile(r"\b([Mm]acro|[Ff]ibro)adénome"), r"\1-adénome"),
