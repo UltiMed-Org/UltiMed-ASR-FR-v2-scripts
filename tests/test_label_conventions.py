@@ -460,6 +460,20 @@ def test_cefalexine_follows_inn_convention() -> None:
     print("test_cefalexine_follows_inn_convention: OK")
 
 
+def test_accent_rewrite_elides() -> None:
+    """A rewrite that makes a word vowel-initial elides the particle before it: ``Le
+    cestradiol`` -> ``L'estradiol``, ``du`` -> ``de l'``, ``ce`` -> ``cet`` (2026-11-16). A
+    word that was already vowel-initial, or unchanged, keeps its particle as written."""
+    check(lambda t: normalize_accents(t, {"cestradiol": "estradiol", "perindipril": "perindopril"}), [
+        ("Le cestradiol, le CESTRADIOL et LE CESTRADIOL.", "L'estradiol, l'estradiol et L'estradiol."),
+        ("De cestradiol, de la cestradiol, que le cestradiol.", "D'estradiol, de l'estradiol, que l'estradiol."),
+        ("Du cestradiol, au cestradiol, ce cestradiol, qu'on dit cestradiol.",
+         "De l'estradiol, à l'estradiol, cet estradiol, qu'on dit estradiol."),
+        ("Le perindipril, le estradiol, l'cestradiol.", "Le perindopril, le estradiol, l'estradiol."),
+    ])
+    print("test_accent_rewrite_elides: OK")
+
+
 def test_owner_review_rewrites() -> None:
     """The owner's hand review of leftover variants (2026-11-15): brands keep the drug
     caser's capitals, all-caps follows the table casing, ``mésalamine`` keeps the accent
@@ -809,6 +823,7 @@ if __name__ == "__main__":
     test_drug_caser()
     test_accents()
     test_cefalexine_follows_inn_convention()
+    test_accent_rewrite_elides()
     test_owner_review_rewrites()
     test_spelling_fixes_never_reach_tts_source()
     test_compound_spellings()

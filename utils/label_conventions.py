@@ -1426,8 +1426,28 @@ def default_drug_caser() -> DrugCaser:
 # ---------------------------------------------------------------------------
 
 ACCENT_SPELLINGS_PATH = Path(__file__).resolve().parent / "accent_spellings.json"
-# A word with its elision and inner hyphens (``l'olécrâne``, ``sterno-cléïdo-mastoïdien``).
-_ACCENT_WORD_RE = re.compile(r"(?<![\w'’-])(?:[^\W\d_]+['’])?[^\W\d_]+(?:-[^\W\d_]+)*")
+# A word with its elision and inner hyphens (``w``: ``l'olécrâne``, ``sterno-cléïdo-mastoïdien``),
+# with the article or particle before it captured (``el``): a rewrite that makes a word
+# vowel-initial must elide it (``le cestradiol`` -> ``l'estradiol``, ``du`` -> ``de l'``),
+# 2026-11-16. Function words, never table keys, so consuming them is safe.
+# A particle followed by another (``que le cestradiol``) is left to the second one.
+_ELIDABLE = r"(?i:l[ea]|[dmtsnjc]e|(?:jusqu|lorsqu|puisqu|qu)e|du|au)"
+_ACCENT_WORD_RE = re.compile(
+    rf"(?<![\w'’-])(?:(?P<el>{_ELIDABLE}) (?!{_ELIDABLE}\b)(?=[^\W\d_]))?"
+    r"(?P<w>(?:[^\W\d_]+['’])?[^\W\d_]+(?:-[^\W\d_]+)*)")
+_VOWEL_START_RE = re.compile(r"[aeiouàâäéèêëîïôöùûü]", re.IGNORECASE)
+
+
+def _elide(el: str) -> str:
+    """The elided form of ``el`` before a vowel: ``le`` -> ``l'``, ``que`` -> ``qu'``,
+    ``du`` -> ``de l'``, ``au`` -> ``à l'``, ``ce`` -> ``cet `` (no apostrophe)."""
+    low = el.lower()
+    if low in ("du", "au"):
+        head = {"du": "de", "au": "à"}[low]
+        return (head.upper() if el.isupper() else _cap(head) if el[0].isupper() else head) + " l'"
+    if low == "ce":
+        return el + ("T " if el.isupper() else "t ")
+    return el[:-1] + "'"
 
 
 @lru_cache(maxsize=1)
@@ -1443,14 +1463,14 @@ def normalize_accents(text: str, table: dict[str, str] | None = None) -> str:
     ``perindopril``). A capital first letter is kept. Idempotent."""
     table = _accent_table() if table is None else table
 
-    def repl(m: re.Match) -> str:
-        w = m.group(0)
+    def rewrite(m: re.Match) -> str:
+        w = m.group("w")
         canon = table.get(w.lower())
         if canon is not None:
             # An all-caps word (``PERINDIPRIL``, PARHAF drug lists) takes the table's own
             # casing, as the drug caser does: capitalised only at a sentence start.
             if len(w) > 1 and w.isupper():
-                return _cap(canon) if at_sentence_start(m.string, m.start()) else canon
+                return _cap(canon) if at_sentence_start(m.string, m.start("w")) else canon
             return _cap(canon) if w[0].isupper() else canon
         # Elided word missing as a whole (``l'énoxaparine``): look up the bare word.
         elision = re.match(r"[^\W\d_]+['’]", w)
@@ -1458,6 +1478,14 @@ def normalize_accents(text: str, table: dict[str, str] | None = None) -> str:
             return w
         word = w[elision.end():]
         return elision.group(0) + (_cap(canon) if word[0].isupper() else canon)
+
+    def repl(m: re.Match) -> str:
+        el, w, new = m.group("el"), m.group("w"), rewrite(m)
+        if el is None:
+            return new
+        if new != w and _VOWEL_START_RE.match(new) and not _VOWEL_START_RE.match(w):
+            return _elide(el) + new
+        return el + " " + new
     return _ACCENT_WORD_RE.sub(repl, text)
 
 
