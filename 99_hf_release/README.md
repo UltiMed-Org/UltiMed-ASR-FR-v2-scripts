@@ -100,7 +100,7 @@ configs:
 > **The UltiMed effort has three parts:**
 > - the **dataset** (this repository): [Olicorne/UltiMed-ASR-FR-v2](https://huggingface.co/datasets/Olicorne/UltiMed-ASR-FR-v2): 3,300+ hours of French medical dictation, to train or evaluate ASR models;
 > - the **finetuned model**: [Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-onnx](https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-onnx): parakeet-ultra finetuned on that dataset;
-> - the **regex fixes**: [regex-fixes/](https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-onnx/tree/main/regex-fixes) in the finetune's repository: drug-name and medical-term fix rules that should catch many of the remaining errors at almost no cost (text substitution after decoding), and also help models that were not finetuned.
+> - the **regex fixes**: [UltiMed-ASR-FR-v2-regex-fixes](https://github.com/thiswillbeyourgithub/UltiMed-ASR-FR-v2-regex-fixes): drug-name and medical-term fix rules that should catch many of the remaining errors at almost no cost (text substitution after decoding), and also help models that were not finetuned.
 
 *A large, fully documented French medical speech dataset for evaluating or training models, plus an open recipe to rebuild it in any language or topic.*
 
@@ -383,7 +383,7 @@ UltiMed-ASR-FR-v2/
   parrot/      test-*.parquet                                                      # config "parrot_CC_BY-NC-SA_4.0", eval-only
   scripts/     build_parquet.py   parquet_to_nemo.py
   preview_samples/  dictionary/  drugs/  parhaf/  acronyms/  parrot/                # 5 clips + manifest.jsonl each
-  regex-fixes/ MOVED.txt                                                          # points to the fix rules in the finetuned model repo
+  regex-fixes/ MOVED.txt                                                          # points to the fix rules repository        
 ```
 
 - **`<source>/<split>-NNNNN-of-NNNNN.parquet`**: ~2,500 clips each. Every row embeds the **original FLAC bytes verbatim** (byte-identical round-trip) in the `datasets` `Audio` feature, plus `text`, `duration`, `category`, provenance (`group_id`, `group_mode`, `item_index`, `voice`), `filename` and the quality-control columns (`cer`, `cer_tail`, `stt_transcript`, `stt_model`, `n_stt_check`, `cfg_alpha`, `regenerated`, `qc_status`, plus the per-judge `whisper_*`, `whisper_v3_*`, `parakeet_*` columns and `cer_max` / `cer_window_max`, see [Row format](#row-format-and-the-two-text-fields)). The steps that turn the pipeline's manifests into this Parquet (syncing QC results, dropping bad rows, label normalization, validation, `build_parquet.py`) are documented in the scripts repo's README, section [`99_hf_release/` is the dataset repo](https://github.com/thiswillbeyourgithub/UltiMed-ASR-FR-v1-scripts#99_hf_release-is-the-dataset-repo).
