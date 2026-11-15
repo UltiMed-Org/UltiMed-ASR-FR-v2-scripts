@@ -293,6 +293,9 @@ def test_sutures_and_decimals() -> None:
     ])
     # The TTS source keeps what voxtral said.
     assert apply_label_conventions("Vicryl trois zéro", tts_source=True) == "Vicryl trois zéro"
+    # The misspelt brand gets its gauge in the same pass as its spelling: was "Vicryl
+    # trois zéro" after one pass, "Vicryl 3-0" after two (2026-11-15).
+    assert apply_label_conventions("Fermeture au vycril trois zéro.") == "Fermeture au Vicryl 3-0."
     print("test_sutures_and_decimals: OK")
 
 

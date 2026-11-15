@@ -452,8 +452,10 @@ _SCORE_RE = re.compile(rf"({_QTY_SEQ})(\s+sur\s+)(dix|vingt|cent)\b")
 # Suture gauges: "Vicryl trois zéro" (~250), "Vicryl 3 zéro" (~255), "Vicryl 3-0" (~300,
 # also what the model writes). Only right after a suture material, optionally followed
 # by "rapide" / "résorbable" / "fast", because "N zéro" elsewhere is not a gauge
-# ("schéma zéro un zéro", a score). "Vicryl zéro" (a gauge of plain 0) stays.
-_SUTURE_MATERIAL = (r"vicryl|monocryl|prol[èe]ne|pds|surgil[èe]ne|ticron|monofil(?:ament)?|fils?"
+# ("schéma zéro un zéro", a score). "Vicryl zéro" (a gauge of plain 0) stays. The typo
+# "vycril" too: the accent table fixes it only after this has run, so a second pass of
+# ``apply_label_conventions`` turned "vycril trois zéro" into "Vicryl 3-0" (2026-11-15).
+_SUTURE_MATERIAL = (r"v[iy]cr[iy]l|monocryl|prol[èe]ne|pds|surgil[èe]ne|ticron|monofil(?:ament)?|fils?"
                     r"|[dl]'[eé]th[iy]lon|[eé]th[iy]lon|polysorb|fil ?[àa] ?peau|polydioxanone"
                     r"|monosyn|v-?lo[c]?k|velock|flexocrin|nylon|soie|caprosyn|dafilon"
                     r"|polypropyl[èe]ne|r[ée]sorbables?")
