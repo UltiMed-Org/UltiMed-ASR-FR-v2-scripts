@@ -35,9 +35,10 @@ its exported label drops ``Téva`` (BUILD_LOG, same section), and it rides along
 round fixes both. The 2026-11-16 check found no other clip it changes.
 
 The census logs, per table key, how many state rows the rewrite changed and their stems,
-then every key that matched nothing. Two keys are expected to match nothing, as BUILD_LOG
-says: ``actisenan`` (its clip spells it ``Actisénan``, also a key) and anything moved
-since. A key with more clips than the BUILD_LOG table lists means new clips carry it.
+then every key that matched nothing. One key is expected to match nothing, as BUILD_LOG
+says: ``actisenan`` (its clip spells it ``Actisénan``, also a key). The 2026-11-16 dry run
+found 60 clips (59 typo clips + the Téva one) and no other zero-hit key; a key with more
+clips than the BUILD_LOG table lists means new clips carry it.
 
     uv run 21_reopen_resynth_typos.py --out-stems resynth_stems.txt    # census, writes the list
     uv run 21_reopen_resynth_typos.py --apply --out-stems resynth_stems.txt
