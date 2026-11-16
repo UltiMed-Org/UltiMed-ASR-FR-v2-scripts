@@ -925,6 +925,46 @@ equivalent to granting full passwordless root, which is not what the file said.
 The `sudo -E ./driver.sh` flow above is one password prompt for an unattended run that
 lasts hours, and it drops back to your user for every Python pass, so use that.
 
+### Re-synthesizing the held-back spelling fixes (`21_reopen_resynth_typos.py`)
+
+Some label typos change how the word sounds (`PERINDIPRIL`, `Cetriaxone`, `KAREGIC`, `empagliflozin`): voxtral read the typo, so the audio says it, and correcting only the label would make the label disagree with the audio. Those fixes are held back in `RESYNTH_TYPOS` (`07_build_accent_spellings.py`) until their clips are redrawn; the clip list and the reason are in `docs/BUILD_LOG.md`, "Label spelling fixes after the v2 model". This is the one round that redraws them, written with Claude Code.
+
+`21_reopen_resynth_typos.py` is step 1. It reuses `17_reopen_hgvs.py`'s chain with the spelling table as the rewrite, so it touches exactly the files 17 does: each stage's `generated_dataset.jsonl` (label and TTS source), the release manifests the rounds read (`99_hf_release/data/NeMO_files/full.jsonl` and `PARROT/full.jsonl`), and the stage-06 state files, where every row whose TTS source changed is marked `pending_tts` with no reference score. It also strips the generic lab names the export drops (`--generic-labs`, on by default) for the one clip whose audio says `Simvastatine Téva`. Its census logs, per held spelling, how many clips it changes and their stems, then the spellings that matched nothing.
+
+The full sequence, from `06_hotfixes/`:
+
+```sh
+# 1. census only: prints the per-spelling table and writes the stem list, changes nothing
+uv run 21_reopen_resynth_typos.py --out-stems resynth_stems.txt
+
+# 2. rewrite and queue. Not while anything else rewrites the release manifests
+#    (99_hf_release/05_normalize_text.py --apply, another driver round): both replace
+#    the same full.jsonl and the last writer wins.
+uv run 21_reopen_resynth_typos.py --apply --out-stems resynth_stems.txt
+
+# 3. redraw only those clips (inside tmux, the GPU must be free, see below)
+sudo -E MODE=alternate STEMS_FROM=resynth_stems.txt REFRESH_MANIFESTS=0 ACOUSTIC_SCAN=0 \
+    ./driver.sh 2>&1 | tee resynth_driver.out
+```
+
+Env vars step 3 needs, by name (from your shell with `sudo -E`, or from `06_hotfixes/.env`): `CRISPASR_COMPOSE` (path to the CrispASR `docker-compose.yml`), `WDOC_WHISPER_API_KEY` or `CRISPASR_API_KEY` (the ASR judge's key), optionally `WDOC_WHISPER_ENDPOINT` and `STT_MODEL` (default `whisper.cpp/ggml-large-v3-turbo`, the same judge as every other round).
+
+Why these settings:
+
+- `STEMS_FROM=resynth_stems.txt` is what limits the round to these clips: every pass skips any row whose stem is not in the file, so the round costs about 60 clips times `N_IMPROV` (5) draws, minutes of TTS rather than hours. The step log fingerprint includes the file's content, so a new list reruns the pre-steps rather than being skipped as done.
+- `REFRESH_MANIFESTS=0`: step 2 already wrote the new text into the release manifests, and a whole-corpus rebuild (about 18 min) buys nothing for 60 clips. `ACOUSTIC_SCAN=0`: the scan is whole-corpus CPU (30 to 100 min) and not restricted by `STEMS_FROM`. `SYNC_RESULTS` stays at its default 1 so the new audio and QC columns reach the release manifests at the end.
+- `MODE=alternate` (the default, spelled out): the clips start `pending_tts`, so the first useful pass is TTS, then STT scores the draws against the NEW label and promotes a draw only once it clears every gate. A clip no draw fixes ends `exhausted` and the release drops it, which is the right outcome, since its audio still says the typo.
+
+GPU: the round needs the card to itself, as every driver round does (that is why it alternates, see the top of this file). The STT half runs `CRISPASR_STT_SCALE` (default 6) turbo replicas of about 1.6 GB each behind the load balancer on a 24,564 MiB card (`docs/V2_QC_PHASE_PLAN.md`; a `ggml-large-v3` judge is 4,534 MiB per replica, so 4 replicas there). The TTS half is Voxtral, whose two vLLM stages each reserve a fixed fraction of the card: the CrispASR compose (2026-11-16) sets `VOXTRAL_GPU_MEM_UTIL=0.7` for stage 0, plus the packaged 0.1 for stage 1, so about 0.8 x 24 GB = 19.6 GB plus two CUDA contexts. So nothing else can be on the GPU (a training run included) while the driver runs.
+
+How to tell it converged:
+
+- the log (`resynth_driver.out`) prints `=== ... converged: no improvement work left on ...` for the dataset (the stt pass exited 10), then `=== ... every dataset converged. Done. ===`;
+- `improved/driver_steps.log` gains a `done dataset-...` line per dataset and `done sync`;
+- `./01_recursive_improvement.py --report` shows the round's ledger; every stem of `resynth_stems.txt` should end `improved` or `exhausted`, none `pending_tts`.
+
+Afterwards, the label side (`docs/BUILD_LOG.md`, same section, steps 4 and 5): merge `RESYNTH_TYPOS` into `HAND_REWRITES`, add the entries to `utils/accent_spellings.json`, drop `tests/test_label_variant_audit.py::test_resynth_typos_held_back`, then export from `99_hf_release/` (`uv run 05_normalize_text.py`, `--apply`, `uv run scripts/build_parquet.py`).
+
 ## The second opinion: `10_compare_judges.py`
 
 One judge cannot catch its own blind spots. So the phase scores every clip with
