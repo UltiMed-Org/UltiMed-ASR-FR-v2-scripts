@@ -68,7 +68,7 @@ def main() -> int:
         state = Path(tmp) / "full.stt.jsonl"
         state.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
         before = state.read_text().splitlines()
-        stems = t17.reopen_hgvs(state, reopen, mod, True, Counter())
+        stems = t17.reopen_rows(state, reopen, mod, True, Counter())
         after = state.read_text().splitlines()
         got = {Path(r["audio_filepath"]).stem: r for r in map(json.loads, after)}
         a = got["a"]
