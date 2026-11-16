@@ -118,8 +118,11 @@ deleted). The dataset is published (NOTICE + card shipped) at
 `github.com/thiswillbeyourgithub/UltiMed-ASR-FR-v1-scripts`. v2 re-synthesizes the
 same corpus with nine voices and is being built HERE, in this repo, on top of the
 same text corpus and stages; only the audio and the `voice` column differ. **v2
-will be pushed over `-v1`**, i.e. into the existing Hub repo rather than a new
-one, with the rename handled later (user's call, 2026-10-13). So treat the
+goes into the existing Hub repo rather than a new one**: the author first renames
+`Olicorne/UltiMed-ASR-FR-v1` to `-v2` by hand on the Hub, then uploads, so v1
+survives only in that repo's git history (user's call, 2026-11-16, replacing the
+2026-10-13 "push over -v1, rename later"; see the `99_hf_release/` section of
+`README.md`). So treat the
 published v1 audio as replaceable, not frozen: what must not drift is the card,
 which has to be updated in the same operation as the upload (see the v2 TODO
 under "Release obligations") because the moment the audio lands it describes ten
@@ -777,9 +780,9 @@ The derived dataset must ship correct attribution. Summary (full detail in
   v2 and must move in the same edit: the synthesis table's `CFG alpha | 1.3` becomes
   2.0, and the `cfg_alpha` column description ("1.3 for the original pass, 1.0 to 3.0
   for a regenerated clip") becomes 2.0 for the pass and 1.5 to 2.5 for a regenerated
-  clip, matching driver.sh's ladder. Note the plan is to publish v2 under the v1 repo
-  id and rename later, so the card and the data stop agreeing the moment the upload
-  starts: update it with the upload, not after.
+  clip, matching driver.sh's ladder. Note v2 is uploaded into the renamed v1 repo
+  (renamed by hand first, see `README.md`), so the card and the data stop agreeing
+  the moment the upload starts: update it with the upload, not after.
 
 ## Known duplication and gotchas
 

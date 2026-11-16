@@ -101,6 +101,8 @@ Top-level numbered folders are ordered pipeline stages. Files numbered inside a 
 
 Everything on [Olicorne/UltiMed-ASR-FR-v2](https://huggingface.co/datasets/Olicorne/UltiMed-ASR-FR-v2) that is not audio is written and kept here, then pushed by `scripts/upload_to_hf.py`. The dataset card is edited in this repository, not in the Hub's web editor.
 
+**How v2 gets published (user's call, 2026-11-16):** not as a new Hub repo. The existing `Olicorne/UltiMed-ASR-FR-v1` dataset repo is **renamed** to `Olicorne/UltiMed-ASR-FR-v2`, and the v2 upload then goes into it. The rename is a manual step the author does in the Hub's settings page, **before** the upload: `upload_to_hf.py` already targets the `-v2` id and does not rename anything. Afterwards the v1 files (card and audio) exist only in that repo's git history on the Hub, and the old `-v1` URL redirects to the renamed repo. This supersedes the 2026-10-13 plan of pushing over the `-v1` id and renaming later.
+
 | Local file | Where it lands on the Hub |
 |---|---|
 | [`99_hf_release/README.md`](99_hf_release/README.md) | `README.md`, the dataset card. Its YAML header is what declares the per-source subset configs and their licences. |

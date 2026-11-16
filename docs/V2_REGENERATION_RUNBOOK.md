@@ -261,6 +261,6 @@ A second confound, independent of the splits: v2 has slightly more rows than v1 
 
 ## 5. Release obligations when v2 uploads
 
-v2 is pushed **over** the v1 Hub repo id (`Olicorne/UltiMed-ASR-FR-v1`, rename later, user's call of 2026-10-13), so the card and the audio land in one operation or the card lies about what is published. `99_hf_release/README.md` is that published card and still describes v1: one `fr_female` voice, `CFG alpha | 1.3`. It must gain the `voice` column, carry `CFG alpha | 2.0`, and describe `cfg_alpha` as 2.0 for the first pass and **1.2-2.0** for regenerated clips (the descending ladder of commit `bd062a0`, not the old 1.5-2.5).
+v2 is uploaded **into** the existing v1 Hub repo, which the author first renames by hand from `Olicorne/UltiMed-ASR-FR-v1` to `Olicorne/UltiMed-ASR-FR-v2` (user's call of 2026-11-16, replacing the 2026-10-13 "push over -v1, rename later"; see the `99_hf_release/` section of `README.md`), so the card and the audio land in one operation or the card lies about what is published. `99_hf_release/README.md` is that published card and still describes v1: one `fr_female` voice, `CFG alpha | 1.3`. It must gain the `voice` column, carry `CFG alpha | 2.0`, and describe `cfg_alpha` as 2.0 for the first pass and **1.2-2.0** for regenerated clips (the descending ladder of commit `bd062a0`, not the old 1.5-2.5).
 
 See the `TODO (v2)` block under "Release obligations" in `CLAUDE.md` for the full list.
