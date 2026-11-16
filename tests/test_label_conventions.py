@@ -514,6 +514,39 @@ def test_glued_compounds_take_the_accent_choice() -> None:
     print("test_glued_compounds_take_the_accent_choice: OK")
 
 
+def test_colliding_spellings_owner_choices() -> None:
+    """Four spellings the labels wrote several ways, the owner's choices (2026-11-16): the
+    hyphenated ``écho-endoscopie``, ``pipéracilline-tazobactam`` with a hyphen (and no accent,
+    the INN convention), ``cranio-encéphalique`` hyphenated without circumflex, the fused
+    ``antépartum``. Every inflection and casing. Was ``échoendoscopies`` and ``échoendoscope``
+    (missing from the compound table), ``cranioencéphalique`` (the compound table glued it),
+    ``crânio-encéphaliques``, ``ante-partum`` and ``antepartum``."""
+    for forms, want in [
+            (["échoendoscopie", "écho endoscopie", "echoendoscopie", "écho-endoscopie"], "écho-endoscopie"),
+            (["échoendoscopies", "écho endoscopies"], "écho-endoscopies"),
+            (["échoendoscopique", "écho endoscopique"], "écho-endoscopique"),
+            (["échoendoscopiques", "écho endoscopiques"], "écho-endoscopiques"),
+            (["échoendoscope", "écho endoscope"], "écho-endoscope"),
+            (["pipéracilline tazobactam", "piperacilline tazobactam", "pipéracilline-tazobactam"],
+             "piperacilline-tazobactam"),
+            (["crânio-encéphalique", "cranioencéphalique", "crânioencéphalique", "cranio-encéphalique"],
+             "cranio-encéphalique"),
+            (["crânio-encéphaliques", "cranioencéphaliques", "crânioencéphaliques"], "cranio-encéphaliques"),
+            (["ante-partum", "anté-partum", "antepartum", "ante partum", "antépartum"], "antépartum")]:
+        for form in forms:
+            text = f"Il dit {form} ce matin."
+            assert apply_label_conventions(text) == f"Il dit {want} ce matin.", (form, apply_label_conventions(text))
+    check(apply_label_conventions, [
+        ("Échoendoscopie normale. Pipéracilline Tazobactam IV.", "Écho-endoscopie normale. Piperacilline-tazobactam IV."),
+        ("Crânioencéphalique. Traumatisme ANTE-PARTUM.", "Cranio-encéphalique. Traumatisme antépartum."),
+        ("Hémorragie anté-partum, l'échoendoscopie.", "Hémorragie antépartum, l'écho-endoscopie."),
+    ])
+    # The TTS source takes the (silent) separator, never the label's letters.
+    assert apply_label_conventions("Le crânioencéphalique, anté-partum.", tts_source=True) == \
+        "Le crânio-encéphalique, antépartum."
+    print("test_colliding_spellings_owner_choices: OK")
+
+
 def test_spelling_fixes_never_reach_tts_source() -> None:
     """Spelling fixes are LABEL-only: the TTS source is the text the audio was read from,
     so a typo, accent or spelling-winner fix there would make it lie about the audio.
@@ -847,6 +880,7 @@ if __name__ == "__main__":
     test_accent_rewrite_elides()
     test_owner_review_rewrites()
     test_glued_compounds_take_the_accent_choice()
+    test_colliding_spellings_owner_choices()
     test_spelling_fixes_never_reach_tts_source()
     test_compound_spellings()
     test_official_names()

@@ -19,7 +19,7 @@ Canonical form, author's choices (2026-10-08), in order:
 
 1. ``OVERRIDES``: imaging (``TEP-scanner``, ``DaTscan``, ``SUVmax``, ``PICC line``),
    English terms in their dictionary form (``check-list``, ``bypass``, ``Mini-Mental``),
-   Latin locutions hyphenated (``post-partum``), drug combinations hyphenated and salts
+   Latin locutions hyphenated (``post-partum``, but the fused ``antépartum``), drug combinations hyphenated and salts
    spaced (``sacubitril-valsartan``, ``fosfomycine trométamol``), and a few dictionary
    forms (``rémittente-récurrente``, ``diamniotique``, ``kala-azar``, ``moyamoya``).
 2. Rules, applied at the boundary between two parts:
@@ -75,7 +75,7 @@ OVERRIDES = {
     "checklist": "check-list", "bypass": "bypass", "coldcream": "cold-cream", "peakflow": "peak-flow",
     "opencoelioscopie": "open coelioscopie", "minimental": "Mini-Mental",
     # Latin locutions
-    "postpartum": "post-partum", "antepartum": "ante-partum", "perpartum": "per-partum",
+    "postpartum": "post-partum", "perpartum": "per-partum",
     "postmortem": "post-mortem", "postabortum": "post-abortum",
     # lab: the names with digits are label_conventions._OFFICIAL_RULES
     "probnp": "proBNP",
@@ -89,6 +89,13 @@ OVERRIDES = {
     "surinfection": "surinfection", "nitroimidazolé": "nitro-imidazolé",
     "mésoappendiculaire": "mésoappendiculaire", "alphacalcidol": "alphacalcidol",
     "solumédrol": "Solu-Médrol", "simplexvirus": "Simplexvirus",
+    # Owner's choices on colliding spellings (2026-11-16, docs/BUILD_LOG.md): the hyphen for
+    # ``pipéracilline-tazobactam`` and ``cranio-encéphalique`` (the circumflex goes in the
+    # accent table), the fused ``antépartum`` (its accent too). Plurals are families of their own.
+    "pipéracillinetazobactam": "pipéracilline-tazobactam", "piperacillinetazobactam": "piperacilline-tazobactam",
+    "cranioencéphalique": "cranio-encéphalique", "cranioencéphaliques": "cranio-encéphaliques",
+    "crânioencéphalique": "crânio-encéphalique", "crânioencéphaliques": "crânio-encéphaliques",
+    "antepartum": "antepartum", "antépartum": "antépartum",
 }
 NOISE = frozenset("""bassinet latente lata duret sangle labile encéphalique vitréen lapeyronie lefort
     tau tnm ptnm pde pdeb sla cil bbb gd etv pta ret pik diffuk zymad zoneneutre nashtest

@@ -89,7 +89,12 @@ DRUG_WORDS = _drug_words()
 OVERRIDES = {"defect": "défect", "artefact": "artefact", "artefacts": "artefacts", "olecrane": "olécrane",
              "olecranien": "olécranien", "olecranienne": "olécranienne", "retro-olecranienne": "rétro-olécranienne",
              # an enzyme, not a drug (the drug lexicon holds "inhibiteur de protéase")
-             "protease": "protéase"}
+             "protease": "protéase",
+             # Owner's choices on colliding spellings (2026-11-16, docs/BUILD_LOG.md); the
+             # separator is the compound table's (08_build_compound_spellings.py), which runs first.
+             "echoendoscopie": "écho-endoscopie", "cranio-encephalique": "cranio-encéphalique",
+             "cranio-encephaliques": "cranio-encéphaliques", "antepartum": "antépartum",
+             "ante-partum": "antépartum"}
 # Two words, not two spellings: never rewritten.
 KEEP = frozenset("""mole gene genes herpes pyogenes strongyloides anopheles area lutea cinereum reverse
     senior isolement interferent jeunes dependent coccidioides paracoccidioides""".split())
