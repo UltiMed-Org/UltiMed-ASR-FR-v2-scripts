@@ -262,6 +262,8 @@ The v2 model was trained **before** these fixes: its training labels still carry
 
 The rewrites are `HAND_REWRITES` in `06_hotfixes/07_build_accent_spellings.py`, synced by hand into `utils/accent_spellings.json` (the audit TSV the builder reads is not committed; `tests/test_label_variant_audit.py` checks the two match); the `estr-` rule is in `_SPELLING_RULES` of `utils/label_conventions.py`. Dry run of the new conventions against the exported labels (602,776 clips, all splits, token changes / clips touched):
 
+Glued compounds (2026-11-16): `normalize_compounds` runs before the accent table, so a hyphenated key like `crânio-caudale` reached it already glued (`crâniocaudale`) and never matched. Seven words kept two label spellings, and `convention_fixes.tsv` (UltiMed-ASR-FR-v2-regex-fixes) mapped their accent variants to both. `label_conventions._accent_table` now also carries the glued form of every hyphenated key the compound rule glues (an explicit key wins), which gives exactly those seven, all on the owner's choice (dictionary spelling): `craniocaudale`, `craniocervicale`, `craniofacial`, `craniorachidienne` (no circumflex on `cranio`), `antithyroperoxydase` (no accent), `sternocléidomastoïdien` and `sternocléidomastoïdiens`. Label only: the TTS source skips the accent table and keeps `crâniocaudale` (`tests/test_label_conventions.py::test_glued_compounds_take_the_accent_choice`).
+
 | Fix | Tokens | Clips |
 |---|---:|---:|
 | Source-sheet misspellings | 15 | 15 |

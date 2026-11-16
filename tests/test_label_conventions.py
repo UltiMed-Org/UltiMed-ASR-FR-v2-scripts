@@ -494,6 +494,26 @@ def test_owner_review_rewrites() -> None:
     print("test_owner_review_rewrites: OK")
 
 
+def test_glued_compounds_take_the_accent_choice() -> None:
+    """A hyphenated accent variant is glued before the accent table runs, so its glued
+    form must reach the same spelling as every other variant (owner's choice
+    2026-11-16: dictionary spelling, ``cranio`` without circumflex). Was ``crâniocaudale``,
+    ``antithyropéroxydase``, ``sternocleïdomastoïdien``. The TTS source keeps its letters."""
+    for forms, want in [
+            (["crânio-caudale", "cranio-caudale", "crâniocaudale"], "craniocaudale"),
+            (["crânio-cervicale", "cranio-cervicale"], "craniocervicale"),
+            (["crânio-facial", "cranio-facial"], "craniofacial"),
+            (["crânio-rachidienne", "cranio-rachidienne"], "craniorachidienne"),
+            (["anti-thyropéroxydase", "anti-thyroperoxydase"], "antithyroperoxydase"),
+            (["sterno-cleïdo-mastoïdien", "sterno-cléido-mastoïdien", "sterno-cléïdo-mastoïdien"],
+             "sternocléidomastoïdien"),
+            (["sterno-cleïdo-mastoïdiens", "sterno-cléido-mastoïdiens"], "sternocléidomastoïdiens")]:
+        for form in forms:
+            assert apply_label_conventions(form) == want, (form, apply_label_conventions(form), want)
+    assert apply_label_conventions("Le crânio-caudale.", tts_source=True) == "Le crâniocaudale."
+    print("test_glued_compounds_take_the_accent_choice: OK")
+
+
 def test_spelling_fixes_never_reach_tts_source() -> None:
     """Spelling fixes are LABEL-only: the TTS source is the text the audio was read from,
     so a typo, accent or spelling-winner fix there would make it lie about the audio.
@@ -826,6 +846,7 @@ if __name__ == "__main__":
     test_cefalexine_follows_inn_convention()
     test_accent_rewrite_elides()
     test_owner_review_rewrites()
+    test_glued_compounds_take_the_accent_choice()
     test_spelling_fixes_never_reach_tts_source()
     test_compound_spellings()
     test_official_names()

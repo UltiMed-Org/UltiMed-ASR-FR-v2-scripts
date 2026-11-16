@@ -1452,7 +1452,26 @@ def _elide(el: str) -> str:
 
 @lru_cache(maxsize=1)
 def _accent_table() -> dict[str, str]:
-    return json.loads(ACCENT_SPELLINGS_PATH.read_text(encoding="utf-8"))["rewrites"]
+    """The JSON table plus the glued form of each hyphenated entry: ``normalize_compounds``
+    runs first, so ``crânio-caudale`` reaches the table as ``crâniocaudale`` and its
+    hyphenated key alone would miss it (2026-11-16, ``convention_fixes.tsv`` then had
+    ``crâniocaudale`` and ``craniocaudale`` for one word). An explicit key wins."""
+    table = json.loads(ACCENT_SPELLINGS_PATH.read_text(encoding="utf-8"))["rewrites"]
+    return _with_glued_keys(table)
+
+
+def _with_glued_keys(table: dict[str, str]) -> dict[str, str]:
+    """``table`` plus ``glued key -> glued value`` for each hyphenated key the compound
+    rule glues.
+
+    >>> _with_glued_keys({"crânio-caudale": "cranio-caudale", "gastro-entérite": "x"})
+    {'crânio-caudale': 'cranio-caudale', 'gastro-entérite': 'x', 'crâniocaudale': 'craniocaudale'}
+    """
+    glued = {}
+    for form, canon in table.items():
+        if "-" in form and (key := normalize_compounds(form)) != form and key not in table:
+            glued[key] = normalize_compounds(canon)
+    return table | glued
 
 
 def normalize_accents(text: str, table: dict[str, str] | None = None) -> str:
