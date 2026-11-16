@@ -303,6 +303,8 @@ def test_generic_labs() -> None:
     check(strip_generic_labs, [
         ("Sous cholecalciferol Viatris 2,5 milligrammes et perindopril Arrow Génériques 4.", "Sous cholecalciferol 2,5 milligrammes et perindopril 4."),
         ("Ténofovir Mylan : charge virale indétectable.", "Ténofovir : charge virale indétectable."),
+        # accented spelling, as in PARHAF/011560_0000_chirurgie_viscerale_00018_t0_c1
+        ("Simvastatine Téva 20 mg, Monsieur Téva.", "Simvastatine 20 mg, Monsieur Téva."),
         # people named like a lab, and products named after one
         ("Monsieur Teva, l'enfant Mylan Martin, le jeune Mylan, pour Mylan Millet.",) * 2,
         ("Phosphore Sandoz 500, Aspirine Upsa, Accord pour la chirurgie.",) * 2,

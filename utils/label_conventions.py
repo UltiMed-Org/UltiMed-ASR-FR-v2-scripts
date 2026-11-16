@@ -1222,7 +1222,7 @@ _OFFICIAL_RULES = (
 _LAB_RE = re.compile(
     r"(?<!Monsieur)(?<!Madame)(?<!docteur)(?<!Docteur)(?<!enfant)(?<!patient)(?<!patiente)(?<!petit)(?<!jeune)"
     r"(?<!petite)(?<!pour)(?<!de)(?<!et)(?<!Phosphate)(?<!Phosphore)(?<=[^\W\d_]) "
-    r"(?:Arrow|Biogaran|Cristers|Evolugen|Mylan|Sandoz|Substipharm|Teva|Viatris|Zentiva|Zydus|"
+    r"(?:Arrow|Biogaran|Cristers|Evolugen|Mylan|Sandoz|Substipharm|T[eé]va|Viatris|Zentiva|Zydus|"
     r"Almus|Ratiopharm|Qualimed|Krka|Ranbaxy)(?: (?:G[ée]n[ée]riques|France|Santé|Pharma))?\b(?! [A-ZÀ-Ý][a-zà-ÿ])")
 
 
