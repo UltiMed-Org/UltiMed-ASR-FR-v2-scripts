@@ -353,7 +353,33 @@ OWNER_REVIEW = {"patidexaméthasone": "patidexamethasone", "tymoferol": "tymofer
 # capitals is written as is, and the key without the umlaut repairs the labels already
 # built when ``99_hf_release/05_normalize_text.py`` runs again. Casing only: silent, the
 # audio stays.
-EPONYM_CASING = {"mounier-kühn": "Mounier-Kuhn", "mounier-kuhn": "Mounier-Kuhn"}
+# The 10 after Mounier-Kuhn are the other victims of the same case transfer found in
+# the labels on 2026-11-17 (132 occurrences in all); each has its minority spelling and
+# its own lowercase form as keys.
+EPONYM_CASING = {
+    "mounier-kühn": "Mounier-Kuhn",
+    "mounier-kuhn": "Mounier-Kuhn",
+    "gömöri-grocott": "Gomori-Grocott",
+    "gomori-grocott": "Gomori-Grocott",
+    "malpighi-gärtner": "Malpighi-Gartner",
+    "malpighi-gartner": "Malpighi-Gartner",
+    "lich-grégoir": "Lich-Gregoir",
+    "lich-gregoir": "Lich-Gregoir",
+    "gerstmann-straüssler-scheinker": "Gerstmann-Sträussler-Scheinker",
+    "gerstmann-sträussler-scheinker": "Gerstmann-Sträussler-Scheinker",
+    "heřmansky-pudlak": "Hermansky-Pudlak",
+    "hermansky-pudlak": "Hermansky-Pudlak",
+    "chediak-higashi": "Chédiak-Higashi",
+    "chédiak-higashi": "Chédiak-Higashi",
+    "boucher-neuhaüser": "Boucher-Neuhäuser",
+    "boucher-neuhäuser": "Boucher-Neuhäuser",
+    "rokitansky-kuster-hauser": "Rokitansky-Küster-Hauser",
+    "rokitansky-küster-hauser": "Rokitansky-Küster-Hauser",
+    "klippel-trenaunay": "Klippel-Trénaunay",
+    "klippel-trénaunay": "Klippel-Trénaunay",
+    "roch-leri": "Roch-Léri",
+    "roch-léri": "Roch-Léri",
+}
 HAND_REWRITES = (SOURCE_SHEET_FIXES | TYPOS | SPELLING_WINNERS | INN_LEFTOVERS
                  | INN_LEFTOVERS_MAJORITY | OWNER_REVIEW | EPONYM_CASING)
 

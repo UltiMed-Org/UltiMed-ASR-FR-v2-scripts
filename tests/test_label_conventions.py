@@ -508,6 +508,14 @@ def test_eponym_inner_capital_kept() -> None:
                  "syndrome de MOUNIER-KÜHN.", "syndrome de Mounier-Kuhn."]:
         got = apply_label_conventions(text)
         assert got == "syndrome de Mounier-Kuhn.", (text, got)
+    # The other eponyms the same bug lowercased (labels held e.g. ``Gomori-grocott`` 22 times).
+    for text, want in [("coloration de Gömöri-grocott.", "coloration de Gomori-Grocott."),
+                       ("coloration de Gomori-grocott.", "coloration de Gomori-Grocott."),
+                       ("syndrome de Chediak-Higashi.", "syndrome de Chédiak-Higashi."),
+                       ("de Gerstmann-sträussler-scheinker.", "de Gerstmann-Sträussler-Scheinker."),
+                       ("lipomatose de Roch-léri.", "lipomatose de Roch-Léri.")]:
+        got = apply_label_conventions(text)
+        assert got == want, (text, got)
     assert restore_tts_accents("syndrome de Mounier-Kuhn.") == "syndrome de Mounier-Kühn."
     # The TTS source keeps what voxtral read, casing included.
     assert apply_label_conventions("de Mounier-Kühn.", tts_source=True) == "de Mounier-Kühn."
