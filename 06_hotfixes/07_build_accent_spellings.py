@@ -325,8 +325,8 @@ RESYNTH_PHRASES = {
     "par alcoolisation réduction septale": "par réduction septale par alcoolisation",
     # 048782 réseau coordonné de soins en médecine nucléaire
     "réseau en médecine nucléaire réseau coordonné de soins": "réseau coordonné de soins en médecine nucléaire",
-    # 051878 syndrome de peeling cutané
-    "syndrome skin peeling": "syndrome de peeling cutané",
+    # 051878 syndrome de skin peeling
+    "syndrome skin peeling": "syndrome de skin peeling",
     # 053414 surélévation congénitale de la scapula
     "de la scapula surélévation congénitale de l'omoplate": "surélévation congénitale de la scapula",
     "malformation de la scapula surélévation congénitale de l'omoplate": "surélévation congénitale de la scapula",
