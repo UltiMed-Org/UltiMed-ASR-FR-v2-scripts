@@ -170,6 +170,17 @@ def main() -> int:
               t21.make_rewrite(table, True)(TEXTS["d"] + " capsule de réfléchie Glisson")
               == TEXTS["d"] + " capsule de réfléchie Glisson")
 
+    # Every held phrase must be safe to apply twice (a resumed or repeated run), which
+    # fails when a fix still contains a key, e.g. "de X" -> "X" after "antécédents de".
+    pat = t21._phrase_re(phrases)
+    twice = {k: t21.fix_phrases(t21.fix_phrases(k, phrases, pat), phrases, pat) for k in phrases}
+    check("every held phrase is fixed in one pass and stable after",
+          all(twice[k].lower() == phrases[k].lower() for k in phrases),
+          {k: v for k, v in twice.items() if v.lower() != phrases[k].lower()})
+    check("a fix inside its usual sentence is stable too",
+          t21.fix_phrases("aux antécédents de Hutchinson melanotic freckle du visage", phrases, pat)
+          == "aux antécédents de Hutchinson melanotic freckle du visage")
+
     print("FAILED" if failures else "all ok")
     return 1 if failures else 0
 
