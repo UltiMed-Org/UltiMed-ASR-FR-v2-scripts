@@ -22,6 +22,11 @@ a two-key table, so nothing real is read or written:
   * the generic-lab strip (``Simvastatine Téva``) queues its clip under its own census
     key, and is skipped with ``--no-generic-labs``;
   * a row with neither is left byte for byte, and a second run changes nothing;
+  * every release manifest is rewritten, the splits included (``test.jsonl``, a
+    per-source ``PARHAF/train.jsonl``), not only ``full.jsonl``: on 2026-11-17 the
+    splits kept the old text of 329 re-synthesised clips;
+  * ``rewrite_manifests`` alone (21's ``--manifests-only``) rewrites those manifests and
+    leaves the stage and state files byte for byte, nothing queued;
   * the census credits a key per clip and lists keys that matched nothing.
 
     uv run tests/test_reopen_resynth_typos.py
@@ -67,12 +72,26 @@ TEXTS = {
 }
 
 
+#: Split manifests, which must follow full.jsonl (MANIFEST_GLOBS: top level and per source).
+SPLITS = ("99_hf_release/data/NeMO_files/test.jsonl", "99_hf_release/data/NeMO_files/PARHAF/train.jsonl")
+STAGE_AND_STATE = ("01_dictionnary/generated_dataset.jsonl", "06_hotfixes/improved/full.stt.jsonl")
+
+
+def manifest_texts(root: Path) -> dict[str, tuple[str, str]]:
+    """stem -> (text, asr_training_source) of every split manifest row."""
+    return {Path(r["audio_filepath"]).stem: (r["text"], r["asr_training_source"])
+            for rel in SPLITS for r in map(json.loads, (root / rel).read_text().splitlines())}
+
+
 def write_tree(root: Path) -> None:
-    """Lay out the three files the chain reads, each carrying the four texts."""
+    """Lay out the files the chain reads, each carrying the four texts, plus two split
+    manifests (top level and per source) holding a subset, as the release does."""
     for rel, rows in (
         ("01_dictionnary/generated_dataset.jsonl",
          [{"asr_training_target": t, "asr_training_source": t} for t in TEXTS.values()]),
         ("99_hf_release/data/NeMO_files/full.jsonl", [row(s, t) for s, t in TEXTS.items()]),
+        (SPLITS[0], [row(s, TEXTS[s]) for s in "ad"]),
+        (SPLITS[1], [row(s, TEXTS[s]) for s in "bc"]),
         ("06_hotfixes/improved/full.stt.jsonl", [row(s, t) for s, t in TEXTS.items()]),
     ):
         path = root / rel
@@ -132,6 +151,13 @@ def main() -> int:
               manifest[1]["text"] == stage[1]["asr_training_target"]
               == "Elle prend l'estradiol depuis mars.", (manifest[1], stage[1]))
 
+        full = {Path(r["audio_filepath"]).stem: (r["text"], r["asr_training_source"])
+                for r in manifest}
+        splits = manifest_texts(root)
+        check("every split manifest carries full.jsonl's new text",
+              all(splits[s] == full[s] for s in splits) and splits["b"][0] == "Elle prend l'estradiol depuis mars.",
+              (splits, full))
+
         after = snapshot(root)
         again = t21.chain.reopen_chain(t21.make_rewrite(table, True), True, None, "t21_again", root=root)
         check("a second run changes nothing", not again and snapshot(root) == after, again)
@@ -145,6 +171,23 @@ def main() -> int:
     check("load_table lowercases keys and unwraps {'rewrites': ...}",
           t21.load_table(_tmp_json({"rewrites": {"KAREGIC": "Kardegic"}})) == {"karegic": "Kardegic"})
     check("the default table is RESYNTH_TYPOS and non-empty", len(t21.load_table(None)) > 0)
+
+    # The repair for a round that rewrote only full.jsonl: manifests only, nothing else.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        write_tree(root)
+        before = snapshot(root)
+        counts = t21.chain.rewrite_manifests(t21.make_rewrite(table, True), False, root=root)
+        check("a manifests-only dry run writes nothing", snapshot(root) == before)
+        counts = t21.chain.rewrite_manifests(t21.make_rewrite(table, True), True, root=root)
+        after = snapshot(root)
+        check("manifests-only counts the changed rows per manifest",
+              {str(p.relative_to(root)): n for p, n in counts.items() if n}
+              == {"99_hf_release/data/NeMO_files/full.jsonl": 3, SPLITS[0]: 1, SPLITS[1]: 2}, counts)
+        check("manifests-only leaves the stage and state files byte for byte",
+              all(after[rel] == before[rel] for rel in STAGE_AND_STATE))
+        check("manifests-only brings the splits to the new text",
+              manifest_texts(root)["a"][0] == "Périndopril 5 mg le matin.", manifest_texts(root))
 
     # Multi-word fix (the scrambled "capsule de réfléchie Glisson" term, 2026-11-17).
     phrases = {k.lower(): v for k, v in t21.default_phrases().items()}

@@ -20,10 +20,15 @@ rewrites those three to ``vers``; this script applies it to what already exists:
 
 * each stage's ``generated_dataset.jsonl`` (``asr_training_target`` and
   ``asr_training_source``), which the release rebuilds its manifests from;
-* the release manifests the rounds read (the ``HOTFIX_SOURCES`` targets'
-  ``full.jsonl``). The stt pass takes a clip's text from there and drops a stored
-  state row whose text differs as stale, marker included: rewriting the state alone
-  was silently undone by the next round on 2026-10-30 (425 of 430 clips never redrawn);
+* every release manifest (``nemo_manifest.MANIFEST_GLOBS``: the ``full.jsonl`` files
+  AND the splits, down-samples and per-source files the fixtures and training read).
+  The stt pass takes a clip's text from the ``HOTFIX_SOURCES`` targets' ``full.jsonl``
+  and drops a stored state row whose text differs as stale, marker included: rewriting
+  the state alone was silently undone by the next round on 2026-10-30 (425 of 430
+  clips never redrawn). The splits matter as much: until 2026-11-17 only the two
+  ``full.jsonl`` were rewritten, and a round run with ``REFRESH_MANIFESTS=0`` left the
+  329 re-synthesised clips' old text in ``test.jsonl``, ``train.jsonl`` and the rest
+  (``rewrite_manifests`` alone repairs that, see 21's ``--manifests-only``);
 * the stage-06 state files (``text``, ``asr_training_source``, ``asr_training_target``),
   which the tts pass reads its text from. A row whose source changed is marked
   ``pending_tts`` with no reference score, so a draw replaces the audio only once it
@@ -60,7 +65,7 @@ ROOT = _HERE.parent
 RELEASE = ROOT / "99_hf_release"
 sys.path.insert(0, str(ROOT / "utils"))
 from label_conventions import normalize_hgvs  # noqa: E402
-from nemo_manifest import rewrite_jsonl  # noqa: E402
+from nemo_manifest import MANIFEST_GLOBS, rewrite_jsonl  # noqa: E402
 from script_module import load_script  # noqa: E402
 
 STAGES = ("01_dictionnary", "02_drugs", "03_PARHAF", "04_PARROT", "07_acronyms")
@@ -112,9 +117,27 @@ def reopen_rows(state: Path, reopen, mod, apply: bool, counts: Counter,
     return reopen.process(state, mod, select, apply, counts, Counter(), Counter())
 
 
+def rewrite_manifests(rewrite: Rewrite, apply: bool, root: Path = ROOT) -> dict[Path, int]:
+    """Apply `rewrite` to ``STATE_FIELDS`` of every release manifest; changed rows per file.
+
+    Every file of ``MANIFEST_GLOBS`` (the list the release scripts 03 to 06 iterate), so a
+    split never keeps a text its ``full.jsonl`` lost. Touches nothing else: no stage file,
+    no state file, nothing queued, which is what makes it safe to run on its own.
+    """
+    release = root / "99_hf_release"
+    paths = sorted(p for pattern in MANIFEST_GLOBS for p in release.glob(pattern))
+    counts = {p: rewrite_stage(p, apply, STATE_FIELDS, rewrite) for p in paths}
+    for path, n in counts.items():
+        if n:
+            logger.info(f"{path.relative_to(release)}: {n} row(s) rewritten")
+    logger.info(f"{sum(counts.values())} manifest row(s) rewritten in {sum(map(bool, counts.values()))} "
+                f"of {len(counts)} file(s)")
+    return counts
+
+
 def reopen_chain(rewrite: Rewrite, apply: bool, out_stems: Path | None, tag: str,
                  root: Path = ROOT, observe: Observer | None = None) -> set[str]:
-    """Run `rewrite` over the stage files, the release manifests and the state files,
+    """Run `rewrite` over the stage files, every release manifest and the state files,
     marking every state row whose TTS source changed ``pending_tts``; returns the stems.
 
     Parameters
@@ -145,11 +168,7 @@ def reopen_chain(rewrite: Rewrite, apply: bool, out_stems: Path | None, tag: str
         path = root / stage / "generated_dataset.jsonl"
         if path.exists():
             logger.info(f"{stage}: {rewrite_stage(path, apply, rewrite=rewrite)} row(s) rewritten")
-    for _, target in sync.HOTFIX_SOURCES:
-        path = release / target / "full.jsonl"
-        if path.exists():
-            n = rewrite_stage(path, apply, STATE_FIELDS, rewrite)
-            logger.info(f"{target}/full.jsonl: {n} row(s) rewritten")
+    rewrite_manifests(rewrite, apply, root)
     counts, stems = Counter(), set()
     for src, _ in sync.HOTFIX_SOURCES:
         state = (release / src).resolve()

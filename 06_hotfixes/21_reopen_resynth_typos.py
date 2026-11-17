@@ -42,6 +42,7 @@ clips than the BUILD_LOG table lists means new clips carry it.
 
     uv run 21_reopen_resynth_typos.py --out-stems resynth_stems.txt    # census, writes the list
     uv run 21_reopen_resynth_typos.py --apply --out-stems resynth_stems.txt
+    uv run 21_reopen_resynth_typos.py --manifests-only [--apply]   # resync the splits only
 
 ``--table`` takes another JSON table (``{"typo": "fix"}``, or the ``{"rewrites": ...}``
 shape of ``utils/accent_spellings.json``), for a later batch held the same way.
@@ -190,12 +191,19 @@ def report(table: dict[str, str], hits: dict[str, set[str]]) -> None:
               help="Also strip the generic lab names the export drops (the Téva clip).")
 @click.option("--out-stems", default=None, type=click.Path(path_type=Path),
               help="Write the queued stems here (relative to 06_hotfixes/), for the round's STEMS_FROM.")
+@click.option("--manifests-only", is_flag=True,
+              help="Only rewrite the release manifests (every MANIFEST_GLOBS file): no stage or "
+                   "state file, nothing queued. The repair for a round whose splits kept the old text.")
 @click.option("--apply", is_flag=True, help="Write. Without it: census only.")
-def main(table_path: Path | None, generic_labs: bool, out_stems: Path | None, apply: bool) -> None:
+def main(table_path: Path | None, generic_labs: bool, out_stems: Path | None, manifests_only: bool,
+         apply: bool) -> None:
     table = load_table(table_path)
     phrases = {k.lower(): v for k, v in default_phrases().items()} if table_path is None else {}
     logger.info(f"{len(table)} held spelling(s), {len(phrases)} held phrase(s)"
                 f"{' + generic lab names' if generic_labs else ''}")
+    if manifests_only:
+        chain.rewrite_manifests(make_rewrite(table, generic_labs, phrases), apply)
+        return
     observe, hits = make_census(table, generic_labs, phrases)
     stems = chain.reopen_chain(make_rewrite(table, generic_labs, phrases), apply, out_stems, "resynth",
                                observe=observe)
