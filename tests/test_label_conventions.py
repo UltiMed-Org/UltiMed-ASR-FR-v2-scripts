@@ -494,6 +494,26 @@ def test_owner_review_rewrites() -> None:
     print("test_owner_review_rewrites: OK")
 
 
+def test_eponym_inner_capital_kept() -> None:
+    """Inner capitals of a hyphenated table word (2026-11-17). The table is lowercase and
+    the case transfer kept only the first capital, so ``Mounier-Kühn`` became
+    ``Mounier-kuhn`` in the labels (11 clips) and ``béta-hCG`` became ``bêta-hcg``.
+    An acronym part keeps its case; an eponym's capitals come from the table's canonical
+    (``Mounier-Kuhn``), whose umlaut-less key also repairs the labels already built.
+    Drug pairs stay lowercase (``test_colliding_spellings_owner_choices``)."""
+    check(lambda t: normalize_accents(t, {"béta-hcg": "bêta-hcg"}), [
+        ("Un béta-hCG, un Béta-HCG, un béta-hcg.", "Un bêta-hCG, un Bêta-HCG, un bêta-hcg."),
+    ])
+    for text in ["syndrome de Mounier-Kühn.", "syndrome de Mounier-kuhn.", "syndrome de mounier-kühn.",
+                 "syndrome de MOUNIER-KÜHN.", "syndrome de Mounier-Kuhn."]:
+        got = apply_label_conventions(text)
+        assert got == "syndrome de Mounier-Kuhn.", (text, got)
+    assert restore_tts_accents("syndrome de Mounier-Kuhn.") == "syndrome de Mounier-Kühn."
+    # The TTS source keeps what voxtral read, casing included.
+    assert apply_label_conventions("de Mounier-Kühn.", tts_source=True) == "de Mounier-Kühn."
+    print("test_eponym_inner_capital_kept: OK")
+
+
 def test_glued_compounds_take_the_accent_choice() -> None:
     """A hyphenated accent variant is glued before the accent table runs, so its glued
     form must reach the same spelling as every other variant (owner's choice
@@ -879,6 +899,7 @@ if __name__ == "__main__":
     test_cefalexine_follows_inn_convention()
     test_accent_rewrite_elides()
     test_owner_review_rewrites()
+    test_eponym_inner_capital_kept()
     test_glued_compounds_take_the_accent_choice()
     test_colliding_spellings_owner_choices()
     test_spelling_fixes_never_reach_tts_source()

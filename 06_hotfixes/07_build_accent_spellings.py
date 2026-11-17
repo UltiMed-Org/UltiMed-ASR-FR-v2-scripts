@@ -347,8 +347,15 @@ OWNER_REVIEW = {"patidexaméthasone": "patidexamethasone", "tymoferol": "tymofer
                 "thiorphan": "Tiorfan",
                 "cromoglycique": "cromoglicique", "oxyconazole": "oxiconazole",
                 "mesalamine": "mésalamine"}
+# Eponyms whose labels lost their inner capital (2026-11-17, owner: "fix Mounier-Kuhn in
+# the labels too"). The case transfer kept only the first letter, so ``Mounier-Kühn``
+# became ``Mounier-kuhn`` (fixed in ``label_conventions._case_like``). A canonical with
+# capitals is written as is, and the key without the umlaut repairs the labels already
+# built when ``99_hf_release/05_normalize_text.py`` runs again. Casing only: silent, the
+# audio stays.
+EPONYM_CASING = {"mounier-kühn": "Mounier-Kuhn", "mounier-kuhn": "Mounier-Kuhn"}
 HAND_REWRITES = (SOURCE_SHEET_FIXES | TYPOS | SPELLING_WINNERS | INN_LEFTOVERS
-                 | INN_LEFTOVERS_MAJORITY | OWNER_REVIEW)
+                 | INN_LEFTOVERS_MAJORITY | OWNER_REVIEW | EPONYM_CASING)
 
 
 def canonical(forms: list[tuple[str, int]]) -> str | None:

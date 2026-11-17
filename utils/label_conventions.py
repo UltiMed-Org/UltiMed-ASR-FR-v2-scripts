@@ -161,6 +161,49 @@ def _cap(word: str) -> str:
     return word[:1].upper() + word[1:]
 
 
+def _cap_like(form: str, canon: str) -> str:
+    """``canon`` capitalised when ``form`` starts with a capital."""
+    return _cap(canon) if form[:1].isupper() else canon
+
+
+def _letter_case(form: str, canon: str) -> str:
+    """``canon`` with the case of ``form`` letter by letter (same length)."""
+    return "".join(c.upper() if f.isupper() else c for c, f in zip(canon, form))
+
+
+# Separators between the parts of a table word: ``béta-hCG``, ``l'Olécrâne``.
+_PART_SEP_RE = re.compile(r"([-'’])")
+
+
+def _case_like(form: str, canon: str) -> str:
+    """``canon``, a table rewrite of ``form`` (letters may differ), with the case of
+    ``form``: its first letter, plus every part written with an inner capital (an
+    acronym: ``béta-hCG`` -> ``bêta-hCG``, the first-letter-only transfer wrote
+    ``Bêta-hcg``, 2026-11-17).
+
+    >>> _case_like("Béta-hCG", "bêta-hcg"), _case_like("Béta-HCG", "bêta-hcg")
+    ('Bêta-hCG', 'Bêta-HCG')
+    >>> _case_like("Defect", "défect"), _case_like("Pipéracilline-Tazobactam", "piperacilline-tazobactam")
+    ('Défect', 'Piperacilline-tazobactam')
+
+    A part with only an initial capital does not keep it: drug pairs are lowercase
+    (owner's ``piperacilline-tazobactam``), so an eponym's capitals live in the table's
+    canonical instead (``mounier-kühn`` -> ``Mounier-Kuhn``), which is written as is,
+    like any canonical with capitals of its own (``Actiskenan``)."""
+    fparts, cparts = _PART_SEP_RE.split(form), _PART_SEP_RE.split(canon)
+    if canon != canon.lower() or len(fparts) != len(cparts):
+        return _cap_like(form, canon)
+
+    def part(f: str, c: str) -> str:
+        if not any(x.isupper() for x in f[1:]):
+            return c
+        if len(f) == len(c):
+            return _letter_case(f, c)
+        return c.upper() if f.isupper() else c
+    out = "".join(part(f, c) for f, c in zip(fparts, cparts))
+    return _cap_like(form, out)
+
+
 # ---------------------------------------------------------------------------
 # Titles
 # ---------------------------------------------------------------------------
@@ -1132,7 +1175,7 @@ def _transfer_case(form: str, canon: str) -> str:
     ``Gastroentérologie`` + ``gastro-entérologie`` -> ``Gastro-entérologie``. A canonical
     with capitals of its own (``TEP-scanner``, ``proBNP``) is kept as is."""
     if canon != canon.lower():
-        return _cap(canon) if form[0].isupper() else canon
+        return _cap_like(form, canon)
     # (letter, follows a separator) pairs; a capital that only started a part the
     # canonical glues is dropped: ``Moya-Moya`` -> ``Moyamoya``, not ``MoyaMoya``.
     letters = [(c, i > 0 and form[i - 1] in " -") for i, c in enumerate(form) if c not in " -"]
@@ -1479,7 +1522,8 @@ def normalize_accents(text: str, table: dict[str, str] | None = None) -> str:
     (``06_hotfixes/07_build_accent_spellings.py``, author's choices 2026-10-08):
     ``defect`` -> ``défect``, ``artéfact`` -> ``artefact``, ``l'olécrâne`` -> ``l'olécrane``,
     ``wirsüng`` -> ``wirsung``, drug INNs without accents (``périndopril`` ->
-    ``perindopril``). A capital first letter is kept. Idempotent."""
+    ``perindopril``). The first capital and acronym parts keep their case
+    (``_case_like``). Idempotent."""
     table = _accent_table() if table is None else table
 
     def rewrite(m: re.Match) -> str:
@@ -1490,13 +1534,13 @@ def normalize_accents(text: str, table: dict[str, str] | None = None) -> str:
             # casing, as the drug caser does: capitalised only at a sentence start.
             if len(w) > 1 and w.isupper():
                 return _cap(canon) if at_sentence_start(m.string, m.start("w")) else canon
-            return _cap(canon) if w[0].isupper() else canon
+            return _case_like(w, canon)
         # Elided word missing as a whole (``l'énoxaparine``): look up the bare word.
         elision = re.match(r"[^\W\d_]+['’]", w)
         if elision is None or (canon := table.get(w[elision.end():].lower())) is None:
             return w
         word = w[elision.end():]
-        return elision.group(0) + (_cap(canon) if word[0].isupper() else canon)
+        return elision.group(0) + _case_like(word, canon)
 
     def repl(m: re.Match) -> str:
         el, w, new = m.group("el"), m.group("w"), rewrite(m)
@@ -1516,11 +1560,14 @@ def _n_accents(word: str) -> int:
 def _tts_accent_table() -> dict[str, str]:
     """``canonical -> accented spelling`` for the accent rewrites that REMOVE accents.
     Only pure accent rewrites: a typo entry (``néphopam`` -> ``nefopam``) must not make
-    the TTS read every correct ``nefopam`` as the typo."""
+    the TTS read every correct ``nefopam`` as the typo. Keyed lowercase like the table
+    itself, so a canonical with capitals (``Mounier-Kuhn``) is still found."""
     out: dict[str, str] = {}
     for form, canon in _accent_table().items():
-        if fold_key(form) == fold_key(canon) and _n_accents(form) > _n_accents(canon) and _n_accents(form) > _n_accents(out.get(canon, canon)):
-            out[canon] = form
+        key = canon.lower()
+        if fold_key(form) == fold_key(canon) and _n_accents(form) > _n_accents(canon) and _n_accents(form) > _n_accents(out.get(key, canon)):
+            # A canonical with capitals lends them to its TTS form (``Mounier-Kühn``).
+            out[key] = _letter_case(canon, form) if canon != key and len(canon) == len(form) else form
     return out
 
 
