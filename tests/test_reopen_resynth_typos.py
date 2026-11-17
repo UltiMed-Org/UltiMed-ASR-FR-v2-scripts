@@ -146,6 +146,30 @@ def main() -> int:
           t21.load_table(_tmp_json({"rewrites": {"KAREGIC": "Kardegic"}})) == {"karegic": "Kardegic"})
     check("the default table is RESYNTH_TYPOS and non-empty", len(t21.load_table(None)) > 0)
 
+    # Multi-word fix (the scrambled "capsule de réfléchie Glisson" term, 2026-11-17).
+    phrases = {k.lower(): v for k, v in t21.default_phrases().items()}
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        TEXTS["e"] = "La capsule de réfléchie Glisson est lisse."
+        try:
+            write_tree(root)
+        finally:
+            del TEXTS["e"]
+        observe, hits = t21.make_census(table, True, phrases)
+        stems = t21.chain.reopen_chain(t21.make_rewrite(table, True, phrases), True, None, "t21_phrase",
+                                       root=root, observe=observe)
+        state = {Path(r["audio_filepath"]).stem: r for r in map(
+            json.loads, (root / "06_hotfixes/improved/full.stt.jsonl").read_text().splitlines())}
+        check("a held phrase queues its clip", stems == {"a", "b", "c", "e"}, stems)
+        check("the phrase is rewritten in label and source, pending_tts",
+              state["e"]["text"] == state["e"]["asr_training_source"] == "La capsule de Glisson réfléchie est lisse."
+              and state["e"]["improvement"]["status"] == "pending_tts", state["e"])
+        check("the census credits the phrase",
+              sorted(hits.get("capsule de réfléchie glisson", ())) == ["e"], dict(hits))
+        check("without phrases the clip is left alone",
+              t21.make_rewrite(table, True)(TEXTS["d"] + " capsule de réfléchie Glisson")
+              == TEXTS["d"] + " capsule de réfléchie Glisson")
+
     print("FAILED" if failures else "all ok")
     return 1 if failures else 0
 

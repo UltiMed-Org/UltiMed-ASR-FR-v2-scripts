@@ -79,6 +79,36 @@ def default_table() -> dict[str, str]:
     return load_script(_HERE / "07_build_accent_spellings.py", "accent_for_resynth").RESYNTH_TYPOS
 
 
+def default_phrases() -> dict[str, str]:
+    """``RESYNTH_PHRASES`` from ``07_build_accent_spellings.py``: the multi-word fixes."""
+    return load_script(_HERE / "07_build_accent_spellings.py", "accent_for_resynth").RESYNTH_PHRASES
+
+
+def _phrase_re(phrases: dict[str, str]) -> re.Pattern | None:
+    """One case-insensitive pattern for every phrase (whole words, any whitespace between)."""
+    if not phrases:
+        return None
+    alts = (r"\s+".join(map(re.escape, k.split())) for k in sorted(phrases, key=len, reverse=True))
+    return re.compile(r"(?<![\w-])(" + "|".join(alts) + r")(?![\w-])", re.IGNORECASE)
+
+
+def fix_phrases(text: str, phrases: dict[str, str], pat: re.Pattern | None = None) -> str:
+    """Replace each phrase of ``phrases`` (keys lowercase), keeping a capital first letter.
+
+    >>> fix_phrases("La capsule de réfléchie glisson, et Capsule de  réfléchie Glisson.",
+    ...             {"capsule de réfléchie glisson": "capsule de Glisson réfléchie"})
+    'La capsule de Glisson réfléchie, et Capsule de Glisson réfléchie.'
+    """
+    pat = pat or _phrase_re(phrases)
+    if pat is None:
+        return text
+
+    def repl(m: re.Match) -> str:
+        new = phrases[" ".join(m.group(1).lower().split())]
+        return new[0].upper() + new[1:] if m.group(1)[0].isupper() else new
+    return pat.sub(repl, text)
+
+
 def load_table(path: Path | None) -> dict[str, str]:
     """The ``typo -> fix`` table, keys lowercased as ``normalize_accents`` looks them up.
 
@@ -96,37 +126,46 @@ def load_table(path: Path | None) -> dict[str, str]:
     return {k.lower(): v for k, v in table.items()}
 
 
-def make_rewrite(table: dict[str, str], generic_labs: bool):
-    """The text rewrite handed to the chain: optional lab strip, then the spelling table.
+def make_rewrite(table: dict[str, str], generic_labs: bool, phrases: dict[str, str] | None = None):
+    """The text rewrite handed to the chain: optional lab strip, the multi-word fixes
+    (``phrases``, keys lowercase), then the spelling table.
 
-    The lab strip runs first so a lab name never shields or splits a table word. Both
-    halves are idempotent, so a second run (or a resumed one) changes nothing.
+    The lab strip runs first so a lab name never shields or splits a table word. Every
+    part is idempotent, so a second run (or a resumed one) changes nothing.
 
     >>> make_rewrite({"cestradiol": "estradiol"}, True)("le cestradiol et Simvastatine Téva")
     "l'estradiol et Simvastatine"
     """
+    phrases = phrases or {}
+    pat = _phrase_re(phrases)  # compiled once, not per row
+
     def rewrite(text: str) -> str:
-        return normalize_accents(strip_generic_labs(text) if generic_labs else text, table)
+        text = strip_generic_labs(text) if generic_labs else text
+        return normalize_accents(fix_phrases(text, phrases, pat), table)
     return rewrite
 
 
-def make_census(table: dict[str, str], generic_labs: bool):
+def make_census(table: dict[str, str], generic_labs: bool, phrases: dict[str, str] | None = None):
     """An observer for ``reopen_chain`` plus the dict it fills, ``key -> set of stems``.
 
     A changed row is credited to every table key found in its OLD label or source (whole
-    word, case-insensitive, the way ``normalize_accents`` looks words up), and to
+    word, case-insensitive, the way ``normalize_accents`` looks words up), to every phrase
+    of ``phrases`` found there, and to
     ``GENERIC_LAB`` when the lab strip alone changes it. A row the rewrite changed with
     no key found would be a rule this census does not know; it lands under ``"?"`` so it
     cannot go unseen.
     """
     keys = sorted(table, key=len, reverse=True)
     key_re = re.compile(r"(?<![\w-])(" + "|".join(map(re.escape, keys)) + r")(?![\w-])", re.IGNORECASE)
+    phrase_re = _phrase_re(phrases or {})
     hits: dict[str, set[str]] = defaultdict(set)
 
     def observe(before: dict, row: dict) -> None:
         stem = Path(row.get("audio_filepath") or "").stem
         olds = [v for v in before.values() if isinstance(v, str)]
         found = {m.group(1).lower() for text in olds for m in key_re.finditer(text)}
+        if phrase_re is not None:
+            found |= {" ".join(m.group(1).lower().split()) for text in olds for m in phrase_re.finditer(text)}
         if generic_labs and any(strip_generic_labs(t) != t for t in olds):
             found.add(GENERIC_LAB)
         for key in found or {"?"}:
@@ -145,7 +184,8 @@ def report(table: dict[str, str], hits: dict[str, set[str]]) -> None:
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option("--table", "table_path", default=None, type=click.Path(exists=True, dir_okay=False, path_type=Path),
-              help="JSON typo -> fix table. Default: RESYNTH_TYPOS of 07_build_accent_spellings.py.")
+              help="JSON typo -> fix table. Default: RESYNTH_TYPOS of 07_build_accent_spellings.py, "
+                   "plus its multi-word RESYNTH_PHRASES (not applied with --table).")
 @click.option("--generic-labs/--no-generic-labs", default=True, show_default=True,
               help="Also strip the generic lab names the export drops (the Téva clip).")
 @click.option("--out-stems", default=None, type=click.Path(path_type=Path),
@@ -153,11 +193,13 @@ def report(table: dict[str, str], hits: dict[str, set[str]]) -> None:
 @click.option("--apply", is_flag=True, help="Write. Without it: census only.")
 def main(table_path: Path | None, generic_labs: bool, out_stems: Path | None, apply: bool) -> None:
     table = load_table(table_path)
-    logger.info(f"{len(table)} held spelling(s){' + generic lab names' if generic_labs else ''}")
-    observe, hits = make_census(table, generic_labs)
-    stems = chain.reopen_chain(make_rewrite(table, generic_labs), apply, out_stems, "resynth",
+    phrases = {k.lower(): v for k, v in default_phrases().items()} if table_path is None else {}
+    logger.info(f"{len(table)} held spelling(s), {len(phrases)} held phrase(s)"
+                f"{' + generic lab names' if generic_labs else ''}")
+    observe, hits = make_census(table, generic_labs, phrases)
+    stems = chain.reopen_chain(make_rewrite(table, generic_labs, phrases), apply, out_stems, "resynth",
                                observe=observe)
-    report(table, hits)
+    report({**table, **phrases}, hits)
     logger.info(f"{len(stems)} clip(s) {'queued' if apply else 'would be queued'}")
 
 

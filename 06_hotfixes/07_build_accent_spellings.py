@@ -209,6 +209,12 @@ RESYNTH_TYPOS = {
     # Spelling winner and owner's hand review.
     "alfacalcidiol": "alfacalcidol", "laxilix": "Lasilix", "cestradiol": "estradiol"}
 
+# Same hold, for fixes that span several words (``RESYNTH_TYPOS`` is looked up word by word).
+# ``capsule de réfléchie Glisson`` is a scrambled dictionary term (group 023937, 11 clips);
+# the real one is ``capsule de Glisson réfléchie`` (owner, 2026-11-17). Never merged into
+# HAND_REWRITES: once the clips are re-synthesized no label carries the old phrase.
+RESYNTH_PHRASES = {"capsule de réfléchie Glisson": "capsule de Glisson réfléchie"}
+
 # Owner's hand review of the leftover variants (2026-11-15). Brands take the drug caser's
 # capitals (``utils/drug_casing.json``), else a second pass would recase them. ``tymoferol``
 # maps to itself so an all-caps ``TYMOFEROL`` gets the table casing. ``mesalamine`` GAINS
