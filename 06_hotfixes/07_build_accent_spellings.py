@@ -95,9 +95,12 @@ OVERRIDES = {"defect": "défect", "artefact": "artefact", "artefacts": "artefact
              "echoendoscopie": "écho-endoscopie", "cranio-encephalique": "cranio-encéphalique",
              "cranio-encephaliques": "cranio-encéphaliques", "antepartum": "antépartum",
              "ante-partum": "antépartum"}
-# Two words, not two spellings: never rewritten.
+# Two words, not two spellings: never rewritten. Also the families a
+# ``label_conventions._SPELLING_RULES`` rule owns, which runs before the table: the clip
+# ``Hem-o-lok`` (2026-11-18, every spelling and its plural).
 KEEP = frozenset("""mole gene genes herpes pyogenes strongyloides anopheles area lutea cinereum reverse
-    senior isolement interferent jeunes dependent coccidioides paracoccidioides""".split())
+    senior isolement interferent jeunes dependent coccidioides paracoccidioides
+    hemoloc hemolock hemolok hemolocs hemolocks hemoloks hem-o-lock hem-o-lok""".split())
 # Families whose majority, and wordfreq, are wrong (a typo or a lost umlaut won the count).
 FIXED = {"hexokinase": "hexokinase", "chondroitinase": "chondroïtinase", "subarachnoidien": "subarachnoïdien",
          "helix": "hélix", "seton": "séton", "eicosatetraenoique": "eicosatétraénoïque", "sterno-cleido-mastoidiens": "sterno-cléido-mastoïdiens", "frankenhauser": "frankenhäuser", "immunonephelemetrie": "immunonéphélémétrie",
@@ -105,7 +108,7 @@ FIXED = {"hexokinase": "hexokinase", "chondroitinase": "chondroïtinase", "subar
          # Added with --min-cost 3 (2026-10-08): eponyms and brands as their owners write them,
          # French words whose majority lost or gained an accent, and INNs (unaccented).
          "bitot": "bitot", "nuck": "nuck", "kossa": "kossa", "quantiferon": "quantiferon", "ethilon": "ethilon",
-         "hemoloc": "hemoloc", "hemolock": "hemolock", "hemolok": "hemolok", "bevitine": "bévitine",
+         "bevitine": "bévitine",
          "flecaine": "flécaïne", "nephelemetrie": "néphélémétrie", "colpocephalie": "colpocéphalie",
          "myeloproliferative": "myéloproliférative", "extraconique": "extraconique",
          "secretome": "sécrétome", "fadenoperation": "fadenopération",
@@ -383,13 +386,12 @@ EPONYM_CASING = {
 # Owner's spellings (2026-11-18), casing and accents only, silent: ``Sjögren`` (2
 # ``Sjogren`` in labels), the brand ``Teralithe`` without its accent (19 ``Téralithe``;
 # the drug caser still writes ``Téralithe``, which the TTS text keeps, and this row
-# wins for labels), the clip ``Hem-o-lok`` in every casing. The ``hCG`` and ``méti-S``
+# wins for labels). The clip ``Hem-o-lok`` is a rule (see ``KEEP``). The ``hCG`` and ``méti-S``
 # rows only keep the table from undoing ``label_conventions._SPELLING_RULES``, which
 # does those (and ``SARS-CoV-2``): the generated rows wrote ``bêta-hcg`` and ``meti-s``.
 OWNER_SPELLING_20261118 = {
     "sjogren": "Sjögren",
     "téralithe": "Teralithe",
-    "hem-o-lok": "Hem-o-lok", "hém-o-lok": "Hem-o-lok",
     "beta-hcg": "bêta-hCG", "béta-hcg": "bêta-hCG", "bêta-hcg": "bêta-hCG",
     "méti-s": "méti-S",
 }

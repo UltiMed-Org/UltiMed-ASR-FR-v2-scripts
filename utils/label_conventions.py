@@ -1150,6 +1150,12 @@ _SPELLING_RULES = (
     (re.compile(r"\b(?i:sars-cov)\b"), "SARS-CoV"),
     (re.compile(r"\b[Mm][ée]ti-([SsRr])\b"),
      lambda m: ("Méti-" if at_sentence_start(m.string, m.start()) else "méti-") + m.group(1).upper()),
+    # 2026-11-18, the surgical clip brand is ``Hem-o-lok`` in every spelling, plural
+    # ``Hem-o-loks`` (``hem-o-lock`` 39, ``Hemoloc`` 10, ``Hémolocs`` 7, ``hémo lock`` 2 ...
+    # in v2 labels, every one the clip). A rule rather than table rows: the spaced form
+    # is two words and the table keys one. Silent, the audio stays.
+    (re.compile(r"(?<![\w-])(?i:h[eéèê]m[- ]?o[- ]?lo(?:ck|c|k))(?i:(s))?(?![\w-])"),
+     lambda m: "Hem-o-lok" + ("s" if m.group(1) else "")),
 )
 
 
@@ -1168,7 +1174,7 @@ def normalize_spelling(text: str) -> str:
     """``cœur`` -> ``coeur``, ``aigüe`` -> ``aiguë``, ``compte-rendu`` -> ``compte rendu``,
     ``bêta-bloquant`` -> ``bétabloquant``, ``anévrysme`` -> ``anévrisme``, ``urèthre`` ->
     ``urètre``, ``A surveiller.`` -> ``À surveiller.``, ``bêta-HCG`` -> ``bêta-hCG``,
-    ``SARS-CoV2`` -> ``SARS-CoV-2``, ``meti-s`` -> ``méti-S``. Idempotent."""
+    ``SARS-CoV2`` -> ``SARS-CoV-2``, ``meti-s`` -> ``méti-S``, ``hémolocs`` -> ``Hem-o-loks``. Idempotent."""
     for pattern, repl in _SPELLING_RULES:
         text = pattern.sub(repl, text)
     text = _a_grave(text)

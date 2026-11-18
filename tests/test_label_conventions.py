@@ -526,7 +526,7 @@ def test_owner_spellings_20261118() -> None:
     """Owner's spellings (2026-11-18), label-only and silent: ``bêta-hCG`` / ``hCG``,
     ``SARS-CoV-2`` (hyphen before the digit, ``SARS CoV2`` too), ``méti-S`` / ``méti-R`` (capital only at
     a sentence start), ``Sjögren``, ``Teralithe``, ``Hem-o-lok``. Left alone:
-    ``méti sensible``, ``méticilline-sensible``, the dog's ``métis``, ``Hemolok``."""
+    ``méti sensible``, ``méticilline-sensible``, the dog's ``métis``."""
     for text, want in [
         ("Des bêta-HCG, un Bêta-HCG, un bétaHCG, des bêta-hcg. Bêta-hCG positif.",
          "Des bêta-hCG, un Bêta-hCG, un bêta-hCG, des bêta-hCG. Bêta-hCG positif."),
@@ -541,7 +541,7 @@ def test_owner_spellings_20261118() -> None:
         ("Maladie de Sjogren, Gougerot-Sjögren.", "Maladie de Sjögren, Gougerot-Sjögren."),
         ("Téralithe 400, le Teralithe.", "Teralithe 400, le Teralithe."),
         ("Clips HEM-O-LOK, Hem-O-Lok, hem-o-lok, Hém-o-lok, un Hemolok.",
-         "Clips Hem-o-lok, Hem-o-lok, Hem-o-lok, Hem-o-lok, un Hemolok."),
+         "Clips Hem-o-lok, Hem-o-lok, Hem-o-lok, Hem-o-lok, un Hem-o-lok."),
     ]:
         got = apply_label_conventions(text)
         assert got == want, (text, got)
@@ -549,6 +549,28 @@ def test_owner_spellings_20261118() -> None:
     # Label only: the TTS text keeps what voxtral reads.
     assert apply_label_conventions("Téralithe et bêta-HCG.", tts_source=True) == "Téralithe et bêta-HCG."
     print("test_owner_spellings_20261118: OK")
+
+
+def test_hem_o_lok_every_spelling() -> None:
+    """Owner's decision (2026-11-18, second pass): the clip brand is exactly ``Hem-o-lok``
+    whatever the label wrote, the plural keeps its ``s``, whole words only. Label only."""
+    for text, want in [
+        ("Un hem-o-lock vert, un Hemoloc, un Hemolock, un hemolock, un Hemolok, un hemolok.",
+         "Un Hem-o-lok vert, un Hem-o-lok, un Hem-o-lok, un Hem-o-lok, un Hem-o-lok, un Hem-o-lok."),
+        ("Un Hem-O-Lock, un hemoloc, un Hem-o-Lock, un hemoloK, un hémolock, un Hém-o-lock.",
+         "Un Hem-o-lok, un Hem-o-lok, un Hem-o-lok, un Hem-o-lok, un Hem-o-lok, un Hem-o-lok."),
+        ("Trois hémo lock violets, deux Hémolocs, des hémolocks, des Hémoloks. Hemolock posé.",
+         "Trois Hem-o-lok violets, deux Hem-o-loks, des Hem-o-loks, des Hem-o-loks. Hem-o-lok posé."),
+        ("Clip d'hem-o-lock et l'hémoloc.", "Clip d'Hem-o-lok et l'Hem-o-lok."),
+        # Not the clip: other words that start alike stay.
+        ("Hémolyse, hémoglobine, Hemoleven, hémo locale, hémolocalisation.",
+         "Hémolyse, hémoglobine, Hemoleven, hémo locale, hémolocalisation."),
+    ]:
+        got = apply_label_conventions(text)
+        assert got == want, (text, got)
+        assert apply_label_conventions(got) == got, got
+    assert apply_label_conventions("Un hémolock.", tts_source=True) == "Un hémolock."
+    print("test_hem_o_lok_every_spelling: OK")
 
 
 def test_glued_compounds_take_the_accent_choice() -> None:
@@ -938,6 +960,7 @@ if __name__ == "__main__":
     test_owner_review_rewrites()
     test_eponym_inner_capital_kept()
     test_owner_spellings_20261118()
+    test_hem_o_lok_every_spelling()
     test_glued_compounds_take_the_accent_choice()
     test_colliding_spellings_owner_choices()
     test_spelling_fixes_never_reach_tts_source()
