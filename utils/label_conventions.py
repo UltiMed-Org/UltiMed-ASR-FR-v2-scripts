@@ -1133,6 +1133,21 @@ _SPELLING_RULES = (
     (re.compile(r"\b([Dd]iéthyl)-(stilb)oestr"), r"\1\2estr"),
     (re.compile(_NOT_PREFIX_O + r"oestr(?!us|al\b|ogel)"), "estr"),
     (re.compile(r"\bOestr(?!us|al\b|ogel)"), "Estr"),
+    # 2026-11-18, owner's spellings (casing and hyphens, silent: the audio stays). The
+    # hormone is ``hCG`` (``bêta-HCG`` 416, ``bêta-hCG`` 326, bare ``HCG`` 99 in v2
+    # labels, every one the hormone); ``bétaHCG`` gains its hyphen. The virus is
+    # ``SARS-CoV``, ``SARS-CoV-1``, ``SARS-CoV-2`` (``SARS-CoV2`` 25, ``Sars-Cov`` 2).
+    # The staphylococcus phenotype is ``méti-S`` / ``méti-R``, lowercase but at a
+    # sentence start (``Staphylocoque aureus Meti-S``); the long forms
+    # (``méticilline-sensible``) and ``méti sensible`` are left alone. These are
+    # rules, not table rows, because the table would keep a mid-sentence capital and
+    # capitalise an acronym at a sentence start (``HCG à 4500`` would stay ``HCG``).
+    (re.compile(r"\b([Bb])[êée]ta[- ]?(?i:hcg)\b"), r"\1êta-hCG"),
+    (re.compile(r"(?<![\w-])(?:HCG|hcg)\b"), "hCG"),
+    (re.compile(r"\b(?i:sars-cov)[- ]?(\d)\b"), r"SARS-CoV-\1"),
+    (re.compile(r"\b(?i:sars-cov)\b"), "SARS-CoV"),
+    (re.compile(r"\b[Mm][ée]ti-([SsRr])\b"),
+     lambda m: ("Méti-" if at_sentence_start(m.string, m.start()) else "méti-") + m.group(1).upper()),
 )
 
 
@@ -1150,7 +1165,8 @@ def _a_grave(text: str) -> str:
 def normalize_spelling(text: str) -> str:
     """``cœur`` -> ``coeur``, ``aigüe`` -> ``aiguë``, ``compte-rendu`` -> ``compte rendu``,
     ``bêta-bloquant`` -> ``bétabloquant``, ``anévrysme`` -> ``anévrisme``, ``urèthre`` ->
-    ``urètre``, ``A surveiller.`` -> ``À surveiller.`` Idempotent."""
+    ``urètre``, ``A surveiller.`` -> ``À surveiller.``, ``bêta-HCG`` -> ``bêta-hCG``,
+    ``SARS-CoV2`` -> ``SARS-CoV-2``, ``meti-s`` -> ``méti-S``. Idempotent."""
     for pattern, repl in _SPELLING_RULES:
         text = pattern.sub(repl, text)
     text = _a_grave(text)

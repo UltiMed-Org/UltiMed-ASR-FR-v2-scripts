@@ -133,7 +133,7 @@ TYPOS = {"azythromycine": "azithromycine", "gentamycine": "gentamicine", "cloxac
          "arthéméter": "artéméther", "fénothérol": "fénotérol",
          "isétionate": "iséthionate", "syncitial": "syncytial",
          "natyspray": "Natispray", "flamazine": "Flammazine", "immovane": "Imovane",
-         "zythromax": "Zithromax", "théralite": "Téralithe", "ferrinject": "Ferinject",
+         "zythromax": "Zithromax", "théralite": "Teralithe", "ferrinject": "Ferinject",
          "vycril": "Vicryl", "bêtadine": "bétadine", "betadine": "bétadine",
          # Sound-changing, but no clip in the release carries it, so nothing to re-synthesize.
          "actiksenan": "Actiskenan"}
@@ -201,7 +201,7 @@ RESYNTH_TYPOS = {
     "tezepilumab": "tezepelumab", "rilmenildine": "rilmenidine", "teimocilline": "temocilline",
     "bénzatine": "benzathine", "métrondiazole": "métronidazole", "lévifloxacine": "levofloxacine",
     "acétrétine": "acitrétine", "eczétimibe": "ézétimibe", "tocoferol": "tocophérol",
-    "theralithe": "Téralithe", "bacrim": "Bactrim", "ferinjec": "Ferinject",
+    "theralithe": "Teralithe", "bacrim": "Bactrim", "ferinjec": "Ferinject",
     # English INN forms in a French label (voxtral may read the final ``-in`` as a nasal).
     "empagliflozin": "empagliflozine", "midostaurin": "midostaurine", "darbepoetin": "darbepoetine",
     # Source sheet (``02_drugs`` CNAM label), spoken ``polyo-mi-lite``.
@@ -380,8 +380,21 @@ EPONYM_CASING = {
     "roch-leri": "Roch-Léri",
     "roch-léri": "Roch-Léri",
 }
+# Owner's spellings (2026-11-18), casing and accents only, silent: ``Sjögren`` (2
+# ``Sjogren`` in labels), the brand ``Teralithe`` without its accent (19 ``Téralithe``;
+# the drug caser still writes ``Téralithe``, which the TTS text keeps, and this row
+# wins for labels), the clip ``Hem-o-lok`` in every casing. The ``hCG`` and ``méti-S``
+# rows only keep the table from undoing ``label_conventions._SPELLING_RULES``, which
+# does those (and ``SARS-CoV-2``): the generated rows wrote ``bêta-hcg`` and ``meti-s``.
+OWNER_SPELLING_20261118 = {
+    "sjogren": "Sjögren",
+    "téralithe": "Teralithe",
+    "hem-o-lok": "Hem-o-lok", "hém-o-lok": "Hem-o-lok",
+    "beta-hcg": "bêta-hCG", "béta-hcg": "bêta-hCG", "bêta-hcg": "bêta-hCG",
+    "méti-s": "méti-S",
+}
 HAND_REWRITES = (SOURCE_SHEET_FIXES | TYPOS | SPELLING_WINNERS | INN_LEFTOVERS
-                 | INN_LEFTOVERS_MAJORITY | OWNER_REVIEW | EPONYM_CASING)
+                 | INN_LEFTOVERS_MAJORITY | OWNER_REVIEW | EPONYM_CASING | OWNER_SPELLING_20261118)
 
 
 def canonical(forms: list[tuple[str, int]]) -> str | None:

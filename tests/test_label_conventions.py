@@ -522,6 +522,35 @@ def test_eponym_inner_capital_kept() -> None:
     print("test_eponym_inner_capital_kept: OK")
 
 
+def test_owner_spellings_20261118() -> None:
+    """Owner's spellings (2026-11-18), label-only and silent: ``bêta-hCG`` / ``hCG``,
+    ``SARS-CoV-2`` (hyphen before the digit), ``méti-S`` / ``méti-R`` (capital only at
+    a sentence start), ``Sjögren``, ``Teralithe``, ``Hem-o-lok``. Left alone:
+    ``méti sensible``, ``méticilline-sensible``, the dog's ``métis``, ``Hemolok``."""
+    for text, want in [
+        ("Des bêta-HCG, un Bêta-HCG, un bétaHCG, des bêta-hcg. Bêta-hCG positif.",
+         "Des bêta-hCG, un Bêta-hCG, un bêta-hCG, des bêta-hCG. Bêta-hCG positif."),
+        ("HCG à 4500. Le taux d'HCG et de l'HCG, les hCG.",
+         "hCG à 4500. Le taux d'hCG et de l'hCG, les hCG."),
+        ("SARS-CoV2, Sars-Cov, SARS-COV-2, Sars-COV2, SARS-Cov-2, SARS-CoV-1, sars cov 2.",
+         "SARS-CoV-2, SARS-CoV, SARS-CoV-2, SARS-CoV-2, SARS-CoV-2, SARS-CoV-1, SARS-CoV-2."),
+        ("Staphylocoque aureus Meti-s. Meti-S en culture, meti-s, meti-S et méti-R.",
+         "Staphylocoque aureus méti-S. Méti-S en culture, méti-S, méti-S et méti-R."),
+        ("Doré méti sensible, meticilline-sensible, un chien métis.",
+         "Doré méti sensible, meticilline-sensible, un chien métis."),
+        ("Maladie de Sjogren, Gougerot-Sjögren.", "Maladie de Sjögren, Gougerot-Sjögren."),
+        ("Téralithe 400, le Teralithe.", "Teralithe 400, le Teralithe."),
+        ("Clips HEM-O-LOK, Hem-O-Lok, hem-o-lok, Hém-o-lok, un Hemolok.",
+         "Clips Hem-o-lok, Hem-o-lok, Hem-o-lok, Hem-o-lok, un Hemolok."),
+    ]:
+        got = apply_label_conventions(text)
+        assert got == want, (text, got)
+        assert apply_label_conventions(got) == got, got
+    # Label only: the TTS text keeps what voxtral reads.
+    assert apply_label_conventions("Téralithe et bêta-HCG.", tts_source=True) == "Téralithe et bêta-HCG."
+    print("test_owner_spellings_20261118: OK")
+
+
 def test_glued_compounds_take_the_accent_choice() -> None:
     """A hyphenated accent variant is glued before the accent table runs, so its glued
     form must reach the same spelling as every other variant (owner's choice
@@ -908,6 +937,7 @@ if __name__ == "__main__":
     test_accent_rewrite_elides()
     test_owner_review_rewrites()
     test_eponym_inner_capital_kept()
+    test_owner_spellings_20261118()
     test_glued_compounds_take_the_accent_choice()
     test_colliding_spellings_owner_choices()
     test_spelling_fixes_never_reach_tts_source()
