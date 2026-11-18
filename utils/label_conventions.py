@@ -1144,7 +1144,9 @@ _SPELLING_RULES = (
     # capitalise an acronym at a sentence start (``HCG à 4500`` would stay ``HCG``).
     (re.compile(r"\b([Bb])[êée]ta[- ]?(?i:hcg)\b"), r"\1êta-hCG"),
     (re.compile(r"(?<![\w-])(?:HCG|hcg)\b"), "hCG"),
-    (re.compile(r"\b(?i:sars-cov)[- ]?(\d)\b"), r"SARS-CoV-\1"),
+    # ``SARS CoV2`` (6 labels) too: the compound table hyphenates ``SARS CoV 2`` and
+    # ``SARS CoV`` but never sees a digit glued to ``CoV``. ``SARS COVID`` is not the virus name.
+    (re.compile(r"\b(?i:sars[- ]cov)[- ]?(\d)\b"), r"SARS-CoV-\1"),
     (re.compile(r"\b(?i:sars-cov)\b"), "SARS-CoV"),
     (re.compile(r"\b[Mm][ée]ti-([SsRr])\b"),
      lambda m: ("Méti-" if at_sentence_start(m.string, m.start()) else "méti-") + m.group(1).upper()),

@@ -524,7 +524,7 @@ def test_eponym_inner_capital_kept() -> None:
 
 def test_owner_spellings_20261118() -> None:
     """Owner's spellings (2026-11-18), label-only and silent: ``bêta-hCG`` / ``hCG``,
-    ``SARS-CoV-2`` (hyphen before the digit), ``méti-S`` / ``méti-R`` (capital only at
+    ``SARS-CoV-2`` (hyphen before the digit, ``SARS CoV2`` too), ``méti-S`` / ``méti-R`` (capital only at
     a sentence start), ``Sjögren``, ``Teralithe``, ``Hem-o-lok``. Left alone:
     ``méti sensible``, ``méticilline-sensible``, the dog's ``métis``, ``Hemolok``."""
     for text, want in [
@@ -532,8 +532,8 @@ def test_owner_spellings_20261118() -> None:
          "Des bêta-hCG, un Bêta-hCG, un bêta-hCG, des bêta-hCG. Bêta-hCG positif."),
         ("HCG à 4500. Le taux d'HCG et de l'HCG, les hCG.",
          "hCG à 4500. Le taux d'hCG et de l'hCG, les hCG."),
-        ("SARS-CoV2, Sars-Cov, SARS-COV-2, Sars-COV2, SARS-Cov-2, SARS-CoV-1, sars cov 2.",
-         "SARS-CoV-2, SARS-CoV, SARS-CoV-2, SARS-CoV-2, SARS-CoV-2, SARS-CoV-1, SARS-CoV-2."),
+        ("SARS-CoV2, Sars-Cov, SARS-COV-2, Sars-COV2, SARS-Cov-2, SARS-CoV-1, sars cov 2, SARS CoV2, Sars Cov1, SARS COVID.",
+         "SARS-CoV-2, SARS-CoV, SARS-CoV-2, SARS-CoV-2, SARS-CoV-2, SARS-CoV-1, SARS-CoV-2, SARS-CoV-2, SARS-CoV-1, SARS COVID."),
         ("Staphylocoque aureus Meti-s. Meti-S en culture, meti-s, meti-S et méti-R.",
          "Staphylocoque aureus méti-S. Méti-S en culture, méti-S, méti-S et méti-R."),
         ("Doré méti sensible, meticilline-sensible, un chien métis.",
