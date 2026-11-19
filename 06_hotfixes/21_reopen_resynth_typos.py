@@ -40,6 +40,12 @@ says: ``actisenan`` (its clip spells it ``Actisénan``, also a key). The 2026-11
 found 60 clips (59 typo clips + the Téva one) and no other zero-hit key; a key with more
 clips than the BUILD_LOG table lists means new clips carry it.
 
+That round is done: the clips were redrawn, the 2026-11-19 census found none still
+carrying a key, and both default tables are now empty hooks (the typos joined
+``HAND_REWRITES``). With nothing held the script says so and exits at once rather than
+scanning every file for nothing; the generic-lab strip alone is not a reason to scan, since
+the export applies ``strip_generic_labs`` anyway.
+
     uv run 21_reopen_resynth_typos.py --out-stems resynth_stems.txt    # census, writes the list
     uv run 21_reopen_resynth_typos.py --apply --out-stems resynth_stems.txt
     uv run 21_reopen_resynth_typos.py --manifests-only [--apply]   # resync the splits only
@@ -199,6 +205,9 @@ def main(table_path: Path | None, generic_labs: bool, out_stems: Path | None, ma
          apply: bool) -> None:
     table = load_table(table_path)
     phrases = {k.lower(): v for k, v in default_phrases().items()} if table_path is None else {}
+    if not table and not phrases:
+        logger.info("Nothing is held (no spelling, no phrase): nothing to re-synthesize.")
+        return
     logger.info(f"{len(table)} held spelling(s), {len(phrases)} held phrase(s)"
                 f"{' + generic lab names' if generic_labs else ''}")
     if manifests_only:

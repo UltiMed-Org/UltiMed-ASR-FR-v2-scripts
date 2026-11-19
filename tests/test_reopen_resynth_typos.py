@@ -27,7 +27,9 @@ a two-key table, so nothing real is read or written:
     splits kept the old text of 329 re-synthesised clips;
   * ``rewrite_manifests`` alone (21's ``--manifests-only``) rewrites those manifests and
     leaves the stage and state files byte for byte, nothing queued;
-  * the census credits a key per clip and lists keys that matched nothing.
+  * the census credits a key per clip and lists keys that matched nothing;
+  * with nothing held (both default tables empty, as since 2026-11-19) ``main`` exits 0
+    at once instead of scanning every file.
 
     uv run tests/test_reopen_resynth_typos.py
 
@@ -179,7 +181,10 @@ def main() -> int:
 
     check("load_table lowercases keys and unwraps {'rewrites': ...}",
           t21.load_table(_tmp_json({"rewrites": {"KAREGIC": "Kardegic"}})) == {"karegic": "Kardegic"})
-    check("the default table is RESYNTH_TYPOS and non-empty", len(t21.load_table(None)) > 0)
+    accent = load_script(ROOT / "06_hotfixes" / "07_build_accent_spellings.py", "accent_test")
+    check("the default tables are RESYNTH_TYPOS and RESYNTH_PHRASES",
+          t21.default_table() == accent.RESYNTH_TYPOS and t21.default_phrases() == accent.RESYNTH_PHRASES)
+    check_nothing_held_exits_early(t21)
 
     # The repair for a round that rewrote only full.jsonl: manifests only, nothing else.
     with tempfile.TemporaryDirectory() as tmp:
@@ -238,6 +243,31 @@ def main() -> int:
 
     print("FAILED" if failures else "all ok")
     return 1 if failures else 0
+
+
+def check_nothing_held_exits_early(t21) -> None:
+    """With both default tables empty (the state after the 2026-11-19 merge) ``main`` logs
+    that nothing is held and returns at once, census or ``--manifests-only``, instead of
+    scanning every stage file and manifest for 35 minutes; one held phrase is enough to scan."""
+    from click.testing import CliRunner
+
+    calls = []
+    saved = (t21.default_table, t21.default_phrases, t21.chain.reopen_chain, t21.chain.rewrite_manifests)
+    t21.chain.reopen_chain = lambda *a, **k: calls.append("reopen_chain") or set()
+    t21.chain.rewrite_manifests = lambda *a, **k: calls.append("rewrite_manifests") or {}
+    t21.default_table = dict
+    t21.default_phrases = dict
+    try:
+        runs = [CliRunner().invoke(t21.main, args) for args in ([], ["--manifests-only"])]
+        runs.append(CliRunner().invoke(t21.main, ["--table", str(_tmp_json({"rewrites": {}}))]))
+        check("nothing held: exit 0 without scanning", all(r.exit_code == 0 for r in runs) and not calls,
+              ([(r.exit_code, r.output, r.exception) for r in runs], calls))
+        t21.default_phrases = lambda: dict(PHRASES)
+        run = CliRunner().invoke(t21.main, [])
+        check("one held phrase is enough to scan", run.exit_code == 0 and calls == ["reopen_chain"],
+              (run.exit_code, run.exception, calls))
+    finally:
+        t21.default_table, t21.default_phrases, t21.chain.reopen_chain, t21.chain.rewrite_manifests = saved
 
 
 def _tmp_json(obj: dict) -> Path:
