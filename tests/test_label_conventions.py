@@ -573,6 +573,27 @@ def test_hem_o_lok_every_spelling() -> None:
     print("test_hem_o_lok_every_spelling: OK")
 
 
+def test_rio_branco_martins_branco_casing() -> None:
+    """Owner's decision (2026-11-19): the eponym is ``Rio Branco`` and the PARHAF
+    signatory ``Martins Branco``, both capitals, whole two-word names only. ``branco``
+    alone, ``Martens Branco`` and the hyphenated ``Rio-Branco`` are left alone."""
+    for text, want in [
+        ("Artère de rio branco, artère de Rio branco, artère de Rio Branco.",
+         "Artère de Rio Branco, artère de Rio Branco, artère de Rio Branco."),
+        ("Le docteur Gerard Rufo martins branco signe le compte rendu.",
+         "Le docteur Gerard Rufo Martins Branco signe le compte rendu."),
+        # (the compound table already glues ``branco-alvéolaire``, so the glued form here)
+        ("Lavage brancoalvéolaire, adénocarcinome brancopulmonaire, Brancotual.",
+         "Lavage brancoalvéolaire, adénocarcinome brancopulmonaire, Brancotual."),
+        ("Docteur Martens Branco, selon Rio-Branco, un branco.",
+         "Docteur Martens Branco, selon Rio-Branco, un branco."),
+    ]:
+        got = apply_label_conventions(text)
+        assert got == want, (text, got)
+        assert apply_label_conventions(got) == got, got
+    print("test_rio_branco_martins_branco_casing: OK")
+
+
 def test_glued_compounds_take_the_accent_choice() -> None:
     """A hyphenated accent variant is glued before the accent table runs, so its glued
     form must reach the same spelling as every other variant (owner's choice
@@ -961,6 +982,7 @@ if __name__ == "__main__":
     test_eponym_inner_capital_kept()
     test_owner_spellings_20261118()
     test_hem_o_lok_every_spelling()
+    test_rio_branco_martins_branco_casing()
     test_glued_compounds_take_the_accent_choice()
     test_colliding_spellings_owner_choices()
     test_spelling_fixes_never_reach_tts_source()

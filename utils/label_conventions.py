@@ -1156,6 +1156,14 @@ _SPELLING_RULES = (
     # is two words and the table keys one. Silent, the audio stays.
     (re.compile(r"(?<![\w-])(?i:h[eéèê]m[- ]?o[- ]?lo(?:ck|c|k))(?i:(s))?(?![\w-])"),
      lambda m: "Hem-o-lok" + ("s" if m.group(1) else "")),
+    # 2026-11-19, owner's decision: the eponym ``Rio Branco`` (artery of Rio Branco) and
+    # the PARHAF signatory ``Martins Branco`` keep both capitals (one label wrote
+    # ``martins branco``; ``rio branco`` / ``Rio branco`` only showed up in STT output).
+    # Rules rather than table rows: the name is two words, and ``branco`` alone must not
+    # be recased (``branco-alvéolaire``, ``Martens Branco``, ``Rio-Branco`` stay).
+    # Casing only, silent.
+    (re.compile(r"(?<![\w-])(?i:rio branco)(?![\w-])"), "Rio Branco"),
+    (re.compile(r"(?<![\w-])(?i:martins branco)(?![\w-])"), "Martins Branco"),
 )
 
 
