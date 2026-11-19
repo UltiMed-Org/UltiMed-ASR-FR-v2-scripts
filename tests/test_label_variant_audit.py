@@ -49,7 +49,7 @@ def test_build_accent_spellings() -> None:
 
 def test_hand_rewrites_committed() -> None:
     """The committed table carries every ``HAND_REWRITES`` entry (the TSV is not in the
-    repo, so the JSON is synced by hand), and every canonical form is final: a value that
+    repo, so the JSON is synced by running ``07_build_accent_spellings.py`` with no TSV), and every canonical form is final: a value that
     is also a key would make ``normalize_accents`` need two passes (2026-11-15)."""
     hand = _load("07_build_accent_spellings.py").HAND_REWRITES
     table = json.loads((HOTFIXES.parent / "utils" / "accent_spellings.json").read_text(encoding="utf-8"))["rewrites"]
@@ -67,7 +67,10 @@ def test_hand_rewrites_committed() -> None:
 
 def test_resynth_typos_held_back() -> None:
     """The typos whose clips still say them stay out of the committed table until those
-    clips are re-synthesized, else the next export puts a label on audio that never said it."""
+    clips are re-synthesized, else the next export puts a label on audio that never said it.
+    ``RESYNTH_TYPOS`` is empty since its 2026-11-16 batch was redrawn and merged into
+    ``HAND_REWRITES`` (2026-11-19), so this passes trivially; it stays as the guard for the
+    next hold."""
     held = _load("07_build_accent_spellings.py").RESYNTH_TYPOS
     table = json.loads((HOTFIXES.parent / "utils" / "accent_spellings.json").read_text(encoding="utf-8"))["rewrites"]
     assert not set(held) & set(table), set(held) & set(table)

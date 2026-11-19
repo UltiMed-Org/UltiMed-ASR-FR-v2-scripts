@@ -32,12 +32,14 @@ against its past participle (``débordé`` / ``déborde``), a word wordfreq know
 
 ``HAND_REWRITES`` (2026-11-15) then adds what the audit cannot see: typos, source-sheet
 misspellings, two right spellings settled by the owner, and accented INNs below
-``--min-cost``. The TSV is not committed, so after editing those dicts without it, merge
-them into the committed JSON by hand (``tests/test_label_variant_audit.py`` checks they match).
+``--min-cost``. The TSV is not committed, so after editing those dicts without it, run
+the script with no TSV: it merges ``HAND_REWRITES`` over the committed JSON and keeps the
+rest of it (``tests/test_label_variant_audit.py`` checks they match).
 
-Run from the repo root on the audit TSV:
+Run from the repo root on the audit TSV, or with none to sync ``HAND_REWRITES`` only:
 
     uv run 06_hotfixes/07_build_accent_spellings.py path/to/variants.tsv
+    uv run 06_hotfixes/07_build_accent_spellings.py
 
 This file was written by Claude Code.
 """
@@ -180,15 +182,16 @@ INN_LEFTOVERS_MAJORITY = {
     "méticilline-sensible": "meticilline-sensible", "méticilline-résistant": "meticilline-résistant",
     "budésonide-formotérol": "budesonide-formotérol", "céfuroxime-axétil": "cefuroxime-axétil",
     "ténofovir-emtricitabine": "tenofovir-emtricitabine"}
-# Typos whose fix changes the SOUND, so every existing clip that carries one has audio
-# saying the typo: fixing the label alone would make it disagree with its audio. Held out
-# of HAND_REWRITES (and the JSON) until those clips are re-synthesized from the fixed text;
-# docs/BUILD_LOG.md ("Label spelling fixes after the v2 model") has the clip ids and the
-# steps. Owner's rule (2026-11-16): every sound-changing fix is held back, and when in doubt
-# it is held (pure accent, case, hyphen or silent-letter fixes are not). The re-synthesis
-# rewrite is ``label_conventions.normalize_accents(text, RESYNTH_TYPOS)``, which also elides
-# the article (``le cestradiol`` -> ``l'estradiol``). ``actisénan`` is how its clip spells it.
-RESYNTH_TYPOS = {
+# Typos whose fix changes the SOUND, so the clips that carried one had audio saying the
+# typo. Owner's rule (2026-11-16): every sound-changing fix is held back in RESYNTH_TYPOS
+# (below) until its clips are re-synthesized, and when in doubt it is held (pure accent,
+# case, hyphen or silent-letter fixes are not). These were that table: their clips were
+# redrawn from the fixed text, and a census on 2026-11-19 (``21_reopen_resynth_typos.py``,
+# every stage file and all 42 release manifests) found no clip still carrying a key, so
+# they are now ordinary HAND_REWRITES, kept as a guard against the typo coming back.
+# docs/BUILD_LOG.md ("Label spelling fixes after the v2 model") has the clip ids.
+# ``actisénan`` is how its clip spelled it.
+RESYNTHESIZED_TYPOS = {
     # First five (2026-11-16), one PARHAF clip each.
     "perindipril": "perindopril", "cetriaxone": "ceftriaxone", "bisorolol": "bisoprolol",
     "actisenan": "Actiskenan", "actisénan": "Actiskenan", "karegic": "Kardégic",
@@ -211,6 +214,15 @@ RESYNTH_TYPOS = {
     "diphtérie-polyomielite-tétanos": "diphtérie-poliomyélite-tétanos",
     # Spelling winner and owner's hand review.
     "alfacalcidiol": "alfacalcidol", "laxilix": "Lasilix", "cestradiol": "estradiol"}
+
+# The hold itself: sound-changing typo fixes whose clips still say the typo, kept out of
+# HAND_REWRITES (and the JSON) until ``21_reopen_resynth_typos.py`` has queued those clips
+# and the driver has redrawn them; then they move to a dict like RESYNTHESIZED_TYPOS above.
+# The re-synthesis rewrite is ``label_conventions.normalize_accents(text, RESYNTH_TYPOS)``,
+# which also elides the article (``le cestradiol`` -> ``l'estradiol``). Empty since
+# 2026-11-19; ``21_reopen_resynth_typos.py`` loads it by name, and
+# ``tests/test_label_variant_audit.py::test_resynth_typos_held_back`` keeps it out of the JSON.
+RESYNTH_TYPOS: dict[str, str] = {}
 
 # Same hold, for fixes that span several words (``RESYNTH_TYPOS`` is looked up word by word),
 # read by ``21_reopen_resynth_typos.py``. Meant for scrambled dictionary terms, e.g. the
@@ -278,7 +290,8 @@ OWNER_SPELLING_20261118 = {
     "méti-s": "méti-S",
 }
 HAND_REWRITES = (SOURCE_SHEET_FIXES | TYPOS | SPELLING_WINNERS | INN_LEFTOVERS
-                 | INN_LEFTOVERS_MAJORITY | OWNER_REVIEW | EPONYM_CASING | OWNER_SPELLING_20261118)
+                 | INN_LEFTOVERS_MAJORITY | OWNER_REVIEW | EPONYM_CASING | OWNER_SPELLING_20261118
+                 | RESYNTHESIZED_TYPOS)
 
 
 def canonical(forms: list[tuple[str, int]]) -> str | None:
@@ -327,12 +340,13 @@ def rewrites(forms: list[tuple[str, int]]) -> dict[str, str]:
 
 
 @click.command()
-@click.argument("variants_tsv", type=click.Path(exists=True))
+@click.argument("variants_tsv", type=click.Path(exists=True), required=False)
 @click.option("--min-cost", default=3, show_default=True, help="Skip families whose minority forms total fewer occurrences.")
 @click.option("--out", type=click.Path(), default=str(ROOT / "utils" / "accent_spellings.json"), show_default=True)
 def main(variants_tsv, min_cost, out):
-    table = {}
-    for line in list(open(variants_tsv, encoding="utf-8"))[1:]:
+    # No audit TSV: start from the committed table and only sync HAND_REWRITES into it.
+    table = {} if variants_tsv else json.loads(Path(out).read_text(encoding="utf-8"))["rewrites"]
+    for line in list(open(variants_tsv, encoding="utf-8"))[1:] if variants_tsv else []:
         kind, cost, homo, shown, _ = line.rstrip("\n").split("\t")
         if kind != "accent" or homo == "1" or int(cost) < min_cost:
             continue
