@@ -50,6 +50,15 @@ failures = []
 #: A small stand-in for RESYNTH_TYPOS: one plain fix, one that makes the word
 #: vowel-initial (so the article must elide), one that no row carries.
 TABLE = {"perindipril": "périndopril", "cestradiol": "estradiol", "nothere": "absent"}
+#: A stand-in for RESYNTH_PHRASES, from its 2026-11-17 batch (the real table is empty once
+#: its clips are redrawn): the first scrambled term, and the four context keys a bare
+#: ``de Hutchinson melanotic freckle`` -> ``Hutchinson ...`` had to be split into, since
+#: that draft was not stable on a second pass.
+PHRASES = {"capsule de réfléchie Glisson": "capsule de Glisson réfléchie",
+           "un de Hutchinson melanotic freckle": "un Hutchinson melanotic freckle",
+           "du de Hutchinson melanotic freckle": "du Hutchinson melanotic freckle",
+           "type de Hutchinson melanotic freckle": "type Hutchinson melanotic freckle",
+           "de de Hutchinson melanotic freckle": "de Hutchinson melanotic freckle"}
 
 
 def check(name: str, ok: bool, detail=None) -> None:
@@ -190,7 +199,7 @@ def main() -> int:
               manifest_texts(root)["a"][0] == "Périndopril 5 mg le matin.", manifest_texts(root))
 
     # Multi-word fix (the scrambled "capsule de réfléchie Glisson" term, 2026-11-17).
-    phrases = {k.lower(): v for k, v in t21.default_phrases().items()}
+    phrases = {k.lower(): v for k, v in PHRASES.items()}
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         TEXTS["e"] = "La capsule de réfléchie Glisson est lisse."
@@ -215,13 +224,16 @@ def main() -> int:
 
     # Every held phrase must be safe to apply twice (a resumed or repeated run), which
     # fails when a fix still contains a key, e.g. "de X" -> "X" after "antécédents de".
-    pat = t21._phrase_re(phrases)
-    twice = {k: t21.fix_phrases(t21.fix_phrases(k, phrases, pat), phrases, pat) for k in phrases}
-    check("every held phrase is fixed in one pass and stable after",
-          all(twice[k].lower() == phrases[k].lower() for k in phrases),
-          {k: v for k, v in twice.items() if v.lower() != phrases[k].lower()})
+    # Checked on the stand-in and on the real table, which guards a future batch.
+    for name, table_ in (("stand-in", phrases),
+                         ("RESYNTH_PHRASES", {k.lower(): v for k, v in t21.default_phrases().items()})):
+        pat = t21._phrase_re(table_)
+        twice = {k: t21.fix_phrases(t21.fix_phrases(k, table_, pat), table_, pat) for k in table_}
+        check(f"every {name} phrase is fixed in one pass and stable after",
+              all(twice[k].lower() == table_[k].lower() for k in table_),
+              {k: v for k, v in twice.items() if v.lower() != table_[k].lower()})
     check("a fix inside its usual sentence is stable too",
-          t21.fix_phrases("aux antécédents de Hutchinson melanotic freckle du visage", phrases, pat)
+          t21.fix_phrases("aux antécédents de Hutchinson melanotic freckle du visage", phrases)
           == "aux antécédents de Hutchinson melanotic freckle du visage")
 
     print("FAILED" if failures else "all ok")

@@ -125,7 +125,7 @@ FIXED = {"hexokinase": "hexokinase", "chondroitinase": "chondroïtinase", "subar
 SOURCE_SHEET_FIXES = {"nalbufine": "nalbuphine", "polyomielite": "poliomyélite",
                       "glycopirronium": "glycopyrronium"}
 # Typos in the labels, the owner's list then a systematic search; brands keep their capital.
-# Only fixes that keep the sound (the sound-changing ones are in RESYNTH_TYPOS below).
+# Only fixes that keep the sound (the sound-changing ones are in RESYNTHESIZED_TYPOS below).
 TYPOS = {"azythromycine": "azithromycine", "gentamycine": "gentamicine", "cloxaciline": "cloxacilline",
          "luspathercept": "luspatercept", "affinitor": "Afinitor", "ellebrato": "Elebrato",
          "clotafact": "Clottafact", "hydrochlorotiazide": "hydrochlorothiazide",
@@ -212,135 +212,17 @@ RESYNTH_TYPOS = {
     # Spelling winner and owner's hand review.
     "alfacalcidiol": "alfacalcidol", "laxilix": "Lasilix", "cestradiol": "estradiol"}
 
-# Same hold, for fixes that span several words (``RESYNTH_TYPOS`` is looked up word by word).
-# These are scrambled dictionary terms: the extraction moved a headword's trailing
-# parenthesis to the front (``moniteur (d'un appareil de radiothérapie)`` became
-# ``d'un appareil de radiothérapie moniteur``) and the sentence generator used the result
-# verbatim. Each key is a term WITH the words around it that make it unambiguous, so no key
-# matches a clip of another term (checked on every stage file, 2026-11-17), and no value
-# contains a key, so a second run changes nothing (``tests/test_reopen_resynth_typos.py``).
-# The comment above each group is the dictionary index and its corrected term. Never merged
-# into HAND_REWRITES: once the clips are re-synthesized no label carries the old phrase.
-RESYNTH_PHRASES = {
-    # 023937, the first one found (owner, 2026-11-17).
-    "capsule de réfléchie Glisson": "capsule de Glisson réfléchie",
-    # 000728 acide peptidonucléique
-    "acide peptidique nucléique": "acide peptidonucléique",
-    # 006233 aspergillose pulmonaire chronique nécrosante
-    "ou semi-invasive aspergillose pulmonaire chronique nécrosante": "ou aspergillose semi-invasive",
-    # 012668 triangle de Codman
-    "un Codman triangle de": "un triangle de Codman au niveau de",
-    # 020198 paralysie faciale du nouveau-né
-    "paralysie du nouveau-né faciale droite": "paralysie faciale droite du nouveau-né",
-    "paralysie du nouveau-né faciale gauche": "paralysie faciale gauche du nouveau-né",
-    "paralysie du nouveau-né faciale gauche complète": "paralysie faciale gauche complète du nouveau-né",
-    "paralysie du nouveau-né faciale droite isolée": "paralysie faciale droite isolée du nouveau-né",
-    # 020322 facteurs temps d'une irradiation
-    "d'une irradiation facteurs temps": "des facteurs temps d'une irradiation",
-    # 020868 FFT
-    "en IRM FFT": "en IRM avec reconstruction par FFT",
-    # 022899 gamma du film
-    "du film gamma": "du gamma du film",
-    "le développement du film gamma": "le développement du film et son gamma",
-    # 022900 gamma
-    "en IRM gamma, le rapport gyromagnétique": "en IRM, le rapport gyromagnétique gamma",
-    # 024271 Goméga
-    "en IRM Goméga": "par le gradient Goméga",
-    "avec séquences en IRM Goméga": "avec séquences utilisant le gradient Goméga",
-    # 024420 Gphi
-    "en IRM Gphi": "à gradient Gphi",
-    # 024974 Gz ou Gs
-    "en IRM Gz ou Gs": "avec gradient Gz ou Gs",
-    "de diffusion et en IRM Gz ou Gs": "de diffusion et à gradient Gz ou Gs",
-    # 026359 High Intensity Transient Signals
-    "en IRM High Intensity Transient Signals": "en IRM, à la recherche de High Intensity Transient Signals",
-    # 027449 hypersignal
-    "retrouve en IRM hypersignal": "retrouve un hypersignal",
-    "montre en IRM hypersignal": "montre un hypersignal",
-    "En IRM hypersignal en séquence": "En IRM, hypersignal en séquence",
-    "recherchera en IRM hypersignal": "recherchera en IRM un hypersignal",
-    "objective en IRM hypersignal": "objective un hypersignal",
-    "évidence en IRM hypersignal": "évidence un hypersignal",
-    # 027769 hyposignal
-    "en IRM hyposignal": "en hyposignal",
-    "avec en IRM hyposignal": "avec un hyposignal",
-    # 028117 image en
-    "image de en": "image en",
-    # 028163 imagerie de l'eau
-    "en IRM imagerie de l'eau": "en IRM par imagerie de l'eau",
-    # 028166 imagerie en tenseur de diffusion
-    "en IRM imagerie en tenseur de diffusion": "en imagerie en tenseur de diffusion",
-    # 028182 imageur de radiothérapie
-    "de radiothérapie imageur": "imageur de radiothérapie",
-    # 028589 incrément
-    "un en informatique incrément": "un incrément",
-    # 028590 incrément
-    "en scanographie incrément": "avec un incrément",
-    "protocole en scanographie incrément": "protocole à incrément",
-    # 028684 indice de qualité d'un rayonnement
-    "d'un rayonnement indice de qualité": "de l'indice de qualité du rayonnement",
-    "paramètre d'un rayonnement indice de qualité": "paramètre indice de qualité du rayonnement",
-    # 030988 laser
-    "en dermatologie laser": "au laser",
-    "traitement en dermatologie laser par laser": "traitement par laser",
-    "séance en dermatologie laser": "séance de laser",
-    # 031324 lésion directement létale
-    "d'une cellule lésion directement létale": "d'une lésion directement létale",
-    "la mort d'une cellule lésion directement létale": "la mort d'une cellule par lésion directement létale",
-    "une atteinte d'une cellule lésion directement létale": "une lésion directement létale",
-    "événements d'une cellule lésion directement létale": "événements de lésion directement létale",
-    "capable d'une cellule lésion directement létale": "capable d'induire une lésion directement létale",
-    # 031330 lésion sublétale
-    "d'une cellule lésion sublétale": "d'une lésion sublétale",
-    "les dommages d'une cellule lésion sublétale": "les lésions sublétales",
-    "réparation d'une cellule lésion sublétale": "réparation des lésions sublétales",
-    "accumulation d'une cellule lésion sublétale": "accumulation de lésions sublétales",
-    "accumulation d'une cellule lésion sublétale non réparée": "accumulation de lésions sublétales non réparées",
-    # 034660 Hutchinson melanotic freckle
-    "un de Hutchinson melanotic freckle": "un Hutchinson melanotic freckle",
-    "du de Hutchinson melanotic freckle": "du Hutchinson melanotic freckle",
-    "type de Hutchinson melanotic freckle": "type Hutchinson melanotic freckle",
-    "de de Hutchinson melanotic freckle": "de Hutchinson melanotic freckle",
-    # 035432 microphtalmie et déficience mentale de Sjögren et Larsson
-    "de Sjögren et Larsson microphtalmie et déficience mentale": "de microphtalmie et déficience mentale de Sjögren et Larsson",
-    # 035858 moniteur d'un appareil de radiothérapie
-    "d'un appareil de radiothérapie moniteur": "du moniteur de l'appareil de radiothérapie",
-    # 036343 multiple
-    "soit des unités multiples de la valeur cible": "soit au-dessus de la valeur cible",
-    "à des unités multiples de la normale": "à plusieurs fois la normale",
-    "soit des unités multiples du seuil": "soit plusieurs fois le seuil",
-    "en deçà des unités multiples de la normale basse": "en deçà de la normale basse",
-    # 039728 ombre compagne
-    "en radiologie ombre compagne": "une ombre compagne",
-    "linéaire en radiologie ombre compagne": "linéaire d'ombre compagne",
-    # 040923 maladie de Paget du mamelon
-    "maladie du mamelon de Paget": "maladie de Paget du mamelon",
-    "maladie du mamelon de Paget droite": "maladie de Paget du mamelon droit",
-    # 042168 pénombre d'un faisceau
-    "d'un faisceau pénombre": "de la pénombre du faisceau",
-    # 042407 période
-    "avec d'un signal périodique période": "avec une période",
-    # 042841 phase d'une maladie
-    "d'une maladie phase": "d'une maladie en phase",
-    "d'une maladie phase par phase": "de sa maladie phase par phase",
-    "d'une maladie phase aiguë puis convalescence": "d'une maladie en phase aiguë puis en convalescence",
-    # 048186 réduction septale par alcoolisation
-    "par alcoolisation réduction septale": "par réduction septale par alcoolisation",
-    # 048782 réseau coordonné de soins en médecine nucléaire
-    "réseau en médecine nucléaire réseau coordonné de soins": "réseau coordonné de soins en médecine nucléaire",
-    # 051878 syndrome de skin peeling
-    "syndrome skin peeling": "syndrome de skin peeling",
-    # 053414 surélévation congénitale de la scapula
-    "de la scapula surélévation congénitale de l'omoplate": "surélévation congénitale de la scapula",
-    "malformation de la scapula surélévation congénitale de l'omoplate": "surélévation congénitale de la scapula",
-    "suspicion de la scapula surélévation congénitale de l'omoplate": "suspicion de surélévation congénitale de la scapula",
-    "cure de la scapula surélévation congénitale de l'omoplate": "cure de surélévation congénitale de la scapula",
-    "antécédent de la scapula surélévation congénitale de l'omoplate": "antécédent de surélévation congénitale de la scapula",
-    # 054944 technique 3DFT
-    "en IRM technique 3DFT": "en technique 3DFT",
-    # 057059 troncature
-    "d'une lentille troncature": "d'une lentille à troncature",
-}
+# Same hold, for fixes that span several words (``RESYNTH_TYPOS`` is looked up word by word),
+# read by ``21_reopen_resynth_typos.py``. Meant for scrambled dictionary terms, e.g. the
+# extraction moved a headword's trailing parenthesis to the front (``moniteur (d'un appareil
+# de radiothérapie)`` became ``d'un appareil de radiothérapie moniteur``). Each key must be a
+# term WITH the words around it that make it unambiguous, so no key matches a clip of another
+# term, and no value may contain a key, so a second run changes nothing
+# (``tests/test_reopen_resynth_typos.py``). Never merged into HAND_REWRITES: once the clips are
+# re-synthesized no label carries the old phrase. Empty since the 2026-11-17 batch (78
+# phrases) was redrawn and a census on 2026-11-19 found no clip still carrying one;
+# those entries are in git history.
+RESYNTH_PHRASES: dict[str, str] = {}
 
 # Owner's hand review of the leftover variants (2026-11-15). Brands take the drug caser's
 # capitals (``utils/drug_casing.json``), else a second pass would recase them. ``tymoferol``
