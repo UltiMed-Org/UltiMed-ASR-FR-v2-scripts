@@ -1162,10 +1162,35 @@ _SPELLING_RULES = (
     # the PARHAF signatory ``Martins Branco`` keep both capitals (one label wrote
     # ``martins branco``; ``rio branco`` / ``Rio branco`` only showed up in STT output).
     # Rules rather than table rows: the name is two words, and ``branco`` alone must not
-    # be recased (``branco-alvéolaire``, ``Martens Branco``, ``Rio-Branco`` stay).
-    # Casing only, silent.
-    (re.compile(r"(?<![\w-])(?i:rio branco)(?![\w-])"), "Rio Branco"),
+    # be recased (``branco-alvéolaire``, ``Martens Branco`` stay). ``Rio-Branco`` loses its
+    # hyphen since 2026-11-20 (owner). Casing only, silent.
+    (re.compile(r"(?<![\w-])(?i:rio[- ]branco)(?![\w-])"), "Rio Branco"),
     (re.compile(r"(?<![\w-])(?i:martins branco)(?![\w-])"), "Martins Branco"),
+    # 2026-11-20, owner's brand spellings: ``Diffu-K`` (``Diffuk``, ``DiffuK``, ``diffU-K``
+    # ...), ``Gonal-F`` (``gonal-F``, ``Gonal-f``; the owner knows the maker writes
+    # ``GONAL-f``), ``Di-Hydan``, ``Co-Renitec``. Rules rather than ``drug_casing.json``
+    # rows: DrugCaser recases each hyphen part on its own (``DI`` and ``CO`` have no entry
+    # and stay ALLCAPS, ``GONAL`` maps to ``gonal``), and a table row would also reach
+    # ``asr_training_source``, which the caser recases with ``tts_source=True``. The
+    # caser runs after these rules and leaves their output alone (no ALLCAPS part longer
+    # than one letter, no ``variants`` key), so a second pass changes nothing.
+    (re.compile(r"(?<![\w-])(?i:diffu-?k)(?![\w-])"), "Diffu-K"),
+    (re.compile(r"(?<![\w-])(?i:gonal-f)(?![\w-])"), "Gonal-F"),
+    (re.compile(r"(?<![\w-])(?i:di-hydan)(?![\w-])"), "Di-Hydan"),
+    (re.compile(r"(?<![\w-])(?i:co-r[eé]nitec)(?![\w-])"), "Co-Renitec"),
+    # 2026-11-20, owner: casing and hyphens the v2 regex rules disagreed with, all silent.
+    # ``ostéogenèse imparfaite`` and ``esomeprazole`` are common nouns, so the capital goes
+    # mid-sentence only (``d'Ostéogenèse Imparfaite``, ``l'Esomeprazole``); the INN keeps the
+    # spelling the corpus uses (the ANSM ``ésoméprazole`` would change the sound).
+    (re.compile(r"\bQuantiFERON\b"), "Quantiferon"),
+    (re.compile(r"\bOstéogenèse Imparfaite\b"),
+     lambda m: ("Ostéogenèse" if at_sentence_start(m.string, m.start()) else "ostéogenèse") + " imparfaite"),
+    (re.compile(r"\bEsomeprazole\b"),
+     lambda m: m.group(0) if at_sentence_start(m.string, m.start()) else "esomeprazole"),
+    (re.compile(r"\b([Cc])ranio caudale(s?)\b"), r"\1raniocaudale\2"),
+    (re.compile(r"\b([Rr])e-(ascension|épithélialisation)"), r"\1é\2"),
+    # ``antithyroglobuline``, the form the other 35 labels use.
+    (re.compile(r"\b([Aa])nti-[Tt]hyroglobuline"), r"\1ntithyroglobuline"),
 )
 
 

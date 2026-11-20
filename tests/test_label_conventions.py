@@ -608,7 +608,8 @@ def test_hem_o_lok_every_spelling() -> None:
 def test_rio_branco_martins_branco_casing() -> None:
     """Owner's decision (2026-11-19): the eponym is ``Rio Branco`` and the PARHAF
     signatory ``Martins Branco``, both capitals, whole two-word names only. ``branco``
-    alone, ``Martens Branco`` and the hyphenated ``Rio-Branco`` are left alone."""
+    alone and ``Martens Branco`` are left alone; ``Rio-Branco`` loses its hyphen (owner,
+    2026-11-20)."""
     for text, want in [
         ("Artère de rio branco, artère de Rio branco, artère de Rio Branco.",
          "Artère de Rio Branco, artère de Rio Branco, artère de Rio Branco."),
@@ -618,12 +619,47 @@ def test_rio_branco_martins_branco_casing() -> None:
         ("Lavage brancoalvéolaire, adénocarcinome brancopulmonaire, Brancotual.",
          "Lavage brancoalvéolaire, adénocarcinome brancopulmonaire, Brancotual."),
         ("Docteur Martens Branco, selon Rio-Branco, un branco.",
-         "Docteur Martens Branco, selon Rio-Branco, un branco."),
+         "Docteur Martens Branco, selon Rio Branco, un branco."),
     ]:
         got = apply_label_conventions(text)
         assert got == want, (text, got)
         assert apply_label_conventions(got) == got, got
     print("test_rio_branco_martins_branco_casing: OK")
+
+
+def test_owner_brands_and_casing_20261120() -> None:
+    """Owner's decisions (2026-11-20): one form per brand (``Diffu-K``, ``Gonal-F``,
+    ``Di-Hydan``, ``Co-Renitec``), whatever casing the source had, including the ALLCAPS
+    ones the drug caser used to recase part by part (``GONAL-F`` -> ``gonal-F``,
+    ``DI-HYDAN`` -> ``DI-Hydan``). Plus casing and hyphen fixes in running text; a
+    sentence-initial capital stays. Silent, so ``asr_training_source`` is untouched."""
+    for text, want in [
+        ("Diffuk, DiffuK, diffu-K, diffU-K, diffuk, diffuK et DIFFUK.",
+         "Diffu-K, Diffu-K, Diffu-K, Diffu-K, Diffu-K, Diffu-K et Diffu-K."),
+        ("Diffu-K 600 mg. DIFFU-K le soir.", "Diffu-K 600 mg. Diffu-K le soir."),
+        ("Injection de gonal-F, de Gonal-f et de GONAL-F.",
+         "Injection de Gonal-F, de Gonal-F et de Gonal-F."),
+        ("Sous DI-Hydan et DI-HYDAN, puis CO-Renitec, CO-RENITEC et Co-Rénitec.",
+         "Sous Di-Hydan et Di-Hydan, puis Co-Renitec, Co-Renitec et Co-Renitec."),
+        ("Un test QuantiFERON positif, le Quantiferon.",
+         "Un test Quantiferon positif, le Quantiferon."),
+        ("Un cas d'Ostéogenèse Imparfaite. Ostéogenèse Imparfaite sévère.",
+         "Un cas d'ostéogenèse imparfaite. Ostéogenèse imparfaite sévère."),
+        ("Coupe cranio caudale, une re-ascension et la re-épithélialisation.",
+         "Coupe craniocaudale, une réascension et la réépithélialisation."),
+        ("Relais par l'Esomeprazole. L'Esomeprazole 40 mg. Esomeprazole le matin.",
+         "Relais par l'esomeprazole. L'esomeprazole 40 mg. Esomeprazole le matin."),
+        ("Anticorps anti-Thyroglobuline et antithyroglobuline.",
+         "Anticorps antithyroglobuline et antithyroglobuline."),
+        # not decided by the owner, so untouched
+        ("NEO-Mercazole, Klean-PREP, Co-Aprovel, Zyma-D, X-Geva, Herpes zoster.",
+         "NEO-Mercazole, Klean-PREP, Co-Aprovel, Zyma-D, X-Geva, Herpes zoster."),
+    ]:
+        got = apply_label_conventions(text)
+        assert got == want, (text, got)
+        assert apply_label_conventions(got) == got, got
+    assert apply_label_conventions("Un diffuk.", tts_source=True) == "Un diffuk."
+    print("test_owner_brands_and_casing_20261120: OK")
 
 
 def test_glued_compounds_take_the_accent_choice() -> None:
@@ -1015,6 +1051,7 @@ if __name__ == "__main__":
     test_owner_spellings_20261118()
     test_hem_o_lok_every_spelling()
     test_rio_branco_martins_branco_casing()
+    test_owner_brands_and_casing_20261120()
     test_glued_compounds_take_the_accent_choice()
     test_colliding_spellings_owner_choices()
     test_spelling_fixes_never_reach_tts_source()
