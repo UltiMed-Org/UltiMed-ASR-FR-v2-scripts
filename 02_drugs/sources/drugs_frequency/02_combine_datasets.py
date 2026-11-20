@@ -179,7 +179,10 @@ def aggregate_open_medic(
             # The labels are fixed downstream (utils/accent_spellings.json,
             # SOURCE_SHEET_FIXES in 06_hotfixes/07_build_accent_spellings.py, 2026-11-15);
             # correcting them here, against the ANSM substance names, would fix the
-            # TTS text of a future regeneration too.
+            # TTS text of a future regeneration too. NALBUFINE was corrected by hand to
+            # NALBUPHINE in 02_drugs/drugs_frequency_2025.jsonl and drugs_freq_dosages.jsonl
+            # (owner, 2026-11-20), so a rerun of this script brings it back until it is
+            # fixed here.
             label = (row.get("L_ATC5") or "").strip()
             if atc5:
                 by_atc[atc5]["boxes"] += boxes

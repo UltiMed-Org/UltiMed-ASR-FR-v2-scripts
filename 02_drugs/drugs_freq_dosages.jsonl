@@ -3244,7 +3244,7 @@
 {"term": "PROHANCE", "type": "brand", "category": "drugs", "score": 1, "substances": ["GADOTERIDOL"], "index": 3245}
 {"term": "PANRETIN", "type": "brand", "category": "drugs", "score": 1, "substances": [], "index": 3246}
 {"term": "GADOVIST", "type": "brand", "category": "drugs", "score": 1, "substances": ["GADOBUTROL"], "index": 3247}
-{"term": "NALBUFINE", "type": "substance", "category": "drugs", "score": 0, "substances": ["NALBUFINE"], "index": 3248}
+{"term": "NALBUPHINE", "type": "substance", "category": "drugs", "score": 0, "substances": ["NALBUPHINE"], "index": 3248}
 {"term": "ESKETAMINE", "type": "substance", "category": "drugs", "score": 0, "substances": ["ESKETAMINE"], "index": 3249}
 {"term": "ACLOTINE", "type": "brand", "category": "drugs", "score": 0, "substances": [], "index": 3250}
 {"term": "ALLERGENIC", "type": "brand", "category": "drugs", "score": 0, "substances": [], "index": 3251}

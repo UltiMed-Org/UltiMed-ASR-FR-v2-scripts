@@ -3246,7 +3246,7 @@
 {"term": "PROHANCE", "type": "brand", "category": "drugs", "score": 1}
 {"term": "PANRETIN", "type": "brand", "category": "drugs", "score": 1}
 {"term": "GADOVIST", "type": "brand", "category": "drugs", "score": 1}
-{"term": "NALBUFINE", "type": "substance", "category": "drugs", "score": 0}
+{"term": "NALBUPHINE", "type": "substance", "category": "drugs", "score": 0}
 {"term": "ESKETAMINE", "type": "substance", "category": "drugs", "score": 0}
 {"term": "ACLOTINE", "type": "brand", "category": "drugs", "score": 0}
 {"term": "ALLERGENIC", "type": "brand", "category": "drugs", "score": 0}
