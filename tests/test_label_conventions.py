@@ -552,10 +552,10 @@ def test_owner_spellings_20261118() -> None:
 
 
 def test_owner_spellings_20261120() -> None:
-    """Owner's unification (2026-11-20), the silent half: misspelled dictionary headwords
-    get the spelling the rest of the labels use. The sound-changing half (``bégnine``,
-    ``Castelman``, ``lipocalicine``...) is held in ``RESYNTH_TYPOS`` and must NOT move here
-    until its clips are redrawn; English ``peroxisome`` is left alone."""
+    """Owner's unification (2026-11-20): misspelled dictionary headwords get the spelling
+    the rest of the labels use. The sound-changing half (``bégnine``, ``Castelman``,
+    ``lipocalicine``...) was held in ``RESYNTH_TYPOS`` until its 182 clips were redrawn
+    the same day; English ``peroxisome`` is left alone."""
     for text, want in [
         ("Respiration de Kußmaul, maladie de Kußmaul-Maier.", "Respiration de Kussmaul, maladie de Kussmaul-Maier."),
         ("Réaction de Sanarelli-Schwartzman, de Schwartzman.", "Réaction de Sanarelli-Shwartzman, de Shwartzman."),
@@ -569,7 +569,13 @@ def test_owner_spellings_20261120() -> None:
          "Image de Lachapelle, bourse de Tornwaldt, la kallidine, une caryophérine."),
         ("Avec méthyle aminolévulinate. Méthyle aminolévulinate.", "Avec méthyl aminolévulinate. Méthyl aminolévulinate."),
         ("Une lésion bégnine, un peroxisome proliferator-activated receptor, maladie de Castelman.",
-         "Une lésion bégnine, un peroxisome proliferator-activated receptor, maladie de Castelman."),
+         "Une lésion bénigne, un peroxisome proliferator-activated receptor, maladie de Castleman."),
+        ("Lipome pléiomorphe, la lipocalicine, lipocalycine, le damètre, dystropnie, déferrioxamine.",
+         "Lipome pléomorphe, la lipocaline, lipocaline, le diamètre, dystrophie, desferrioxamine."),
+        ("Pneumocystis jiroveci, jirovecii, anneau de Soemmering, faisceau de Soemmerring.",
+         "Pneumocystis jirovecii, jirovecii, anneau de Sömmerring, faisceau de Sömmerring."),
+        ("Syndrome de Jadassohn-Levandovsky, ecthyma gangraenosum.",
+         "Syndrome de Jadassohn-Lewandowsky, ecthyma gangrenosum."),
     ]:
         got = apply_label_conventions(text)
         assert got == want, (text, got)

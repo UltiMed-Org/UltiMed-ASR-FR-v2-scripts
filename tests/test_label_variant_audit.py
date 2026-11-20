@@ -68,8 +68,8 @@ def test_hand_rewrites_committed() -> None:
 def test_resynth_typos_held_back() -> None:
     """The typos whose clips still say them stay out of the committed table until those
     clips are re-synthesized, else the next export puts a label on audio that never said it.
-    ``RESYNTH_TYPOS`` is empty since its 2026-11-16 batch was redrawn and merged into
-    ``HAND_REWRITES`` (2026-11-19), so this passes trivially; it stays as the guard for the
+    ``RESYNTH_TYPOS`` is empty again since its 2026-11-20 batch was redrawn and merged into
+    ``HAND_REWRITES`` the same day, so this passes trivially; it stays as the guard for the
     next hold."""
     held = _load("07_build_accent_spellings.py").RESYNTH_TYPOS
     table = json.loads((HOTFIXES.parent / "utils" / "accent_spellings.json").read_text(encoding="utf-8"))["rewrites"]

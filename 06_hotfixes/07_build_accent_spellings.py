@@ -213,18 +213,9 @@ RESYNTHESIZED_TYPOS = {
     # Source sheet (``02_drugs`` CNAM label), spoken ``polyo-mi-lite``.
     "diphtérie-polyomielite-tétanos": "diphtérie-poliomyélite-tétanos",
     # Spelling winner and owner's hand review.
-    "alfacalcidiol": "alfacalcidol", "laxilix": "Lasilix", "cestradiol": "estradiol"}
-
-# The hold itself: sound-changing typo fixes whose clips still say the typo, kept out of
-# HAND_REWRITES (and the JSON) until ``21_reopen_resynth_typos.py`` has queued those clips
-# and the driver has redrawn them; then they move to a dict like RESYNTHESIZED_TYPOS above.
-# The re-synthesis rewrite is ``label_conventions.normalize_accents(text, RESYNTH_TYPOS)``,
-# which also elides the article (``le cestradiol`` -> ``l'estradiol``). Emptied on
-# 2026-11-19, refilled on 2026-11-20; ``21_reopen_resynth_typos.py`` loads it by name, and
-# ``tests/test_label_variant_audit.py::test_resynth_typos_held_back`` keeps it out of the JSON.
-RESYNTH_TYPOS: dict[str, str] = {
+    "alfacalcidiol": "alfacalcidol", "laxilix": "Lasilix", "cestradiol": "estradiol",
     # Owner's unification of 2026-11-20 (see OWNER_SPELLING_20261120), the sound-changing
-    # or doubtful half, about 180 clips.
+    # or doubtful half: 182 dictionary clips redrawn the same day, census back to 0.
     "bégnine": "bénigne", "bégnines": "bénignes",
     "pléiomorphe": "pléomorphe", "pléiomorphes": "pléomorphes",
     "lipocalicine": "lipocaline", "lipocalycine": "lipocaline",
@@ -233,8 +224,16 @@ RESYNTH_TYPOS: dict[str, str] = {
     "castelman": "Castleman", "jiroveci": "jirovecii",
     "soemmering": "Sömmerring", "soemmerring": "Sömmerring",
     "jadassohn-levandovsky": "Jadassohn-Lewandowsky",
-    "gangraenosum": "gangrenosum",
-}
+    "gangraenosum": "gangrenosum"}
+
+# The hold itself: sound-changing typo fixes whose clips still say the typo, kept out of
+# HAND_REWRITES (and the JSON) until ``21_reopen_resynth_typos.py`` has queued those clips
+# and the driver has redrawn them; then they move to a dict like RESYNTHESIZED_TYPOS above.
+# The re-synthesis rewrite is ``label_conventions.normalize_accents(text, RESYNTH_TYPOS)``,
+# which also elides the article (``le cestradiol`` -> ``l'estradiol``). Emptied on
+# 2026-11-19, refilled then emptied again on 2026-11-20; ``21_reopen_resynth_typos.py`` loads it by name, and
+# ``tests/test_label_variant_audit.py::test_resynth_typos_held_back`` keeps it out of the JSON.
+RESYNTH_TYPOS: dict[str, str] = {}
 
 # Same hold, for fixes that span several words (``RESYNTH_TYPOS`` is looked up word by word),
 # read by ``21_reopen_resynth_typos.py``. Meant for scrambled dictionary terms, e.g. the
@@ -304,7 +303,7 @@ OWNER_SPELLING_20261118 = {
 # Owner's unification of 2026-11-20: dictionary headwords that were misspelled, or spelled
 # differently from the rest of the labels, so one term had two written forms. This is the
 # silent half (double letters, a mute ``h``, ``k``/``c``, ``ß``/``ss``, a hyphen): the
-# audio already says the fixed word. The sound-changing half waits in RESYNTH_TYPOS.
+# audio already says the fixed word. The sound-changing half is in RESYNTHESIZED_TYPOS.
 # ``déferrioxamine`` only occurs in French text; ``peroxisome`` only inside the English
 # ``peroxisome proliferator-activated receptor`` and is left alone.
 # ``méthyle aminolévulinate`` -> ``méthyl`` is two words, so it is a
