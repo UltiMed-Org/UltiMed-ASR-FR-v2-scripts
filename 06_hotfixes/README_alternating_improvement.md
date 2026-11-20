@@ -967,6 +967,17 @@ How to tell it converged:
 
 Afterwards, the label side (`docs/BUILD_LOG.md`, same section, steps 4 and 5): move the `RESYNTH_TYPOS` entries into a dict of the `HAND_REWRITES` union (as was done with `RESYNTHESIZED_TYPOS`) and leave `RESYNTH_TYPOS` empty, empty `RESYNTH_PHRASES` (never merged: no label carries the old phrase once the clips are redrawn), sync the JSON with `uv run 06_hotfixes/07_build_accent_spellings.py` (no TSV argument: it merges `HAND_REWRITES` over the committed table), keep `tests/test_label_variant_audit.py::test_resynth_typos_held_back` as the guard for the next hold, then export from `99_hf_release/` (`uv run 05_normalize_text.py`, `--apply`, `uv run scripts/build_parquet.py`).
 
+### After a silent label fix: align the state `text` (`22_align_state_text.py`)
+
+A label fix that does not change the sound (casing, hyphens, a silent typo) follows the procedure logged in `docs/BUILD_LOG.md` (the 2026-11-18 to 2026-11-20 entries): encode it as a convention in `utils/label_conventions.py` or its tables, dry-run then apply `99_hf_release/05_normalize_text.py --stages` and `05_normalize_text.py`, check backup against live, run `21_reopen_resynth_typos.py --manifests-only` without `--apply` (it must report 0), and finally align the stage-06 state. `01_compute_stt.py` keys a state row on its audio path AND its `text`, so a respelled row loses its stored readings at the next round unless its `text` is copied over first:
+
+```bash
+# from the repo root; dry run, then the same line with --apply (also improved_parrot/ if it was hit)
+uv run 06_hotfixes/22_align_state_text.py 99_hf_release/data/NeMO_files/full.jsonl 06_hotfixes/improved/full.stt.jsonl
+```
+
+It only aligns rows whose `asr_training_source` also matches (a different source means a redraw, not a label fix). Never run `05_normalize_text.py` on the state file itself: it would rewrite `asr_training_source`, the CER reference, in about 13.6k rows.
+
 ## The second opinion: `10_compare_judges.py`
 
 One judge cannot catch its own blind spots. So the phase scores every clip with
