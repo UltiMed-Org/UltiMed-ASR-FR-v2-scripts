@@ -1090,6 +1090,8 @@ _SPELLING_RULES = (
     (re.compile(r"\b([Cc]omptes?)-(rendus?)\b"), r"\1 \2"),
     (re.compile(r"\b([Bb])[êée]ta[- ]?(bloqu(?:ant|eur)\w*)"), r"\1éta\2"),
     (re.compile(r"([Aa])névrysm"), r"\1névrism"),
+    # 2026-11-20, owner: the INN is ``méthyl aminolévulinate`` (silent, 7 clips).
+    (re.compile(r"\b([Mm])éthyle (aminolévulinate)"), r"\1éthyl \2"),
     (re.compile(r"([Uu])réthr"), r"\1rétr"),
     (re.compile(r"([Uu])rèthr"), r"\1rètr"),
     # 2026-10-08, typos the v2 accent audit found (``tète`` is the verb téter, kept).

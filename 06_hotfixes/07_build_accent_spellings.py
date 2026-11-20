@@ -219,10 +219,22 @@ RESYNTHESIZED_TYPOS = {
 # HAND_REWRITES (and the JSON) until ``21_reopen_resynth_typos.py`` has queued those clips
 # and the driver has redrawn them; then they move to a dict like RESYNTHESIZED_TYPOS above.
 # The re-synthesis rewrite is ``label_conventions.normalize_accents(text, RESYNTH_TYPOS)``,
-# which also elides the article (``le cestradiol`` -> ``l'estradiol``). Empty since
-# 2026-11-19; ``21_reopen_resynth_typos.py`` loads it by name, and
+# which also elides the article (``le cestradiol`` -> ``l'estradiol``). Emptied on
+# 2026-11-19, refilled on 2026-11-20; ``21_reopen_resynth_typos.py`` loads it by name, and
 # ``tests/test_label_variant_audit.py::test_resynth_typos_held_back`` keeps it out of the JSON.
-RESYNTH_TYPOS: dict[str, str] = {}
+RESYNTH_TYPOS: dict[str, str] = {
+    # Owner's unification of 2026-11-20 (see OWNER_SPELLING_20261120), the sound-changing
+    # or doubtful half, about 180 clips.
+    "bégnine": "bénigne", "bégnines": "bénignes",
+    "pléiomorphe": "pléomorphe", "pléiomorphes": "pléomorphes",
+    "lipocalicine": "lipocaline", "lipocalycine": "lipocaline",
+    "damètre": "diamètre", "dystropnie": "dystrophie",
+    "déferrioxamine": "desferrioxamine",
+    "castelman": "Castleman", "jiroveci": "jirovecii",
+    "soemmering": "Sömmerring", "soemmerring": "Sömmerring",
+    "jadassohn-levandovsky": "Jadassohn-Lewandowsky",
+    "gangraenosum": "gangrenosum",
+}
 
 # Same hold, for fixes that span several words (``RESYNTH_TYPOS`` is looked up word by word),
 # read by ``21_reopen_resynth_typos.py``. Meant for scrambled dictionary terms, e.g. the
@@ -289,8 +301,30 @@ OWNER_SPELLING_20261118 = {
     "beta-hcg": "bêta-hCG", "béta-hcg": "bêta-hCG", "bêta-hcg": "bêta-hCG",
     "méti-s": "méti-S",
 }
+# Owner's unification of 2026-11-20: dictionary headwords that were misspelled, or spelled
+# differently from the rest of the labels, so one term had two written forms. This is the
+# silent half (double letters, a mute ``h``, ``k``/``c``, ``ß``/``ss``, a hyphen): the
+# audio already says the fixed word. The sound-changing half waits in RESYNTH_TYPOS.
+# ``déferrioxamine`` only occurs in French text; ``peroxisome`` only inside the English
+# ``peroxisome proliferator-activated receptor`` and is left alone.
+# ``méthyle aminolévulinate`` -> ``méthyl`` is two words, so it is a
+# ``label_conventions._SPELLING_RULES`` regex.
+OWNER_SPELLING_20261120 = {
+    "cokett": "Cockett", "abrikossof": "Abrikossoff", "rosenmüler": "Rosenmüller",
+    "grynfelt": "Grynfeltt", "lachapèle": "Lachapelle",
+    "schwartzman": "Shwartzman", "sanarelli-schwartzman": "Sanarelli-Shwartzman",
+    "kußmaul": "Kussmaul", "kußmaul-maier": "Kussmaul-Maier",
+    "thornwaldt": "Tornwaldt",
+    "idradénome": "hidradénome", "hydrocystome": "hidrocystome",
+    "médulaire": "médullaire", "souscutanée": "sous-cutanée",
+    "falsiforme": "falciforme", "correctopie": "corectopie",
+    "callidine": "kallidine",
+    "karyophérine": "caryophérine", "karyophérines": "caryophérines",
+    "cholestyramine": "colestyramine",
+}
 HAND_REWRITES = (SOURCE_SHEET_FIXES | TYPOS | SPELLING_WINNERS | INN_LEFTOVERS
                  | INN_LEFTOVERS_MAJORITY | OWNER_REVIEW | EPONYM_CASING | OWNER_SPELLING_20261118
+                 | OWNER_SPELLING_20261120
                  | RESYNTHESIZED_TYPOS)
 
 

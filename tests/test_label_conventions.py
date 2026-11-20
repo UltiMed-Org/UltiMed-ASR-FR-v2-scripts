@@ -551,6 +551,32 @@ def test_owner_spellings_20261118() -> None:
     print("test_owner_spellings_20261118: OK")
 
 
+def test_owner_spellings_20261120() -> None:
+    """Owner's unification (2026-11-20), the silent half: misspelled dictionary headwords
+    get the spelling the rest of the labels use. The sound-changing half (``bégnine``,
+    ``Castelman``, ``lipocalicine``...) is held in ``RESYNTH_TYPOS`` and must NOT move here
+    until its clips are redrawn; English ``peroxisome`` is left alone."""
+    for text, want in [
+        ("Respiration de Kußmaul, maladie de Kußmaul-Maier.", "Respiration de Kussmaul, maladie de Kussmaul-Maier."),
+        ("Réaction de Sanarelli-Schwartzman, de Schwartzman.", "Réaction de Sanarelli-Shwartzman, de Shwartzman."),
+        ("Cholestyramine, la cholestyramine.", "Colestyramine, la colestyramine."),
+        ("Un cas d'idradénome, l'idradénome.", "Un cas d'hidradénome, l'hidradénome."),
+        ("Mammectomie souscutanée, artère médulaire, crête falsiforme.",
+         "Mammectomie sous-cutanée, artère médullaire, crête falciforme."),
+        ("Veines de Cokett, tumeur d'Abrikossof, fossette de Rosenmüler, triangle de Grynfelt.",
+         "Veines de Cockett, tumeur d'Abrikossoff, fossette de Rosenmüller, triangle de Grynfeltt."),
+        ("Image de Lachapèle, bourse de Thornwaldt, la callidine, une karyophérine.",
+         "Image de Lachapelle, bourse de Tornwaldt, la kallidine, une caryophérine."),
+        ("Avec méthyle aminolévulinate. Méthyle aminolévulinate.", "Avec méthyl aminolévulinate. Méthyl aminolévulinate."),
+        ("Une lésion bégnine, un peroxisome proliferator-activated receptor, maladie de Castelman.",
+         "Une lésion bégnine, un peroxisome proliferator-activated receptor, maladie de Castelman."),
+    ]:
+        got = apply_label_conventions(text)
+        assert got == want, (text, got)
+        assert apply_label_conventions(got) == got, got
+    print("test_owner_spellings_20261120: OK")
+
+
 def test_hem_o_lok_every_spelling() -> None:
     """Owner's decision (2026-11-18, second pass): the clip brand is exactly ``Hem-o-lok``
     whatever the label wrote, the plural keeps its ``s``, whole words only. Label only."""
