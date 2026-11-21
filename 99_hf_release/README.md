@@ -90,17 +90,22 @@ configs:
 
 # UltiMed-ASR-FR-v2
 
+> [!WARNING]
+> **Release in progress.** UltiMed v2 is being released right now. As long as this notice is here, files, links and numbers on this page are still being changed.
+
 > [!IMPORTANT]
 > **Want faster improvements?** This project is entirely self-funded on my minimum-wage salary, and every training run competes for a single consumer GPU. If you or your organisation can donate an **RTX 5090**, or the money to buy one second-hand, it would directly speed up the next versions of the dataset and the fine-tuned models. Reach out via [olicorne.org](https://olicorne.org) or open a discussion on this page.
 
-> [!TIP]
-> **A v3 is planned (wider drug coverage, medical English kept alongside French, real-speech data), stay tuned.** See [Known limitations](#known-limitations) for what it is meant to fix.
+> [!WARNING]
+> **v3 is already planned, and it will be multilingual.** v1 and v2 are French only. It should also widen drug coverage and add real-speech data; see [Known limitations](#known-limitations) for what it is meant to fix.
 
 > [!NOTE]
 > **The UltiMed effort has three parts:**
 > - the **dataset** (this repository): [Olicorne/UltiMed-ASR-FR-v2](https://huggingface.co/datasets/Olicorne/UltiMed-ASR-FR-v2): 3,300+ hours of French medical dictation, to train or evaluate ASR models;
 > - the **finetuned model**: [Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-v2-onnx](https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-v2-onnx): parakeet-ultra finetuned on that dataset;
 > - the **regex fixes**: [UltiMed-ASR-FR-v2-regex-fixes](https://github.com/UltiMed-Org/UltiMed-ASR-FR-v2-regex-fixes): drug-name and medical-term fix rules that should catch many of the remaining errors at almost no cost (text substitution after decoding), and also help models that were not finetuned.
+>
+> Every UltiMed repository, dataset and model is listed on [UltiMed-Org](https://github.com/UltiMed-Org).
 
 *A large, fully documented French medical speech dataset for evaluating or training models, plus an open recipe to rebuild it in any language or topic.*
 
