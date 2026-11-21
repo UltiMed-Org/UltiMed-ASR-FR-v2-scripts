@@ -115,7 +115,7 @@ quota until `--squash-history` collapses the history.
 preview approach was retired (`build_tarred.py` / `build_preview_parquet.py`
 deleted). The dataset is published (NOTICE + card shipped) at
 `Olicorne/UltiMed-ASR-FR-v1`, and the pipeline scripts at
-`github.com/thiswillbeyourgithub/UltiMed-ASR-FR-v1-scripts`. v2 re-synthesizes the
+`github.com/UltiMed-Org/UltiMed-ASR-FR-v1-scripts`. v2 re-synthesizes the
 same corpus with nine voices and is being built HERE, in this repo, on top of the
 same text corpus and stages; only the audio and the `voice` column differ. **v2
 goes into the existing Hub repo rather than a new one**: the author first renames

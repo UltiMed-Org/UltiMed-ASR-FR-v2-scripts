@@ -1,5 +1,5 @@
 The UltiMed regex fixes live in their own repository:
-https://github.com/thiswillbeyourgithub/UltiMed-ASR-FR-v2-regex-fixes
+https://github.com/UltiMed-Org/UltiMed-ASR-FR-v2-regex-fixes
 
 They are lists of rules (drug names, medical terms, hand-written fixes) that rewrite the
 misspellings a parakeet model still makes on French medical vocabulary, for example

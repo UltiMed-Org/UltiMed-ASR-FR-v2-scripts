@@ -13,7 +13,7 @@ hosts these TTS services. You do not need it. Point the client at any server tha
 answers on `:8003`.
 
 The `voxtral-tts` container that ended up speaking the dataset is published at
-[UltiMed-ASR-FR-v1-Voxtral](https://github.com/thiswillbeyourgithub/UltiMed-ASR-FR-v1-Voxtral).
+[UltiMed-ASR-FR-v1-Voxtral](https://github.com/UltiMed-Org/UltiMed-ASR-FR-v1-Voxtral).
 
 ## `01_generate_audio.py`
 

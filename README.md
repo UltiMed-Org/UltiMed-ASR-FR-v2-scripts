@@ -1,4 +1,9 @@
-# UltiMed-ASR-FR-v1-scripts
+# UltiMed-ASR-FR-v2-scripts
+
+> [!WARNING]
+> **Release in progress.** UltiMed v2 is being released right now. As long as this notice is here, files, links and numbers in this repository are still being changed.
+
+Part of [UltiMed-Org](https://github.com/UltiMed-Org), which lists every UltiMed repository, dataset and model.
 
 > [!IMPORTANT]
 > **Want faster improvements?** This project is entirely self-funded on my minimum-wage salary, and every training run competes for a single consumer GPU. If you or your organisation can donate an **RTX 5090**, or the money to buy one second-hand, it would directly speed up the next versions of the dataset and the fine-tuned models. Reach out via [olicorne.org](https://olicorne.org) or open an issue on this repository.
@@ -59,8 +64,8 @@ This repository is one piece of a French medical ASR stack; every other piece is
 | [Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-onnx](https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-onnx) | The fine-tuned model: `parakeet-tdt-0.6b-v3` trained on the dataset above, exported to ONNX. |
 | [Olicorne/parakeet-tdt-0.6b-v3-optimized-onnx](https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-optimized-onnx) | The multilingual baseline the fine-tune builds on: the upstream ONNX re-quantized for int8 accuracy on long audio and graph-optimized for browser speed. The fine-tune builds on it. |
 | **This repository** | The scripts that produced the dataset, stages 1 to 4 of the plan below. |
-| [UltiMed-ASR-FR-v1-NeMo_training_scripts](https://github.com/thiswillbeyourgithub/UltiMed-ASR-FR-v1-NeMo_training_scripts) | The NeMo fork and training scripts used for the fine-tune itself: step 5 of the plan below. |
-| [UltiMed-ASR-FR-v1-Voxtral](https://github.com/thiswillbeyourgithub/UltiMed-ASR-FR-v1-Voxtral) | The Voxtral TTS container that spoke every clip: Dockerfile, tuning, and the vllm-omni patches. |
+| [UltiMed-ASR-FR-v2-NeMo_training_scripts](https://github.com/UltiMed-Org/UltiMed-ASR-FR-v2-NeMo_training_scripts) | The NeMo fork and training scripts used for the fine-tune itself: step 5 of the plan below. |
+| [UltiMed-ASR-FR-v1-Voxtral](https://github.com/UltiMed-Org/UltiMed-ASR-FR-v1-Voxtral) | The Voxtral TTS container that spoke every clip: Dockerfile, tuning, and the vllm-omni patches. |
 | [Parakeet Web](https://github.com/thiswillbeyourgithub/parakeet_web) | The in-browser ASR app that loads either ONNX model, live at [parakeetweb.olicorne.org](https://parakeetweb.olicorne.org/). Not part of this pipeline, but it is where the models end up. |
 
 The plan, end to end:
@@ -69,7 +74,7 @@ The plan, end to end:
 2. Use LLM calls to turn those terms and documents into short, natural, dictation-style sentences (the written ASR transcript).
 3. Speak those sentences with a local TTS model to produce audio.
 4. Package and publish the resulting audio dataset.
-5. Fine-tune the ASR model on it. **This step is not in this repo**: it happens in a separate [NeMo](https://github.com/NVIDIA/NeMo) checkout with a standard NeMo training config, published as [UltiMed-ASR-FR-v1-NeMo_training_scripts](https://github.com/thiswillbeyourgithub/UltiMed-ASR-FR-v1-NeMo_training_scripts).
+5. Fine-tune the ASR model on it. **This step is not in this repo**: it happens in a separate [NeMo](https://github.com/NVIDIA/NeMo) checkout with a standard NeMo training config, published as [UltiMed-ASR-FR-v2-NeMo_training_scripts](https://github.com/UltiMed-Org/UltiMed-ASR-FR-v2-NeMo_training_scripts).
 6. Release the fine-tuned model.
 
 ## The core idea
@@ -183,7 +188,7 @@ The drug data in [`02_drugs/`](02_drugs/) **is** included, because it is French 
 
 - **All generated corpora and audio.** Hundreds of gigabytes, and derived from sources with licences this repository does not carry.
 - **`99_hf_release/scripts/upload_to_hf.py`.** Kept out of version control on purpose: it resolves paths through a local symlink to an external drive. The `.gitignore` entry explains how to bring it back.
-- **The fine-tuning config.** Training happens in a separate NeMo checkout, [UltiMed-ASR-FR-v1-NeMo_training_scripts](https://github.com/thiswillbeyourgithub/UltiMed-ASR-FR-v1-NeMo_training_scripts). `99_hf_release/scripts/parquet_to_nemo.py` rebuilds the NeMo training layout from the published Parquet, in either loose-manifest or tarred form, and that is the handoff point.
+- **The fine-tuning config.** Training happens in a separate NeMo checkout, [UltiMed-ASR-FR-v2-NeMo_training_scripts](https://github.com/UltiMed-Org/UltiMed-ASR-FR-v2-NeMo_training_scripts). `99_hf_release/scripts/parquet_to_nemo.py` rebuilds the NeMo training layout from the published Parquet, in either loose-manifest or tarred form, and that is the handoff point.
 - **Sample rows.** There is no `samples/` folder, because real rows would mean redistributing NonCommercial and ShareAlike source text under this repository's licence. Field names and semantics are documented in `CLAUDE.md` and in each script's docstring instead.
 
 ## Running the scripts
@@ -237,7 +242,7 @@ If you are adapting this pipeline, the transferable lesson is that word-acronyms
 
 The public drug database pads decimal parts inconsistently, so a single strength arrived spelled several ways for one form: `500 mg`, `500,0 mg` and `500,00 mg`. Those went into the LLM's presentation hint unchanged, where they read as three distinct doses of the same drug. Worse, 88 presentations carried a padded value with **no** clean twin at all, so `BENZYLTHIOURACILE` shipped `25,00 mg` and nothing else and was read aloud as "vingt-cinq virgule zéro zéro milligrammes".
 
-**Fixed** in [`90a6ed6`](https://github.com/thiswillbeyourgithub/UltiMed-ASR-FR-v1-scripts/commit/90a6ed612ac7ab33f82ad881f1ae3403f8004db8), *"canonicalize and de-duplicate BDPM dosage strings"*, which canonicalizes the padding away and then de-duplicates whatever becomes equal, in `02_drugs/sources/base_de_donnee_medicament/create_drug_db.py`. On the real 410-substance input that takes 1075 dosage entries down to 952 across 113 substances, with zero padded values left and no distinct dose lost. Covered by `tests/test_drug_dosage_dedup.py`.
+**Fixed** in [`90a6ed6`](https://github.com/UltiMed-Org/UltiMed-ASR-FR-v2-scripts/commit/90a6ed612ac7ab33f82ad881f1ae3403f8004db8), *"canonicalize and de-duplicate BDPM dosage strings"*, which canonicalizes the padding away and then de-duplicates whatever becomes equal, in `02_drugs/sources/base_de_donnee_medicament/create_drug_db.py`. On the real 410-substance input that takes 1075 dosage entries down to 952 across 113 substances, with zero padded values left and no distinct dose lost. Covered by `tests/test_drug_dosage_dedup.py`.
 
 The committed `02_drugs/*.jsonl` files are **deliberately not regenerated**: they are the exact inputs that built v1, and re-running them through the fixed script would desync this repository from the published dataset. The fix lands on the next build.
 
@@ -278,4 +283,4 @@ Built by Olivier Cornelis. The code, the prompts and the documentation in this r
 
 Thanks to [Zagitta/gpu-unlock](https://github.com/Zagitta/gpu-unlock), which substantially improved my GPU performance.
 
-Repository: <https://github.com/thiswillbeyourgithub/UltiMed-ASR-FR-v1-scripts>
+Repository: <https://github.com/UltiMed-Org/UltiMed-ASR-FR-v2-scripts>
