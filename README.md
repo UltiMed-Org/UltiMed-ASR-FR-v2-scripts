@@ -19,7 +19,7 @@ Part of [UltiMed-Org](https://github.com/UltiMed-Org), which lists every UltiMed
 > an LLM at the repository and have it check every claim against the actual files, which is also
 > how it was written. If you find something wrong, an issue is welcome.
 
-The build scripts behind **[UltiMed-ASR-FR-v1](https://huggingface.co/datasets/Olicorne/UltiMed-ASR-FR-v1)**, a 3,104-hour French medical speech-recognition dataset, and the fine-tuned ASR model trained on it.
+The build scripts behind **[UltiMed-ASR-FR-v2](https://huggingface.co/datasets/Olicorne/UltiMed-ASR-FR-v2)**, a 3,300-hour French medical speech-recognition dataset, and the fine-tuned ASR model trained on it.
 
 This repository is the **recipe, not the product**. It documents how a single person turned public text sources into a 600k-clip domain-specific ASR corpus on one consumer GPU, so that the same approach can be re-pointed at another specialty, another language, or another ASR model.
 
@@ -28,7 +28,6 @@ This repository is the **recipe, not the product**. It documents how a single pe
 ## Contents
 
 - [Disclaimer and scope](#disclaimer-and-scope)
-- [Related repositories](#related-repositories)
 - [The core idea](#the-core-idea)
 - [The pipeline](#the-pipeline)
 - [Architecture: one engine, five sources](#architecture-one-engine-five-sources)
@@ -53,29 +52,6 @@ This repository is the **recipe, not the product**. It documents how a single pe
 **No endorsement.** None of the organizations credited in [Third-party attribution](#third-party-attribution) endorse this code, the derived dataset, or any model trained on it. This is an explicit requirement of the Etalab 2.0 licence covering some of the sources.
 
 **No warranty.** This software is provided on an "AS IS" basis, without warranties or conditions of any kind, express or implied. See sections 7 and 8 of the [LICENSE](LICENSE).
-
-## Related repositories
-
-This repository is one piece of a French medical ASR stack; every other piece is public.
-
-| Repository | What it is |
-| --- | --- |
-| [Olicorne/UltiMed-ASR-FR-v1](https://huggingface.co/datasets/Olicorne/UltiMed-ASR-FR-v1) | The dataset. 601,264 clips / 3,104 h main corpus, plus a separate eval-only PARROT subset. Sharded Parquet with FLAC bytes embedded. Its card, NOTICE and scripts are the ones in [`99_hf_release/`](99_hf_release/). |
-| [Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-v2-onnx](https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-v2-onnx) | The fine-tuned model: `parakeet-tdt-0.6b-v3` trained on the dataset above, exported to ONNX. |
-| [Olicorne/parakeet-tdt-0.6b-v3-optimized-onnx](https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-optimized-onnx) | The multilingual baseline the fine-tune builds on: the upstream ONNX re-quantized for int8 accuracy on long audio and graph-optimized for browser speed. The fine-tune builds on it. |
-| **This repository** | The scripts that produced the dataset, stages 1 to 4 of the plan below. |
-| [UltiMed-ASR-FR-v2-NeMo_training_scripts](https://github.com/UltiMed-Org/UltiMed-ASR-FR-v2-NeMo_training_scripts) | The NeMo fork and training scripts used for the fine-tune itself: step 5 of the plan below. |
-| [UltiMed-ASR-FR-v1-Voxtral](https://github.com/UltiMed-Org/UltiMed-ASR-FR-v1-Voxtral) | The Voxtral TTS container that spoke every clip: Dockerfile, tuning, and the vllm-omni patches. |
-| [Parakeet Web](https://github.com/thiswillbeyourgithub/parakeet_web) | The in-browser ASR app that loads either ONNX model, live at [parakeetweb.olicorne.org](https://parakeetweb.olicorne.org/). Not part of this pipeline, but it is where the models end up. |
-
-The plan, end to end:
-
-1. Take text sources rich in domain vocabulary.
-2. Use LLM calls to turn those terms and documents into short, natural, dictation-style sentences (the written ASR transcript).
-3. Speak those sentences with a local TTS model to produce audio.
-4. Package and publish the resulting audio dataset.
-5. Fine-tune the ASR model on it. **This step is not in this repo**: it happens in a separate [NeMo](https://github.com/NVIDIA/NeMo) checkout with a standard NeMo training config, published as [UltiMed-ASR-FR-v2-NeMo_training_scripts](https://github.com/UltiMed-Org/UltiMed-ASR-FR-v2-NeMo_training_scripts).
-6. Release the fine-tuned model.
 
 ## The core idea
 
@@ -106,7 +82,7 @@ Top-level numbered folders are ordered pipeline stages. Files numbered inside a 
 
 Everything on [Olicorne/UltiMed-ASR-FR-v2](https://huggingface.co/datasets/Olicorne/UltiMed-ASR-FR-v2) that is not audio is written and kept here, then pushed by `scripts/upload_to_hf.py`. The dataset card is edited in this repository, not in the Hub's web editor.
 
-**How v2 gets published (user's call, 2026-11-16):** not as a new Hub repo. The existing `Olicorne/UltiMed-ASR-FR-v1` dataset repo is **renamed** to `Olicorne/UltiMed-ASR-FR-v2`, and the v2 upload then goes into it. The rename is a manual step the author does in the Hub's settings page, **before** the upload: `upload_to_hf.py` already targets the `-v2` id and does not rename anything. Afterwards the v1 files (card and audio) exist only in that repo's git history on the Hub, and the old `-v1` URL redirects to the renamed repo. This supersedes the 2026-10-13 plan of pushing over the `-v1` id and renaming later.
+**How v2 gets published (user's call, 2026-11-21):** as a new Hub repo, `Olicorne/UltiMed-ASR-FR-v2`, which `upload_to_hf.py` targets. The v1 dataset stays untouched at `Olicorne/UltiMed-ASR-FR-v1`, and the v1 model was renamed to `Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-v1-onnx` so the v2 one can live at `-v2-onnx`. This supersedes the 2026-11-16 plan of renaming the v1 dataset repo to `-v2`.
 
 | Local file | Where it lands on the Hub |
 |---|---|

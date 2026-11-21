@@ -117,11 +117,9 @@ deleted). The dataset is published (NOTICE + card shipped) at
 `Olicorne/UltiMed-ASR-FR-v1`, and the pipeline scripts at
 `github.com/UltiMed-Org/UltiMed-ASR-FR-v1-scripts`. v2 re-synthesizes the
 same corpus with nine voices and is being built HERE, in this repo, on top of the
-same text corpus and stages; only the audio and the `voice` column differ. **v2
-goes into the existing Hub repo rather than a new one**: the author first renames
-`Olicorne/UltiMed-ASR-FR-v1` to `-v2` by hand on the Hub, then uploads, so v1
-survives only in that repo's git history (user's call, 2026-11-16, replacing the
-2026-10-13 "push over -v1, rename later"; see the `99_hf_release/` section of
+same text corpus and stages; only the audio and the `voice` column differ. **v2 goes into a new
+Hub repo**, `Olicorne/UltiMed-ASR-FR-v2`; v1 stays at `-v1` (user's call, 2026-11-21,
+replacing the 2026-11-16 rename plan; see the `99_hf_release/` section of
 `README.md`). So treat the
 published v1 audio as replaceable, not frozen: what must not drift is the card,
 which has to be updated in the same operation as the upload (see the v2 TODO
