@@ -99,7 +99,7 @@ configs:
 > [!NOTE]
 > **The UltiMed effort has three parts:**
 > - the **dataset** (this repository): [Olicorne/UltiMed-ASR-FR-v2](https://huggingface.co/datasets/Olicorne/UltiMed-ASR-FR-v2): 3,300+ hours of French medical dictation, to train or evaluate ASR models;
-> - the **finetuned model**: [Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-onnx](https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-onnx): parakeet-ultra finetuned on that dataset;
+> - the **finetuned model**: [Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-v2-onnx](https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-v2-onnx): parakeet-ultra finetuned on that dataset;
 > - the **regex fixes**: [UltiMed-ASR-FR-v2-regex-fixes](https://github.com/UltiMed-Org/UltiMed-ASR-FR-v2-regex-fixes): drug-name and medical-term fix rules that should catch many of the remaining errors at almost no cost (text substitution after decoding), and also help models that were not finetuned.
 
 *A large, fully documented French medical speech dataset for evaluating or training models, plus an open recipe to rebuild it in any language or topic.*
@@ -175,14 +175,14 @@ As a resident psychiatrist and developer, I think medicine vastly underuses larg
 
 It is also a **general recipe**: a Github repository contains all the useful code needed to easily replicate this on new domain or languages: [github repo](https://github.com/UltiMed-Org/UltiMed-ASR-FR-v2-scripts).
 
-A finetuned release of [nvidia/parakeet-tdt-0.6b-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) for French medical ASR is available: [Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-onnx](https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-onnx)
+A finetuned release of [nvidia/parakeet-tdt-0.6b-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) for French medical ASR is available: [Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-v2-onnx](https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-v2-onnx)
 
 ## Who made UltiMed
 
 Made entirely by **Olivier Cornelis** ([olicorne.org](https://olicorne.org), Hugging Face [@Olicorne](https://huggingface.co/Olicorne)), French resident psychiatrist and developer. Fully self-funded, no conflicts of interest to declare.
 
 - Version: **v2** (v1.3's splits, further label normalization, every clip re-synthesized with five French voices). The single-voice v1 audio is not part of it; the [Changelog](#changelog) lists what changed since v1.3.
-- Fine-tuned model: [Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-onnx](https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-onnx) (a [nvidia/parakeet-tdt-0.6b-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) fine-tune, released separately, trained with NeMo)
+- Fine-tuned model: [Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-v2-onnx](https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-ultra-UltiMed-v2-onnx) (a [nvidia/parakeet-tdt-0.6b-v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) fine-tune, released separately, trained with NeMo)
 - Multilingual baseline it was fine-tuned from: [Olicorne/parakeet-tdt-0.6b-v3-optimized-onnx](https://huggingface.co/Olicorne/parakeet-tdt-0.6b-v3-optimized-onnx) (the upstream ONNX rebuilt for int8 accuracy and browser speed; use it when you do not need French medical vocabulary)
 - In-browser app that runs either model: [Parakeet Web](https://github.com/thiswillbeyourgithub/parakeet_web)
 - Reproduction scripts: [github repo](https://github.com/UltiMed-Org/UltiMed-ASR-FR-v2-scripts) (the full pipeline, released to make it easier to adapt to another domain or language)
