@@ -366,7 +366,7 @@ The measurement landed partway through the v2 run, so the shipped `cfg_alpha` co
 <details>
 <summary><b>Expand</b>: the GPU, its power cap, and the room it all ran in.</summary>
 
-v1 (~3,115 hours of single-voice audio) was generated on **a single NVIDIA RTX 3090 Ti, power-capped to 100-200 W with its memory downclocked by 100 MHz**, running in a **Parisian apartment with no air conditioning during the 2026 French heatwave**. v2's audio, all ~3,359 hours of it, was generated on **the same single NVIDIA RTX 3090 Ti**. v2 power cap: TODO. Total v2 generation time: TODO.
+v1 (~3,115 hours of single-voice audio) was generated on **a single NVIDIA RTX 3090 Ti, power-capped to 100-200 W with its memory downclocked by 100 MHz**, running in a **Parisian apartment with no air conditioning during the 2026 French heatwave**. v2's audio, all ~3,359 hours of it, was generated on **the same single NVIDIA RTX 3090 Ti**. v2 power cap: 350 W. Total v2 generation time: TODO.
 
 </details>
 
