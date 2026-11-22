@@ -1174,7 +1174,10 @@ _SPELLING_RULES = (
     # ``asr_training_source``, which the caser recases with ``tts_source=True``. The
     # caser runs after these rules and leaves their output alone (no ALLCAPS part longer
     # than one letter, no ``variants`` key), so a second pass changes nothing.
-    (re.compile(r"(?<![\w-])(?i:diffu-?k)(?![\w-])"), "Diffu-K"),
+    # 2026-11-22, owner: the spaced ``Diffu K`` / ``diffu K`` too (129 v2 labels, every one
+    # the brand, followed by a dose or a verb); the lone ``K`` after ``diffu`` is never
+    # anything else in the corpus.
+    (re.compile(r"(?<![\w-])(?i:diffu[- ]?k)(?![\w-])"), "Diffu-K"),
     (re.compile(r"(?<![\w-])(?i:gonal-f)(?![\w-])"), "Gonal-F"),
     (re.compile(r"(?<![\w-])(?i:di-hydan)(?![\w-])"), "Di-Hydan"),
     (re.compile(r"(?<![\w-])(?i:co-r[eé]nitec)(?![\w-])"), "Co-Renitec"),

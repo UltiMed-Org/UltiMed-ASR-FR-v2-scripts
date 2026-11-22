@@ -637,6 +637,7 @@ def test_owner_brands_and_casing_20261120() -> None:
         ("Diffuk, DiffuK, diffu-K, diffU-K, diffuk, diffuK et DIFFUK.",
          "Diffu-K, Diffu-K, Diffu-K, Diffu-K, Diffu-K, Diffu-K et Diffu-K."),
         ("Diffu-K 600 mg. DIFFU-K le soir.", "Diffu-K 600 mg. Diffu-K le soir."),
+        ("Diffu K 600 mg, diffu K et Diffu K.", "Diffu-K 600 mg, Diffu-K et Diffu-K."),
         ("Injection de gonal-F, de Gonal-f et de GONAL-F.",
          "Injection de Gonal-F, de Gonal-F et de Gonal-F."),
         ("Sous DI-Hydan et DI-HYDAN, puis CO-Renitec, CO-RENITEC et Co-Rénitec.",
@@ -659,6 +660,7 @@ def test_owner_brands_and_casing_20261120() -> None:
         assert got == want, (text, got)
         assert apply_label_conventions(got) == got, got
     assert apply_label_conventions("Un diffuk.", tts_source=True) == "Un diffuk."
+    assert apply_label_conventions("Un Diffu K.", tts_source=True) == "Un Diffu K."
     print("test_owner_brands_and_casing_20261120: OK")
 
 
