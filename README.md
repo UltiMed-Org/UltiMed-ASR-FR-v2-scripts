@@ -1,8 +1,5 @@
 # UltiMed-ASR-FR-v2-scripts
 
-> [!WARNING]
-> **Release in progress.** UltiMed v2 is being released right now. As long as this notice is here, files, links and numbers in this repository are still being changed.
-
 Part of [UltiMed-Org](https://github.com/UltiMed-Org), which lists every UltiMed repository, dataset and model.
 
 > [!IMPORTANT]

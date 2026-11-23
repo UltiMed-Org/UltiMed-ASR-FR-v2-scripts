@@ -90,14 +90,8 @@ configs:
 
 # UltiMed-ASR-FR-v2
 
-> [!WARNING]
-> **Release in progress.** UltiMed v2 is being released right now. As long as this notice is here, files, links and numbers on this page are still being changed.
-
 > [!IMPORTANT]
 > **Want faster improvements?** This project is entirely self-funded on my minimum-wage salary, and every training run competes for a single consumer GPU. If you or your organisation can donate an **RTX 5090**, or the money to buy one second-hand, it would directly speed up the next versions of the dataset and the fine-tuned models. Reach out via [olicorne.org](https://olicorne.org) or open a discussion on this page.
-
-> [!WARNING]
-> **v3 is already planned, and it will be multilingual.** v1 and v2 are French only. It should also widen drug coverage and add real-speech data; see [Known limitations](#known-limitations) for what it is meant to fix.
 
 > [!NOTE]
 > **The UltiMed effort has three parts:**
